@@ -43,6 +43,7 @@
 
           pre-commit.settings = {
             hooks = {
+              actionlint.enable = true;
               deadnix.enable = true;
               statix.enable = true;
             };
@@ -52,6 +53,7 @@
             projectRootFile = "flake.nix";
             programs = {
               nixfmt.enable = true;
+              yamlfmt.enable = true;
             };
           };
         };
