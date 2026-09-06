@@ -83,6 +83,7 @@
               [
                 rustToolchain
                 sccache
+                skills
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 mold
