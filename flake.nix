@@ -9,6 +9,9 @@
     git-hooks.inputs.nixpkgs.follows = "nixpkgs";
     treefmt-nix.url = "https://flakehub.com/f/numtide/treefmt-nix/0";
     treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
+    rust-overlay.url = "https://flakehub.com/f/oxalica/rust-overlay/0";
+    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
+    crane.url = "https://flakehub.com/f/ipetkov/crane/0";
   };
 
   outputs =
@@ -17,6 +20,8 @@
       flake-parts,
       git-hooks,
       treefmt-nix,
+      rust-overlay,
+      crane,
       ...
     }@inputs:
     flake-parts.lib.mkFlake { inherit inputs; } {
@@ -32,13 +37,55 @@
           system,
           ...
         }:
+        let
+          rustToolchain = pkgs.rust-bin.stable.latest.default;
+          src = pkgs.lib.cleanSourceWith { src = ./.; };
+          craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+          commonArgs = {
+            inherit src;
+            strictDeps = true;
+          };
+          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        in
         {
           _module.args.pkgs = import nixpkgs {
             inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+
+          checks = {
+            clippy = craneLib.cargoClippy (
+              commonArgs
+              // {
+                inherit
+                  src
+                  cargoArtifacts
+                  ;
+                cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
+              }
+            );
+            test = craneLib.cargoTest (
+              commonArgs
+              // {
+                inherit
+                  src
+                  cargoArtifacts
+                  ;
+              }
+            );
           };
 
           devShells.default = pkgs.mkShellNoCC {
             inputsFrom = [ config.pre-commit.devShell ];
+
+            packages = with pkgs; [
+              rustToolchain
+              sccache
+            ];
+
+            shellHook = ''
+              export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
+            '';
           };
 
           pre-commit.settings = {
@@ -53,6 +100,9 @@
             projectRootFile = "flake.nix";
             programs = {
               nixfmt.enable = true;
+              rustfmt.enable = true;
+              rustfmt.package = rustToolchain;
+              taplo.enable = true;
               yamlfmt.enable = true;
             };
           };
