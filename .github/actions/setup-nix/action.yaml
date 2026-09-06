@@ -1,0 +1,7 @@
+name: setup nix
+description: Install Nix and restore the shared Nix store cache
+runs:
+  using: composite
+  steps:
+    - uses: DeterminateSystems/nix-installer-action@main
+    - uses: DeterminateSystems/magic-nix-cache-action@main
