@@ -1,0 +1,16 @@
+name: nix
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  DeterminateCI:
+    uses: DeterminateSystems/ci/.github/workflows/workflow.yml@5c2c382da2a49fcbfb275c0e0801d9b8aed70cd6 # main
+    permissions:
+      id-token: write
+      contents: read
