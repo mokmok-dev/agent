@@ -1,0 +1,11 @@
+[package]
+edition.workspace = true
+name = "agentd"
+version.workspace = true
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
