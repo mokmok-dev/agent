@@ -1,5 +1,11 @@
+mod server;
+
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use thiserror::Error;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -13,33 +19,43 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Echo { message: String },
-    Fail,
+    Serve {
+        #[arg(long, default_value = "/tmp/mokmokd.sock")]
+        socket: PathBuf,
+    },
 }
 
 #[derive(Debug, Error)]
 enum RunError {
-    #[error("always fail")]
-    Fail,
+    #[error("failed to serve: {0}")]
+    Serve(server::ServerError),
 }
 
-fn run() -> Result<(), RunError> {
+async fn run() -> Result<(), RunError> {
     let args = Args::parse();
 
     match args.command {
-        Command::Echo { message } => {
-            println!("{message}");
+        Command::Serve { socket } => {
+            let () = server::run(socket).await.map_err(RunError::Serve)?;
             Ok(())
         },
-        Command::Fail => Err(RunError::Fail),
     }
 }
 
-fn main() -> std::process::ExitCode {
-    match run() {
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("mokmokd=info,tower_http=debug"));
+    let json_layer = tracing_subscriber::fmt::layer().json();
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(json_layer)
+        .init();
+
+    match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("{e}");
+            tracing::error!("{e}");
             std::process::ExitCode::FAILURE
         },
     }
