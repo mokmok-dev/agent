@@ -10,9 +10,15 @@
 //!
 //! See `docs/sandbox.md` for the design and its stated gaps.
 
+mod error;
 mod policy;
+mod vfs;
+mod vpath;
 
+pub use error::SandboxError;
 pub use policy::{
     CommandPrefix, EnvAllowlist, EnvVar, FsPolicy, Limits, Mount, MountSource, NetworkPolicy,
     Pattern, Policy, ShellPolicy,
 };
+pub use vfs::{DirEntry, Metadata, MountedVfs, Vfs};
+pub use vpath::VPath;

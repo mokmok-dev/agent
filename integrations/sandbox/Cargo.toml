@@ -4,10 +4,13 @@ name = "agentd-integration-sandbox"
 version.workspace = true
 
 [dependencies]
+globset = "0.4.18"
 serde = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+tempfile = "3.27.0"
 
 [lints]
 workspace = true
