@@ -1,4 +1,4 @@
-use crate::events::{Event, EventBus, SPEC_VERSION};
+use agentd_events::{Event, EventBus, SPEC_VERSION};
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -177,7 +177,7 @@ async fn send_event(
 #[cfg(test)]
 mod tests {
     use super::{ServerError, router, run};
-    use crate::events::{Event, EventBus};
+    use agentd_events::{Event, EventBus};
     use futures_util::SinkExt;
     use futures_util::StreamExt;
     use serde_json::json;

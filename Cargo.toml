@@ -1,8 +1,9 @@
 [workspace]
-members = ["agentd"]
+members = ["agentd", "agentd-events"]
 resolver = "3"
 
 [workspace.dependencies]
+agentd-events = { path = "agentd-events" }
 axum = { version = "0.8.9" }
 clap = { version = "4.6.6" }
 futures-util = { version = "0.3.34", features = ["sink"] }

@@ -6,20 +6,30 @@ version = 4
 name = "agentd"
 version = "0.0.0"
 dependencies = [
+ "agentd-events",
  "axum",
  "clap",
  "futures-util",
  "rusqlite",
- "serde",
  "serde_json",
  "tempfile",
  "thiserror",
- "time",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "agentd-events"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

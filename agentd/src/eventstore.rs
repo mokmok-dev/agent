@@ -9,7 +9,7 @@
 //! and a failing SQLite backend stops persistence while the daemon keeps
 //! running.
 
-use crate::events::{Event, EventBus};
+use agentd_events::{Event, EventBus};
 use rusqlite::Connection;
 use serde_json::json;
 use std::path::Path;
@@ -241,7 +241,7 @@ async fn forward(
 #[cfg(test)]
 mod tests {
     use super::{LAGGED_KIND, StoreError, open};
-    use crate::events::{Event, EventBus};
+    use agentd_events::{Event, EventBus};
     use rusqlite::Connection;
     use serde_json::json;
     use std::path::{Path, PathBuf};

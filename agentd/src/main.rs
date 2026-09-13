@@ -1,7 +1,7 @@
-mod events;
 mod eventstore;
 mod server;
 
+use agentd_events::EventBus;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use thiserror::Error;
@@ -42,7 +42,7 @@ async fn run() -> Result<(), RunError> {
 
     match args.command {
         Command::Serve { socket, db_path } => {
-            let bus = events::EventBus::default();
+            let bus = EventBus::default();
             eventstore::open(&db_path, &bus).map_err(RunError::Store)?;
             let () = server::run(socket, bus).await.map_err(RunError::Serve)?;
             Ok(())
