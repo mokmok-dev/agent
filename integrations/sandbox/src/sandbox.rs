@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::error::SandboxError;
 use crate::events;
-use crate::executor::{DenialReason, ExecResult, Executor};
+use crate::executor::{ConfinedProcessExecutor, DenialReason, ExecResult, Executor};
 use crate::policy::Policy;
 use crate::shell;
 use crate::vfs::MountedVfs;
@@ -31,6 +31,23 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
+    /// Creates a sandbox with the platform's layer-1 confined-process
+    /// executor.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed with [`SandboxError::InvalidPolicy`] when the policy is
+    /// unusable and with [`SandboxError::UnsupportedPlatform`] when the
+    /// platform has no confinement layer (see [`ConfinedProcessExecutor`]).
+    pub fn new(
+        policy: Policy,
+        bus: EventBus,
+        agent_id: impl Into<String>,
+    ) -> Result<Self, SandboxError> {
+        let executor = ConfinedProcessExecutor::new(&policy)?;
+        Self::with_executor(policy, bus, agent_id, Arc::new(executor))
+    }
+
     /// Creates a sandbox that delegates execution to `executor`.
     ///
     /// # Errors

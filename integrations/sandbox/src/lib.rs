@@ -15,6 +15,8 @@ mod events;
 mod executor;
 mod policy;
 mod sandbox;
+#[cfg(target_os = "macos")]
+mod seatbelt;
 mod shell;
 mod vfs;
 mod vpath;
