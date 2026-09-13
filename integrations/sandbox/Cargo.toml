@@ -4,13 +4,18 @@ name = "agentd-integration-sandbox"
 version.workspace = true
 
 [dependencies]
+agentd-events = { workspace = true }
+async-trait = "0.1.89"
 globset = "0.4.18"
 serde = { workspace = true }
+serde_json = { workspace = true }
+shlex = "1.3.0"
 thiserror = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 tempfile = "3.27.0"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 
 [lints]
 workspace = true

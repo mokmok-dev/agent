@@ -11,14 +11,25 @@
 //! See `docs/sandbox.md` for the design and its stated gaps.
 
 mod error;
+mod events;
+mod executor;
 mod policy;
+mod sandbox;
+mod shell;
 mod vfs;
 mod vpath;
 
 pub use error::SandboxError;
+pub use events::{
+    ACTION_EXEC, DECISION_AUTO, DECISION_PENDING, EXEC_COMPLETED, PERMISSION_DENIED,
+    PERMISSION_GRANTED, PERMISSION_REQUESTED, RESOURCE_SHELL, exec_completed, permission_decision,
+    permission_requested,
+};
+pub use executor::{DenialReason, ExecResult, Executor};
 pub use policy::{
     CommandPrefix, EnvAllowlist, EnvVar, FsPolicy, Limits, Mount, MountSource, NetworkPolicy,
     Pattern, Policy, ShellPolicy,
 };
+pub use sandbox::Sandbox;
 pub use vfs::{DirEntry, Metadata, MountedVfs, Vfs};
 pub use vpath::VPath;
