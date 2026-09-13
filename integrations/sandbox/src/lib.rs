@@ -68,7 +68,7 @@ pub use events::{
     PERMISSION_GRANTED, PERMISSION_REQUESTED, RESOURCE_SHELL, exec_completed, permission_denied,
     permission_granted, permission_requested,
 };
-pub use executor::{DenialReason, ExecResult, Executor};
+pub use executor::{ConfinedProcessExecutor, DenialReason, ExecResult, Executor};
 pub use policy::{
     CommandPrefix, EnvAllowlist, EnvVar, FsPolicy, Limits, Mount, MountSource, NetworkPolicy,
     Pattern, Policy, ShellPolicy,

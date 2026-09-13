@@ -50,6 +50,11 @@ pub struct ExecResult {
     pub stderr: String,
     /// The process exit code. Denied commands report `126` without spawning
     /// anything.
+    ///
+    /// Conventions the built-in executor follows: `124` marks the wall-clock
+    /// timeout, `126` marks a command that could not be executed (the stderr
+    /// field says which), and `128 + signal` marks a killed process (a
+    /// timeout or output-cap kill lands on `137`).
     pub exit_code: i32,
     /// Set when the policy refused the command.
     pub denied_by: Option<DenialReason>,

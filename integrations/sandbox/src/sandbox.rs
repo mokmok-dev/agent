@@ -38,7 +38,8 @@ impl Sandbox {
     ///
     /// Fails closed with [`SandboxError::InvalidPolicy`] when the policy is
     /// unusable and with [`SandboxError::UnsupportedPlatform`] when the
-    /// platform has no confinement layer (see [`ConfinedProcessExecutor`]).
+    /// platform has no confinement layer (see
+    /// [`ConfinedProcessExecutor`](crate::ConfinedProcessExecutor)).
     pub fn new(
         policy: Policy,
         bus: EventBus,
