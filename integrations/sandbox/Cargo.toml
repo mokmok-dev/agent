@@ -1,0 +1,13 @@
+[package]
+edition.workspace = true
+name = "agentd-integration-sandbox"
+version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

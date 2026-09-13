@@ -1,5 +1,5 @@
 [workspace]
-members = ["agentd", "agentd-events"]
+members = ["agentd", "agentd-events", "integrations/sandbox"]
 resolver = "3"
 
 [workspace.dependencies]
