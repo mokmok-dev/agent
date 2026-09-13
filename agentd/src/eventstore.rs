@@ -71,7 +71,10 @@ pub enum StoreError {
 ///
 /// Events published on `bus` after this call are persisted as `CloudEvents`
 /// by background workers; the workers run until `bus` closes or the process
-/// exits, so they do not need to be kept alive by the caller.
+/// exits, so they do not need to be kept alive by the caller. Attaching the
+/// same `bus` more than once persists every event multiple times, and
+/// shutting down may lose the events still buffered by the workers: the store
+/// is best-effort, not a transactional outbox.
 ///
 /// If the SQLite backend fails while writing a batch, persistence stops
 /// permanently, the failure is logged, and the daemon keeps running.
@@ -110,8 +113,9 @@ pub fn open(
     Ok(())
 }
 
-/// Switches the connection to WAL journaling with `synchronous=NORMAL`,
-/// trading some durability against app crashes for write throughput.
+/// Switches the connection to WAL journaling with `synchronous=NORMAL`:
+/// commits stay durable across application crashes, while a power or OS
+/// failure may drop the most recent commits.
 fn configure(connection: &Connection) -> Result<(), rusqlite::Error> {
     let journal_mode: String =
         connection.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
