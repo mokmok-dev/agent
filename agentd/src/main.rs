@@ -1,4 +1,5 @@
 mod events;
+mod eventstore;
 mod server;
 
 use clap::{Parser, Subcommand};
@@ -23,6 +24,8 @@ enum Command {
     Serve {
         #[arg(long, default_value = "/tmp/mokmokd.sock")]
         socket: PathBuf,
+        #[arg(long, default_value = "/tmp/mokmokd-events.db")]
+        db_path: PathBuf,
     },
 }
 
@@ -30,14 +33,17 @@ enum Command {
 enum RunError {
     #[error("failed to serve: {0}")]
     Serve(server::ServerError),
+    #[error("failed to open the event store: {0}")]
+    Store(eventstore::StoreError),
 }
 
 async fn run() -> Result<(), RunError> {
     let args = Args::parse();
 
     match args.command {
-        Command::Serve { socket } => {
+        Command::Serve { socket, db_path } => {
             let bus = events::EventBus::default();
+            eventstore::open(&db_path, &bus).map_err(RunError::Store)?;
             let () = server::run(socket, bus).await.map_err(RunError::Serve)?;
             Ok(())
         },
