@@ -1,3 +1,4 @@
+mod events;
 mod server;
 
 use clap::{Parser, Subcommand};
@@ -36,7 +37,8 @@ async fn run() -> Result<(), RunError> {
 
     match args.command {
         Command::Serve { socket } => {
-            let () = server::run(socket).await.map_err(RunError::Serve)?;
+            let bus = events::EventBus::default();
+            let () = server::run(socket, bus).await.map_err(RunError::Serve)?;
             Ok(())
         },
     }
