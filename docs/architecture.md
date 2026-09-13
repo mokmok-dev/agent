@@ -1,3 +1,16 @@
+---
+type: Architecture
+title: architecture
+description: agentdのコンポーネント構成とイベントの流れ
+tags:
+  - architecture
+  - agentd
+  - CloudEvents
+generated:
+  by: human:temma.fukaya@mokmok.dev
+  at: 2026-09-13T13:57:33Z
+---
+
 # agentd architecture
 
 `agentd` is an always-on agent daemon. Components coordinate in a
