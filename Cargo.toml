@@ -4,6 +4,7 @@ resolver = "3"
 
 [workspace.dependencies]
 agentd-events = { path = "agentd-events" }
+agentd-integration-sandbox = { path = "integrations/sandbox" }
 axum = { version = "0.8.9" }
 clap = { version = "4.6.6" }
 futures-util = { version = "0.3.34", features = ["sink"] }
