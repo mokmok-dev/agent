@@ -221,6 +221,7 @@ impl ConfinedProcessExecutor {
             ),
             Ok(Err(error)) => {
                 kill_group(pid);
+                let _ = child.wait().await;
                 return Self::cannot_execute(&format!("waiting for the command failed: {error}"));
             },
             Err(_) => {
@@ -229,8 +230,10 @@ impl ConfinedProcessExecutor {
                 (EXIT_TIMED_OUT, true)
             },
         };
+        // The capture task already killed the process group when the cap was
+        // hit; the child is reaped by now, so the pid must not be signalled
+        // again (it may belong to someone else).
         if truncated.load(Ordering::Relaxed) {
-            kill_group(pid);
             exit_code = exit_code.max(SIGKILL_EXIT);
         }
 
@@ -370,6 +373,7 @@ fn confined_path_dirs(allow: &[CommandPrefix]) -> Result<Vec<PathBuf>, SandboxEr
             }
             if let Some(parent) = path.parent()
                 && parent.is_dir()
+                && !dirs.contains(&parent.to_path_buf())
             {
                 dirs.push(parent.to_path_buf());
             }
