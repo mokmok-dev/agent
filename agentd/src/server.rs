@@ -305,6 +305,34 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn events_socket_replies_with_error_event_for_unsupported_specversions() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let socket = dir.path().join("test.sock");
+        let server = spawn_server(socket.clone(), EventBus::new(16));
+
+        let mut client = connect(&socket).await;
+
+        client
+            .send(Message::from(
+                r#"{"id":"0199b7ea-8f4a-7d12-9c3a-2f8b1e4d6a90","source":"urn:test","specversion":"0.3","type":"test.event","data":{}}"#,
+            ))
+            .await
+            .expect("send should succeed");
+
+        let received = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("timed out waiting for error event")
+            .expect("stream should not end")
+            .expect("read should succeed");
+
+        let event = decode_event(received);
+        assert_eq!(event.kind, "error.invalid_event");
+        assert_eq!(event.data["error"], "specversion must be 1.0");
+
+        server.abort();
+    }
+
     #[tokio::test]
     async fn run_reports_already_running_when_socket_is_live() -> Result<(), ServerError> {
         let dir = tempfile::tempdir()?;
