@@ -1,31 +1,72 @@
 //! The event bus at the core of the choreography-style event flow: components
 //! publish events and react to the events published by others; there is no
 //! central orchestrator.
+//!
+//! Events conform to [CloudEvents] 1.0: every event carries the required
+//! context attributes (`id`, `source`, `specversion`, `type`) serialized with
+//! their spec-defined names, plus the event `data`.
+//!
+//! [CloudEvents]: https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md
 
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::sync::broadcast;
 
 /// Capacity of the channel buffering events per subscriber before it lags.
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
+/// The `CloudEvents` specification version all events conform to.
+pub const SPEC_VERSION: &str = "1.0";
+
+/// The `source` attribute assigned to events produced by the daemon itself.
+pub const DAEMON_SOURCE: &str = "urn:mokmokd";
+
 /// An event exchanged between agentd components and connected clients.
+///
+/// The serialized form uses the `CloudEvents` 1.0 attribute names; the `type`
+/// attribute is exposed as [`Event::kind`] because `type` is a Rust keyword.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Event {
-    /// The event kind, e.g. `error.lagged`.
+    /// The `CloudEvents` `id` attribute, generated as a UUID version 7 so
+    /// that events order by creation time.
+    pub id: String,
+    /// The `CloudEvents` `source` attribute identifying where the event
+    /// originated.
+    pub source: String,
+    /// The `CloudEvents` `specversion` attribute.
+    pub specversion: String,
+    /// The `CloudEvents` `type` attribute.
+    #[serde(rename = "type")]
     pub kind: String,
-    /// The event payload.
-    pub payload: serde_json::Value,
+    /// The `CloudEvents` `time` attribute as an RFC 3339 timestamp. Optional in
+    /// the specification, so absent timestamps are tolerated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+    /// The `CloudEvents` `data` payload.
+    #[serde(default)]
+    pub data: serde_json::Value,
 }
 
 impl Event {
-    /// Creates an event with `kind` and `payload`.
+    /// Creates a daemon-produced event with `kind` and `data`, assigning a
+    /// fresh `id`, the daemon `source`, the current `specversion`, and the
+    /// current UTC `time`.
+    ///
+    /// The `time` attribute is left unset if the current time cannot be
+    /// formatted as RFC 3339 (e.g. a system clock far outside the representable
+    /// range); `time` is optional in the specification.
     pub fn new(
         kind: impl Into<String>,
-        payload: serde_json::Value,
+        data: serde_json::Value,
     ) -> Self {
         Self {
+            id: uuid::Uuid::now_v7().to_string(),
+            source: String::from(DAEMON_SOURCE),
+            specversion: String::from(SPEC_VERSION),
             kind: kind.into(),
-            payload,
+            time: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
+            data,
         }
     }
 }
@@ -81,12 +122,40 @@ impl Default for EventBus {
 
 #[cfg(test)]
 mod tests {
-    use super::{Event, EventBus};
+    use super::{DAEMON_SOURCE, Event, EventBus, SPEC_VERSION};
     use serde_json::json;
     use tokio::sync::broadcast::error::RecvError;
 
     fn test_event(kind: &str) -> Event {
         Event::new(kind, json!({ "value": 1 }))
+    }
+
+    #[test]
+    fn new_assigns_cloud_events_attributes() {
+        let event = test_event("test.event");
+
+        assert_eq!(event.source, DAEMON_SOURCE);
+        assert_eq!(event.specversion, SPEC_VERSION);
+        assert_eq!(event.kind, "test.event");
+        uuid::Uuid::parse_str(&event.id).expect("id should be a UUID");
+        let time = event.time.expect("time should be set");
+        time::OffsetDateTime::parse(&time, &time::format_description::well_known::Rfc3339)
+            .expect("time should be an RFC 3339 timestamp");
+    }
+
+    #[test]
+    fn deserializes_minimal_cloud_event_with_optional_attributes_absent() {
+        let raw = r#"{
+            "id": "018f6b2e-7e5c-7000-8000-000000000000",
+            "source": "urn:mokmokd",
+            "specversion": "1.0",
+            "type": "test.event"
+        }"#;
+
+        let event: Event = serde_json::from_str(raw).expect("should deserialize");
+
+        assert_eq!(event.time, None);
+        assert_eq!(event.data, serde_json::Value::Null);
     }
 
     #[tokio::test]
@@ -113,15 +182,13 @@ mod tests {
     async fn lagged_subscribers_observe_lagged_before_events_resume() {
         let bus = EventBus::new(1);
         let mut subscriber = bus.subscribe();
+        let second = test_event("test.second");
         bus.publish(test_event("test.first"));
-        bus.publish(test_event("test.second"));
+        bus.publish(second.clone());
 
         let received = subscriber.recv().await;
 
         assert!(matches!(received, Err(RecvError::Lagged(1))));
-        assert_eq!(
-            subscriber.recv().await.ok().as_ref(),
-            Some(&test_event("test.second"))
-        );
+        assert_eq!(subscriber.recv().await.ok().as_ref(), Some(&second));
     }
 }

@@ -1,4 +1,4 @@
-use crate::events::{Event, EventBus};
+use crate::events::{Event, EventBus, SPEC_VERSION};
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -90,11 +90,13 @@ async fn events_handler(
 /// client disconnects or the bus closes.
 ///
 /// Inbound text messages are parsed as [`Event`]s and published to the bus;
-/// outbound events are forwarded as JSON text messages. Invalid messages are
-/// answered with an `error.invalid_event` event instead of closing the
-/// connection, and a subscriber that falls behind is notified through an
-/// `error.lagged` event. Binary, ping, and pong frames are ignored; pongs are
-/// answered automatically by the WebSocket implementation.
+/// messages parsing successfully but announcing an unsupported `CloudEvents`
+/// `specversion` are rejected like invalid messages. Outbound events are
+/// forwarded as JSON text messages. Invalid messages are answered with an
+/// `error.invalid_event` event instead of closing the connection, and a
+/// subscriber that falls behind is notified through an `error.lagged` event.
+/// Binary, ping, and pong frames are ignored; pongs are answered automatically
+/// by the WebSocket implementation.
 async fn handle_events_socket(
     socket: WebSocket,
     bus: EventBus,
@@ -125,7 +127,17 @@ async fn handle_events_socket(
                 let Some(Ok(message)) = message else { break };
                 match message {
                     Message::Text(text) => match serde_json::from_str::<Event>(&text) {
-                        Ok(event) => bus.publish(event),
+                        Ok(event) if event.specversion == SPEC_VERSION => bus.publish(event),
+                        Ok(_) => {
+                            tracing::debug!("client sent an event with an unsupported specversion");
+                            let reply = Event::new(
+                                "error.invalid_event",
+                                json!({ "error": format!("specversion must be {SPEC_VERSION}") }),
+                            );
+                            if send_event(&mut sink, &reply).await.is_err() {
+                                break;
+                            }
+                        },
                         Err(error) => {
                             tracing::debug!(%error, "client sent an invalid event");
                             let reply =
