@@ -369,16 +369,24 @@ impl Vfs for Overlay {
                 _ => {},
             }
         }
+        if from == to {
+            return Ok(());
+        }
         let data = self.read(from)?;
 
         {
+            // The target write is charged (and can fail on the byte caps), so
+            // it must succeed before the source is removed or tombstoned.
             let mut state = self.lock()?;
+            if !self.parent_is_dir(&state, &to.parent_or_root())? {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+            self.write_upper(&mut state, to, &data)?;
             if let Some(Node::File(previous)) = state.tree.remove(from) {
                 self.budget.release(previous.len() as u64);
             } else {
                 state.tombstones.insert(from.clone());
             }
-            self.write_upper(&mut state, to, &data)?;
         }
         Ok(())
     }
@@ -576,6 +584,50 @@ mod tests {
             ErrorKind::NotFound
         );
         assert!(fixture.host.join("lower.txt").exists());
+    }
+
+    #[test]
+    fn failed_rename_leaves_the_source_intact() {
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        fs::write(host.join("source.txt"), b"payload").expect("lower file");
+        let refuse: Vec<Pattern> = Vec::new();
+        let overlay = Overlay::new(
+            host,
+            Arc::new(PathGuard::compile(&refuse, &refuse).expect("empty globs")),
+            Arc::new(ByteBudget::new(Some(4), Some(4))),
+        );
+
+        // The 8 byte file exceeds the caps: the rename must fail and leave
+        // the source exactly where it was.
+        let error = overlay
+            .rename(
+                &VPath::root().join("source.txt"),
+                &VPath::root().join("moved.txt"),
+            )
+            .expect_err("over the cap");
+        assert_eq!(error.kind(), ErrorKind::FileTooLarge);
+        assert_eq!(
+            overlay
+                .read(&VPath::root().join("source.txt"))
+                .expect("source intact"),
+            b"payload".to_vec()
+        );
+
+        // Renaming into a directory that does not exist fails cleanly.
+        let missing_parent = overlay
+            .rename(
+                &VPath::root().join("source.txt"),
+                &VPath::new("/absent/moved.txt").expect("valid"),
+            )
+            .expect_err("no parent");
+        assert_eq!(missing_parent.kind(), ErrorKind::NotFound);
+        assert_eq!(
+            overlay
+                .read(&VPath::root().join("source.txt"))
+                .expect("source intact"),
+            b"payload".to_vec()
+        );
     }
 
     #[test]
