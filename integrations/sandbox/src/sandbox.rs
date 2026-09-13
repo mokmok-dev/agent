@@ -118,20 +118,18 @@ impl Sandbox {
         };
 
         if let Some(reason) = denial {
-            self.bus.publish(events::permission_decision(
+            self.bus.publish(events::permission_denied(
                 &sandbox_id,
                 &self.agent_id,
                 command,
-                false,
             ));
             return ExecResult::denied(reason);
         }
 
-        self.bus.publish(events::permission_decision(
+        self.bus.publish(events::permission_granted(
             &sandbox_id,
             &self.agent_id,
             command,
-            true,
         ));
         let started = Instant::now();
         let result = self.executor.exec(command).await;

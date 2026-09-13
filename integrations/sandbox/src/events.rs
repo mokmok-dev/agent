@@ -56,23 +56,29 @@ pub fn permission_requested(
     )
 }
 
-/// Builds a `sandbox.permission.granted` or `sandbox.permission.denied`
-/// event.
+/// Builds a `sandbox.permission.granted` event.
 #[must_use]
-pub fn permission_decision(
+pub fn permission_granted(
     sandbox_id: &str,
     agent_id: &str,
     subject: &str,
-    granted: bool,
 ) -> Event {
-    let (kind, decision) = if granted {
-        (PERMISSION_GRANTED, "granted")
-    } else {
-        (PERMISSION_DENIED, "denied")
-    };
     Event::new(
-        kind,
-        permission_data(sandbox_id, agent_id, subject, decision),
+        PERMISSION_GRANTED,
+        permission_data(sandbox_id, agent_id, subject, "granted"),
+    )
+}
+
+/// Builds a `sandbox.permission.denied` event.
+#[must_use]
+pub fn permission_denied(
+    sandbox_id: &str,
+    agent_id: &str,
+    subject: &str,
+) -> Event {
+    Event::new(
+        PERMISSION_DENIED,
+        permission_data(sandbox_id, agent_id, subject, "denied"),
     )
 }
 
@@ -112,8 +118,8 @@ pub fn exec_completed(
 mod tests {
     use super::{
         ACTION_EXEC, DECISION_AUTO, EXEC_COMPLETED, PERMISSION_DENIED, PERMISSION_GRANTED,
-        PERMISSION_REQUESTED, RESOURCE_SHELL, exec_completed, permission_decision,
-        permission_requested,
+        PERMISSION_REQUESTED, RESOURCE_SHELL, exec_completed, permission_denied,
+        permission_granted, permission_requested,
     };
     use crate::executor::DenialReason;
     use agentd_events::{DAEMON_SOURCE, SPEC_VERSION};
@@ -141,8 +147,8 @@ mod tests {
 
     #[test]
     fn decision_events_flip_the_kind_and_decision() {
-        let granted = permission_decision("sbx-1", "coder-1", "ls", true);
-        let denied = permission_decision("sbx-1", "coder-1", "ls", false);
+        let granted = permission_granted("sbx-1", "coder-1", "ls");
+        let denied = permission_denied("sbx-1", "coder-1", "ls");
 
         assert_eq!(granted.kind, PERMISSION_GRANTED);
         assert_eq!(granted.data["decision"], json!("granted"));

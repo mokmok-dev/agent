@@ -79,6 +79,9 @@ impl VPath {
 
     /// Joins a single component, producing a child path.
     ///
+    /// The fallible sibling is [`VPath::try_join`]; use it when `name` comes
+    /// from anything less trusted than a directory listing.
+    ///
     /// # Panics
     ///
     /// Panics if `name` contains a separator, is empty, or is `.` or `..`;
@@ -95,6 +98,20 @@ impl VPath {
         let mut components = self.components.clone();
         components.push(String::from(name));
         Self { components }
+    }
+
+    /// The fallible form of [`VPath::join`]: `None` when `name` is not a
+    /// single plain path component.
+    #[must_use]
+    pub fn try_join(
+        &self,
+        name: &str,
+    ) -> Option<Self> {
+        (!name.is_empty() && !name.contains('/') && name != "." && name != "..").then(|| {
+            let mut components = self.components.clone();
+            components.push(String::from(name));
+            Self { components }
+        })
     }
 
     /// Whether `prefix` is a prefix of this path.

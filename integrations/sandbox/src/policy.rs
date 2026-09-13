@@ -103,6 +103,18 @@ impl Pattern {
     }
 }
 
+impl From<&str> for Pattern {
+    fn from(pattern: &str) -> Self {
+        Self(String::from(pattern))
+    }
+}
+
+impl From<String> for Pattern {
+    fn from(pattern: String) -> Self {
+        Self(pattern)
+    }
+}
+
 /// Shell policy for commands executed through the sandbox.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -134,6 +146,18 @@ impl CommandPrefix {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl From<&str> for CommandPrefix {
+    fn from(prefix: &str) -> Self {
+        Self(String::from(prefix))
+    }
+}
+
+impl From<String> for CommandPrefix {
+    fn from(prefix: String) -> Self {
+        Self(prefix)
     }
 }
 
