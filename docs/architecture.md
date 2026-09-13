@@ -91,7 +91,7 @@ sequenceDiagram
     W->>D: BEGIN
     W->>D: INSERT one row per event
     W->>D: COMMIT
-    Note over W,D: one transaction per batch;<br/>WAL + synchronous=NORMAL
+    Note over W,D: one transaction per batch, WAL + synchronous=NORMAL
 ```
 
 The writer thread owns the SQLite connection; no async task touches SQLite
