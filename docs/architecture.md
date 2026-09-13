@@ -204,7 +204,7 @@ contracts:
 | In-process integration     | `Event`/`EventBus` from the `agentd-events` crate                | A workspace crate under `integrations/<name>`, wired into `agentd` behind a cargo feature     | Projections, webhook forwarding   |
 | Out-of-process integration | CloudEvents 1.0 JSON over the WebSocket event API (Unix socket)  | Any external program in any language; no crate required                                       | Other stores, external tooling    |
 
-The current structure follows three rules:
+The current structure follows four rules:
 
 - `agentd-events` holds the event contract (`Event`, `EventBus`,
   `SPEC_VERSION`, `DAEMON_SOURCE`) and nothing else. Integrations depend on
@@ -214,15 +214,28 @@ The current structure follows three rules:
 - Future optional integrations are compiled in behind bin features, e.g.
   `webhook = ["dep:agentd-integration-webhook"]`; the event store is excluded
   from gating by design.
+- Integrations document their deviations from their design docs next to the
+  code that embodies them, so a reader never has to reconcile two sources of
+  truth from memory.
 
-The next structural steps have explicit triggers and are not taken early:
+The trigger in rule form: `agentd-integration-sandbox` (see
+`docs/sandbox.md`) became the second in-process integration. It follows the
+model exactly — its own crate under `integrations/sandbox`, depending only on
+`agentd-events`, wired into `agentd` behind
+`sandbox = ["dep:agentd-integration-sandbox"]` — and it publishes
+`sandbox.permission.*` and `sandbox.exec.completed` events for every
+decision, so approval flows are ordinary bus subscribers. Its layer-1
+executor is macOS-only so far (Seatbelt; Linux Landlock/seccomp is a
+follow-up), spawned-command reads are not path-confined on macOS 26 (dyld
+aborts on filtered read grants — a stated gap recorded in the crate docs),
+and no component drives the sandbox yet, so the feature exists to validate
+the dependency graph under CI's `--all-features`.
 
-1. A second in-process integration starts implementation: create
-   `integrations/<name>` and, only then, design any shared delivery
-   abstraction (e.g. a `Subscriber` trait) from the two real implementations.
-2. An external Rust consumer of the contract appears: start versioning and
+Further structural steps keep explicit triggers and are not taken early:
+
+1. An external Rust consumer of the contract appears: start versioning and
    publishing `agentd-events`.
-3. Out-of-process consumers want convenience: add a thin client crate; the
+2. Out-of-process consumers want convenience: add a thin client crate; the
    wire format itself is already stable.
 
 Adding workspace members requires no build-infrastructure changes: crane
