@@ -71,7 +71,7 @@ pub async fn run(
 }
 
 /// Builds the router exposing the event API.
-fn router(bus: EventBus) -> Router {
+pub fn router(bus: EventBus) -> Router {
     Router::new()
         .route("/events", any(events_handler))
         .layer(TraceLayer::new_for_http())

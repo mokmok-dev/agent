@@ -1,6 +1,5 @@
-mod eventstore;
-mod server;
-
+use agentd::eventstore;
+use agentd::server;
 use agentd_events::EventBus;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
