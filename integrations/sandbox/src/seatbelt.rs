@@ -497,6 +497,17 @@ mod tests {
         ConfinedProcessExecutor::new(policy).expect("a valid policy builds an executor")
     }
 
+    /// The Nix build sandbox is itself a Seatbelt sandbox and refuses to nest
+    /// `sandbox-exec`, so the spawn tests cannot run there. They still run on
+    /// developer machines, where the confinement is real.
+    fn spawn_tests_supported() -> bool {
+        let in_nix_build_sandbox = std::env::var_os("NIX_BUILD_TOP").is_some();
+        if in_nix_build_sandbox {
+            eprintln!("skipping: sandbox-exec cannot run inside the Nix build sandbox");
+        }
+        !in_nix_build_sandbox
+    }
+
     #[test]
     fn profile_is_deny_by_default_and_grants_only_mounts() {
         let dir = TempDir::new().expect("tempdir");
@@ -647,6 +658,9 @@ mod tests {
 
     #[test]
     fn exec_echoes_and_confines_env() {
+        if !spawn_tests_supported() {
+            return;
+        }
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
         let mut policy = overlay_policy(&host);
@@ -665,6 +679,9 @@ mod tests {
 
     #[test]
     fn writes_reach_read_write_mounts_but_not_overlay_hosts() {
+        if !spawn_tests_supported() {
+            return;
+        }
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
         let rw_host = host.join("rw");
@@ -726,6 +743,9 @@ mod tests {
 
     #[test]
     fn writes_outside_mounts_are_denied() {
+        if !spawn_tests_supported() {
+            return;
+        }
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
         let executor = executor(&overlay_policy(&host));
@@ -743,6 +763,9 @@ mod tests {
 
     #[test]
     fn timeout_kills_the_process_group_quickly() {
+        if !spawn_tests_supported() {
+            return;
+        }
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
         let mut policy = overlay_policy(&host);
@@ -762,6 +785,9 @@ mod tests {
 
     #[test]
     fn output_flood_is_truncated_and_killed() {
+        if !spawn_tests_supported() {
+            return;
+        }
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
         let mut policy = overlay_policy(&host);
