@@ -94,9 +94,9 @@ Outbound WebSocket messages pair the event with its position:
 
 `seq` is the one-based log position, or `null` for a transient daemon notice
 that is not part of the log (for example `error.lagged`). The position is
-transport metadata and is never written into the JSONL log, whose lines remain
-plain CloudEvents. Inbound frames are a bare CloudEvent; the daemon assigns the
-position on append.
+transport metadata and is never written into the JSONL log, whose lines are
+CloudEvents (plus the hash-chain attributes below). Inbound frames are a bare
+CloudEvent; the daemon assigns the position on append.
 
 A consumer's saved position (its cursor) must only advance on a message whose
 `seq` is non-null; notices carry `null` and must not overwrite it.
@@ -236,21 +236,32 @@ sequenceDiagram
 
 ## Log format and recovery strategy
 
-The log is newline-delimited JSON. Each line is the verbatim CloudEvents
-envelope, so the schema is stable when extension attributes appear and the log
-stays consumable by ordinary tooling (`jq`, `rg`, DuckDB). There is no
+The log is newline-delimited JSON. Each line is a CloudEvents envelope plus two
+extension attributes, `prevhash` and `chainhash`, that form a tamper-evident
+hash chain; the schema is otherwise stable when extension attributes appear and
+the log stays consumable by ordinary tooling (`jq`, `rg`, DuckDB). There is no
 migration list: attributes are read on demand.
 
 - The position of a line is its one-based line number, exposed as `Seq`.
+- Each line's `chainhash` is SHA-256 over the previous line's `chainhash` and
+  the canonical JSON of the event with the chain attributes removed; the first
+  line's `prevhash` is sixty-four zeroes. Editing, reordering, or dropping a
+  chained line breaks the chain from that position on, which
+  `agentd_events::verify_chain` (and `agentd verify-log`) reports at the failing
+  position. A line without the attributes (a log predating the chain) is
+  reported as unchained. The chain is unkeyed, so it detects partial tampering
+  but not a full rewrite from genesis — an HMAC with a key the writer keeps, or
+  an external anchor, is the follow-up.
 - A crash mid-append can leave a partial trailing line; recovery truncates it
-  and keeps every complete line, so the log always ends on a line boundary.
+  and keeps every complete line, so the log always ends on a line boundary. It
+  resumes the chain from the last complete line's hash.
 - The log is at-least-once across a writer failure: an event that was written
   but not acknowledged may survive, so a retrying publisher can append it
   twice. Consumers deduplicate by `Event::id`.
 - Positions are not stored in the file; they are derived from line numbers and
   attached as `agentd_events::LogEntry` on the live bus and the WebSocket API,
-  so the file stays a plain CloudEvents stream. A consumer resumes by passing
-  the last position it applied to `GET /events?from=`.
+  so the file stays a CloudEvents stream. A consumer resumes by passing the last
+  position it applied to `GET /events?from=`.
 - History queries read the log directly (DuckDB over the JSONL, or `rg`);
   stateful read models replay it through `projection::catch_up`, which resumes
   from the projection's `applied_seq`.
