@@ -1,7 +1,7 @@
 //! The sandbox: the confinement layer through which an agent drives shell
 //! commands. Every command runs against a virtual filesystem and a policy —
-//! never directly against the host — and every permission decision is
-//! published as a `CloudEvent` onto the event bus.
+//! never directly against the host — and every permission decision is durably
+//! appended to the event log as a `CloudEvent`.
 //!
 //! The crate is deny-by-default in all three planes: the [`Policy`] zero value
 //! mounts nothing, allows no command, and allows no network access; the VFS
@@ -14,7 +14,7 @@
 //! overlay and run `cargo test` in it:
 //!
 //! ```
-//! use agentd_events::EventBus;
+//! use agentd_events::EventLog;
 //! use agentd_integration_sandbox::{
 //!     CommandPrefix, FsPolicy, Mount, MountSource, Policy, Sandbox, ShellPolicy,
 //! };
@@ -40,10 +40,13 @@
 //! };
 //!
 //! # fn build(policy: Policy) -> Result<Sandbox, agentd_integration_sandbox::SandboxError> {
-//! let sandbox = Sandbox::new(policy, EventBus::default(), "coder-1")?;
+//! # let log_path = std::env::temp_dir().join("agentd-sandbox-doc-events.jsonl");
+//! let log = EventLog::open(&log_path)?;
+//! let sandbox = Sandbox::new(policy, log, "coder-1")?;
+//! # let _ = std::fs::remove_file(&log_path);
 //! # Ok(sandbox) }
 //! # let sandbox = build(policy)?;
-//! let _events = sandbox.bus().subscribe();
+//! let _events = sandbox.log().subscribe();
 //! # let _ = std::fs::remove_dir_all(std::env::temp_dir().join("agentd-sandbox-doc-test"));
 //! # Ok(())
 //! # }

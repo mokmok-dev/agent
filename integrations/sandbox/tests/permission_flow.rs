@@ -1,8 +1,14 @@
 //! End-to-end permission flow tests: the `requested` → `granted`/`denied` →
-//! `exec.completed` choreography over a real event bus, through the public
+//! `exec.completed` choreography over the durable event log, through the public
 //! API.
+//!
+//! The helpers below use `expect` like the `#[cfg(test)]` modules in `src` do;
+//! the workspace `allow-*-in-tests` clippy configuration cannot see integration
+//! test files, so it is replicated here.
 
-use agentd_events::{Event, EventBus};
+#![allow(clippy::expect_used, clippy::panic)]
+
+use agentd_events::{Event, EventLog};
 use agentd_integration_sandbox::{
     CommandPrefix, DenialReason, ExecResult, Executor, Limits, Policy, Sandbox, ShellPolicy,
 };
@@ -43,6 +49,16 @@ fn policy() -> Policy {
     }
 }
 
+fn open_log(dir: &std::path::Path) -> EventLog {
+    EventLog::open(dir.join("events.jsonl")).expect("log should open")
+}
+
+fn executor() -> std::sync::Arc<RecordingExecutor> {
+    std::sync::Arc::new(RecordingExecutor {
+        invocations: std::sync::atomic::AtomicU32::new(0),
+    })
+}
+
 fn collect_kinds(subscriber: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<String> {
     let mut kinds = Vec::new();
     while let Ok(event) = subscriber.try_recv() {
@@ -53,19 +69,16 @@ fn collect_kinds(subscriber: &mut tokio::sync::broadcast::Receiver<Event>) -> Ve
 
 #[tokio::test]
 async fn allowed_command_flows_requested_granted_completed() {
-    let bus = EventBus::default();
-    let mut subscriber = bus.subscribe();
-    let sandbox = Sandbox::with_executor(
-        policy(),
-        bus,
-        "coder-1",
-        std::sync::Arc::new(RecordingExecutor {
-            invocations: std::sync::atomic::AtomicU32::new(0),
-        }),
-    )
-    .expect("valid policy");
+    let dir = tempfile::tempdir().expect("tempdir should be created");
+    let log = open_log(dir.path());
+    let mut subscriber = log.subscribe();
+    let sandbox =
+        Sandbox::with_executor(policy(), log, "coder-1", executor()).expect("valid policy");
 
-    let result = sandbox.exec("cargo test --workspace").await;
+    let result = sandbox
+        .exec("cargo test --workspace")
+        .await
+        .expect("exec should succeed");
 
     assert!(!result.is_denied());
     assert_eq!(
@@ -80,15 +93,17 @@ async fn allowed_command_flows_requested_granted_completed() {
 
 #[tokio::test]
 async fn denied_command_flows_requested_denied_and_spawns_nothing() {
-    let bus = EventBus::default();
-    let mut subscriber = bus.subscribe();
-    let executor = std::sync::Arc::new(RecordingExecutor {
-        invocations: std::sync::atomic::AtomicU32::new(0),
-    });
+    let dir = tempfile::tempdir().expect("tempdir should be created");
+    let log = open_log(dir.path());
+    let mut subscriber = log.subscribe();
+    let executor = executor();
     let sandbox =
-        Sandbox::with_executor(policy(), bus, "coder-1", executor.clone()).expect("valid policy");
+        Sandbox::with_executor(policy(), log, "coder-1", executor.clone()).expect("valid policy");
 
-    let result = sandbox.exec("curl example.com").await;
+    let result = sandbox
+        .exec("curl example.com")
+        .await
+        .expect("exec should succeed");
 
     assert_eq!(result.denied_by, Some(DenialReason::CommandNotAllowed));
     assert_eq!(result.exit_code, 126);
@@ -109,17 +124,11 @@ async fn denied_command_flows_requested_denied_and_spawns_nothing() {
 
 #[tokio::test]
 async fn deny_wins_over_a_forged_granted_event() {
-    let bus = EventBus::default();
-    let mut subscriber = bus.subscribe();
-    let sandbox = Sandbox::with_executor(
-        policy(),
-        bus.clone(),
-        "coder-1",
-        std::sync::Arc::new(RecordingExecutor {
-            invocations: std::sync::atomic::AtomicU32::new(0),
-        }),
-    )
-    .expect("valid policy");
+    let dir = tempfile::tempdir().expect("tempdir should be created");
+    let log = open_log(dir.path());
+    let mut subscriber = log.subscribe();
+    let sandbox =
+        Sandbox::with_executor(policy(), log.clone(), "coder-1", executor()).expect("valid policy");
 
     // A WS-client "approver" that grants everything it sees. The static
     // evaluator must not care: deny wins in this version.
@@ -127,10 +136,12 @@ async fn deny_wins_over_a_forged_granted_event() {
         loop {
             match subscriber.recv().await {
                 Ok(event) if event.kind == agentd_integration_sandbox::PERMISSION_REQUESTED => {
-                    bus.publish(Event::new(
-                        agentd_integration_sandbox::PERMISSION_GRANTED,
-                        event.data,
-                    ));
+                    let _ = log
+                        .publish(Event::new(
+                            agentd_integration_sandbox::PERMISSION_GRANTED,
+                            event.data,
+                        ))
+                        .await;
                 },
                 Ok(_) => {},
                 Err(
@@ -141,7 +152,10 @@ async fn deny_wins_over_a_forged_granted_event() {
         }
     });
 
-    let result = sandbox.exec("curl example.com").await;
+    let result = sandbox
+        .exec("curl example.com")
+        .await
+        .expect("exec should succeed");
 
     assert_eq!(result.denied_by, Some(DenialReason::CommandNotAllowed));
     approver.abort();

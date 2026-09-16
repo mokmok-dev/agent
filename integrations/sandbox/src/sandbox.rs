@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
-use agentd_events::EventBus;
+use agentd_events::EventLog;
 use uuid::Uuid;
 
 use crate::error::SandboxError;
@@ -17,16 +17,17 @@ use crate::vfs::MountedVfs;
 
 /// A running sandbox: an agent's confinement layer for shell commands.
 ///
-/// Every [`Sandbox::exec`] publishes the full decision trail onto the bus —
+/// Every [`Sandbox::exec`] durably appends the full decision trail to the log —
 /// `requested`, then `granted` or `denied`, then `exec.completed` — so audit
-/// trails and approval UIs are ordinary bus subscribers.
+/// trails and approval UIs are ordinary subscribers, and no decision can be
+/// lost.
 pub struct Sandbox {
     id: Uuid,
     agent_id: String,
     policy: Policy,
     vfs: MountedVfs,
     executor: Arc<dyn Executor>,
-    bus: EventBus,
+    log: EventLog,
     executed: AtomicU32,
 }
 
@@ -42,11 +43,11 @@ impl Sandbox {
     /// [`ConfinedProcessExecutor`](crate::ConfinedProcessExecutor)).
     pub fn new(
         policy: Policy,
-        bus: EventBus,
+        log: EventLog,
         agent_id: impl Into<String>,
     ) -> Result<Self, SandboxError> {
         let executor = ConfinedProcessExecutor::new(&policy)?;
-        Self::with_executor(policy, bus, agent_id, Arc::new(executor))
+        Self::with_executor(policy, log, agent_id, Arc::new(executor))
     }
 
     /// Creates a sandbox that delegates execution to `executor`.
@@ -57,7 +58,7 @@ impl Sandbox {
     /// filesystem domain cannot be assembled into a virtual filesystem.
     pub fn with_executor(
         policy: Policy,
-        bus: EventBus,
+        log: EventLog,
         agent_id: impl Into<String>,
         executor: Arc<dyn Executor>,
     ) -> Result<Self, SandboxError> {
@@ -68,12 +69,12 @@ impl Sandbox {
             policy,
             vfs,
             executor,
-            bus,
+            log,
             executed: AtomicU32::new(0),
         })
     }
 
-    /// The sandbox id, correlating its events on the bus.
+    /// The sandbox id, correlating its events in the log.
     #[must_use]
     pub const fn id(&self) -> Uuid {
         self.id
@@ -85,27 +86,37 @@ impl Sandbox {
         &self.vfs
     }
 
-    /// The event bus this sandbox publishes on.
+    /// The event log this sandbox publishes on and subscribes to.
     #[must_use]
-    pub const fn bus(&self) -> &EventBus {
-        &self.bus
+    pub const fn log(&self) -> &EventLog {
+        &self.log
     }
 
     /// Evaluates the command against the policy and, when allowed, runs it
     /// through the executor.
     ///
     /// Denials short-circuit: nothing is spawned, and the structured refusal
-    /// is returned in [`ExecResult::denied_by`] and published on the bus.
+    /// is returned in [`ExecResult::denied_by`] and appended to the log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::Publish`] when a decision event cannot be
+    /// durably appended. The `requested`/`granted` decision is appended before
+    /// the command runs, so a command never starts without its decision
+    /// recorded; a failure to record `exec.completed` after it ran is still
+    /// surfaced as an error.
     pub async fn exec(
         &self,
         command: &str,
-    ) -> ExecResult {
+    ) -> Result<ExecResult, SandboxError> {
         let sandbox_id = self.id.to_string();
-        self.bus.publish(events::permission_requested(
-            &sandbox_id,
-            &self.agent_id,
-            command,
-        ));
+        self.log
+            .publish(events::permission_requested(
+                &sandbox_id,
+                &self.agent_id,
+                command,
+            ))
+            .await?;
 
         // The counter is monotonic: denials consume budget too, which keeps
         // the guard race-free and stops a denied-command loop from spinning.
@@ -119,32 +130,38 @@ impl Sandbox {
         };
 
         if let Some(reason) = denial {
-            self.bus.publish(events::permission_denied(
+            self.log
+                .publish(events::permission_denied(
+                    &sandbox_id,
+                    &self.agent_id,
+                    command,
+                ))
+                .await?;
+            return Ok(ExecResult::denied(reason));
+        }
+
+        self.log
+            .publish(events::permission_granted(
                 &sandbox_id,
                 &self.agent_id,
                 command,
-            ));
-            return ExecResult::denied(reason);
-        }
-
-        self.bus.publish(events::permission_granted(
-            &sandbox_id,
-            &self.agent_id,
-            command,
-        ));
+            ))
+            .await?;
         let started = Instant::now();
         let result = self.executor.exec(command).await;
-        self.bus.publish(events::exec_completed(
-            &sandbox_id,
-            &self.agent_id,
-            command,
-            result.exit_code,
-            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            result.stdout.len() as u64,
-            result.stderr.len() as u64,
-            result.denied_by.as_ref(),
-        ));
-        result
+        self.log
+            .publish(events::exec_completed(
+                &sandbox_id,
+                &self.agent_id,
+                command,
+                result.exit_code,
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                result.stdout.len() as u64,
+                result.stderr.len() as u64,
+                result.denied_by.as_ref(),
+            ))
+            .await?;
+        Ok(result)
     }
 }
 
@@ -155,8 +172,9 @@ mod tests {
     use crate::executor::{DenialReason, ExecResult, Executor};
     use crate::policy::{CommandPrefix, Limits, Policy};
     use crate::vfs::Vfs as _;
-    use agentd_events::{Event, EventBus};
+    use agentd_events::{Event, EventLog};
     use async_trait::async_trait;
+    use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -214,12 +232,17 @@ mod tests {
         }
     }
 
-    fn sandbox(policy: Policy) -> (Sandbox, Arc<RecordingExecutor>) {
+    fn open_log(dir: &Path) -> EventLog {
+        EventLog::open(dir.join("events.jsonl")).expect("log should open")
+    }
+
+    fn sandbox(policy: Policy) -> (Sandbox, Arc<RecordingExecutor>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
         let executor = RecordingExecutor::new();
         let sandbox =
-            Sandbox::with_executor(policy, EventBus::default(), "coder-1", executor.clone())
+            Sandbox::with_executor(policy, open_log(dir.path()), "coder-1", executor.clone())
                 .expect("valid policy");
-        (sandbox, executor)
+        (sandbox, executor, dir)
     }
 
     fn drain(receiver: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<Event> {
@@ -232,10 +255,13 @@ mod tests {
 
     #[tokio::test]
     async fn exec_publishes_requested_granted_and_completed() {
-        let (sandbox, executor) = sandbox(policy(&["cargo test"], 10));
-        let mut subscriber = sandbox.bus().subscribe();
+        let (sandbox, executor, _dir) = sandbox(policy(&["cargo test"], 10));
+        let mut subscriber = sandbox.log().subscribe();
 
-        let result = sandbox.exec("cargo test --workspace").await;
+        let result = sandbox
+            .exec("cargo test --workspace")
+            .await
+            .expect("exec should succeed");
 
         assert!(!result.is_denied());
         assert_eq!(result.exit_code, 0);
@@ -262,10 +288,13 @@ mod tests {
 
     #[tokio::test]
     async fn denial_short_circuits_without_spawning() {
-        let (sandbox, executor) = sandbox(policy(&["cargo test"], 10));
-        let mut subscriber = sandbox.bus().subscribe();
+        let (sandbox, executor, _dir) = sandbox(policy(&["cargo test"], 10));
+        let mut subscriber = sandbox.log().subscribe();
 
-        let result = sandbox.exec("curl example.com").await;
+        let result = sandbox
+            .exec("curl example.com")
+            .await
+            .expect("exec should succeed");
 
         assert_eq!(result.exit_code, 126);
         assert_eq!(result.denied_by, Some(DenialReason::CommandNotAllowed));
@@ -293,12 +322,12 @@ mod tests {
 
     #[tokio::test]
     async fn command_count_guard_denies_beyond_the_limit() {
-        let (sandbox, executor) = sandbox(policy(&["ls"], 2));
-        let mut subscriber = sandbox.bus().subscribe();
+        let (sandbox, executor, _dir) = sandbox(policy(&["ls"], 2));
+        let mut subscriber = sandbox.log().subscribe();
 
-        sandbox.exec("ls").await;
-        sandbox.exec("ls").await;
-        let third = sandbox.exec("ls").await;
+        sandbox.exec("ls").await.expect("exec should succeed");
+        sandbox.exec("ls").await.expect("exec should succeed");
+        let third = sandbox.exec("ls").await.expect("exec should succeed");
 
         assert_eq!(third.denied_by, Some(DenialReason::CommandCountExceeded));
         assert_eq!(executor.count(), 2);
@@ -322,15 +351,21 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_commands_are_denied() {
-        let (sandbox, executor) = sandbox(policy(&["echo"], 10));
+        let (sandbox, executor, _dir) = sandbox(policy(&["echo"], 10));
 
-        let substitution = sandbox.exec("echo $(rm -rf /)").await;
+        let substitution = sandbox
+            .exec("echo $(rm -rf /)")
+            .await
+            .expect("exec should succeed");
         assert_eq!(
             substitution.denied_by,
             Some(DenialReason::CommandNotAllowed)
         );
 
-        let smuggled = sandbox.exec("echo ok; curl example.com").await;
+        let smuggled = sandbox
+            .exec("echo ok; curl example.com")
+            .await
+            .expect("exec should succeed");
         assert_eq!(smuggled.denied_by, Some(DenialReason::CommandNotAllowed));
         assert_eq!(executor.count(), 0);
     }
@@ -339,25 +374,30 @@ mod tests {
     async fn a_third_party_granted_event_does_not_overrule_a_static_denial() {
         // An approver publishing `granted` must not widen the static policy:
         // deny wins without an explicit approval protocol.
-        let (sandbox, executor) = sandbox(policy(&["cargo test"], 10));
-        let mut subscriber = sandbox.bus().subscribe();
+        let (sandbox, executor, _dir) = sandbox(policy(&["cargo test"], 10));
+        let mut subscriber = sandbox.log().subscribe();
 
-        let publisher_bus = sandbox.bus().clone();
+        let publisher_log = sandbox.log().clone();
         let sandbox_id = sandbox.id().to_string();
         let approver = tokio::spawn(async move {
             while let Ok(event) = subscriber.recv().await {
                 if event.kind == crate::events::PERMISSION_REQUESTED
                     && event.data["sandbox_id"] == sandbox_id
                 {
-                    publisher_bus.publish(Event::new(
-                        crate::events::PERMISSION_GRANTED,
-                        event.data.clone(),
-                    ));
+                    let _ = publisher_log
+                        .publish(Event::new(
+                            crate::events::PERMISSION_GRANTED,
+                            event.data.clone(),
+                        ))
+                        .await;
                 }
             }
         });
 
-        let result = sandbox.exec("curl example.com").await;
+        let result = sandbox
+            .exec("curl example.com")
+            .await
+            .expect("exec should succeed");
 
         assert_eq!(result.denied_by, Some(DenialReason::CommandNotAllowed));
         assert_eq!(executor.count(), 0);
@@ -366,6 +406,7 @@ mod tests {
 
     #[test]
     fn invalid_policy_fails_construction() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
         let bad = Policy {
             fs: crate::policy::FsPolicy {
                 hide: vec![crate::policy::Pattern::new("[unclosed")],
@@ -377,7 +418,7 @@ mod tests {
         assert!(matches!(
             Sandbox::with_executor(
                 bad,
-                EventBus::default(),
+                open_log(dir.path()),
                 "coder-1",
                 RecordingExecutor::new()
             ),
@@ -387,7 +428,7 @@ mod tests {
 
     #[test]
     fn vfs_is_built_from_the_policy() {
-        let (sandbox, _executor) = sandbox(Policy::default());
+        let (sandbox, _executor, _dir) = sandbox(Policy::default());
         let anything = crate::VPath::root().join("anything");
 
         assert_eq!(
@@ -402,9 +443,9 @@ mod tests {
 
     #[tokio::test]
     async fn zero_command_count_denies_everything() {
-        let (sandbox, executor) = sandbox(policy(&["ls"], 0));
+        let (sandbox, executor, _dir) = sandbox(policy(&["ls"], 0));
 
-        let result = sandbox.exec("ls").await;
+        let result = sandbox.exec("ls").await.expect("exec should succeed");
 
         assert_eq!(result.denied_by, Some(DenialReason::CommandCountExceeded));
         assert_eq!(executor.count(), 0);

@@ -1,5 +1,6 @@
 //! Errors surfaced by the sandbox.
 
+use agentd_events::LogError;
 use thiserror::Error as ThisError;
 
 /// Errors from constructing a sandbox and its confinement layers.
@@ -16,6 +17,10 @@ pub enum SandboxError {
     /// sandbox refuses to run commands without OS confinement.
     #[error("sandbox commands are not supported on this platform: {0}")]
     UnsupportedPlatform(&'static str),
+    /// An event could not be durably appended to the log, so the audit trail
+    /// for the command would have a hole.
+    #[error(transparent)]
+    Publish(#[from] LogError),
     /// An underlying I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),
