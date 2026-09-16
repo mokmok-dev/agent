@@ -316,13 +316,17 @@ command runs, so a command never starts without its decision recorded. The
 boundary is the platform's native isolation (Seatbelt on macOS;
 bubblewrap-preferred with a Landlock fallback on Linux), and the sandbox has no
 network egress: inference is a daemon capability, reached over the daemon's Unix
-socket, which is the only endpoint a confined command may connect to. Its
-layer-1 executor is macOS-only so far (the Linux backend is the follow-up), the
-macOS profile renders the policy's path entries with protected metadata and
-opens no network, and the `sandbox` feature also carries a session manager
+socket, which is the only endpoint a confined command may connect to (granted by
+path via the policy's `network` domain; IP egress stays denied). Its
+layer-1 executor renders a Seatbelt profile on macOS and a bubblewrap command on
+Linux, falling back to a Landlock-plus-seccomp helper when bubblewrap is absent,
+the macOS profile renders the policy's path entries with protected metadata and grants only
+those sockets, and the `sandbox` feature also carries a session manager
 (`agentd::session`) that launches a configured sandboxed node on a
 `session.requested` event, reports `session.*` lifecycle, restarts a crashed
-node within a budget, enforces a session lifetime, and answers a status request.
+node within a budget, enforces a session lifetime, reconciles its active set
+with the durable log on startup (failing a session the previous daemon left
+open), and answers a status request.
 The binary starts the manager when `--session-command` (with `--sandbox-policy`)
 is given; without it the feature only validates the dependency graph under CI's
 `--all-features`.

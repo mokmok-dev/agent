@@ -54,7 +54,8 @@ Non-goals (stated honestly, per the Sheena precedent):
 - The sandbox is not a boundary for hostile native code. It confines the tool
   calls an agent *requests* against a configured policy.
 - **No general network allowlist.** Egress is denied outright, not filtered by
-  host. A future non-daemon remote service would need the managed-proxy model
+  host; the only network grant is a per-path Unix socket the daemon itself
+  needs. A future non-daemon remote service would need the managed-proxy model
   (codex's `network-proxy` + netns bridge) as a separate, opt-in layer; it is
   not built now because the daemon-mediated path covers inference.
 - **Cedar is not adopted.** A policy language was considered for the path rules
@@ -87,16 +88,17 @@ Non-goals (stated honestly, per the Sheena precedent):
 
 ## Policy model
 
-`Policy` has three domains; its default is deny-everything:
+`Policy` has four domains; its default is deny-everything:
 
-| Domain   | What it controls                                                            |
-| -------- | --------------------------------------------------------------------------- |
-| `fs`     | Path entries (`read`/`write`/`deny`) and protected metadata names            |
-| `shell`  | Environment and working directory                                           |
-| `limits` | Wall-clock timeout and output cap                                           |
+| Domain    | What it controls                                                            |
+| --------- | --------------------------------------------------------------------------- |
+| `fs`      | Path entries (`read`/`write`/`deny`) and protected metadata names            |
+| `shell`   | Environment and working directory                                           |
+| `network` | Unix domain sockets the command may connect to (nothing by default)          |
+| `limits`  | Wall-clock timeout and output cap                                           |
 
-Network is not a domain: it has no configurable surface because egress and
-ingress are denied. There is no command allowlist and no memory or byte cap —
+There is no IP grant: the sandbox has no use for one, and the daemon is reached
+over a local socket. There is no command allowlist and no memory or byte cap —
 each was deleted because it did not hold (an allowlist is a bypassable UX guard;
 macOS cannot enforce a memory cap). See "What was deleted" below.
 
@@ -104,7 +106,13 @@ macOS cannot enforce a memory cap). See "What was deleted" below.
 pub struct Policy {
     pub fs: FsPolicy,
     pub shell: ShellPolicy,
+    pub network: NetworkPolicy,
     pub limits: Limits,
+}
+
+pub struct NetworkPolicy {
+    /// Unix domain sockets the command may connect to, by path.
+    pub unix_sockets: Vec<PathBuf>,
 }
 
 pub struct FsPolicy {
@@ -171,16 +179,28 @@ sandbox profile will treat as a boundary.
 
 ### Network
 
-Network has no allow surface. Egress and ingress are denied at the OS level by
-`deny default` (macOS) / `--unshare-net` plus a seccomp filter (Linux). Inference
-— the reason an earlier design left egress open — is a daemon capability: the
-agent asks the daemon over its Unix socket, and the daemon holds the provider
-credentials and reaches the network. The sandbox thus has no exfiltration
-channel, so per-host rules and an SSRF guard are unnecessary. The daemon-socket
-exception is still pending (roadmap 1: whether a macOS Unix socket needs a
-`network-outbound` grant is unverified); until then the profile denies all
-network access, and a future remote service reached directly would reintroduce
-the managed-proxy model as a separate opt-in.
+Egress and ingress are denied at the OS level by `deny default` (macOS) /
+bubblewrap's `--unshare-all`, or Landlock net rules in the fallback (Linux); the
+only exception is the `network.unix_sockets` list. Inference — the reason an
+earlier design left egress open — is a daemon capability: the agent asks the
+daemon over its Unix socket, and the daemon holds the provider credentials and
+reaches the network.
+The sandbox thus has no IP exfiltration channel, so per-host rules and an SSRF
+guard are unnecessary. A future remote service reached directly would
+reintroduce the managed-proxy model as a separate opt-in.
+
+The daemon grants its own event socket to the session policy when it starts the
+manager, so a launched node can reach the daemon that supervises it. On macOS
+the grant is path-scoped: each socket renders as
+`(allow network-outbound (remote unix-socket (regex #"^.*<path>$")))`, which
+Seatbelt consults only for an AF_UNIX connect and requires to end with the named
+path. Path-scoped `literal`/`subpath` filters do **not** work for a Unix socket
+(verified on macOS 26.6.2: they silently fail to match), and an unfiltered
+`(allow network-outbound)` would open all IP egress, so the `remote unix-socket`
+form is the one that keeps egress denied while permitting exactly the daemon
+socket. The `^.*` prefix is required because Seatbelt matches the path with an
+address prefix ahead of it; the trailing `$` is what rejects a sibling socket
+like `<path>X`.
 
 ## What was deleted
 
@@ -198,7 +218,9 @@ A first-principles pass removed concepts that did not hold:
 - **Resource caps that nothing enforced.** `max_memory_bytes`, `max_total_bytes`,
   and `max_file_bytes` were configuration-only on macOS; a field with no
   enforcement is a false promise.
-- **`NetworkPolicy`.** With egress denied there is no surface to configure.
+- **`NetworkPolicy` as a host/IP allowlist.** With egress denied there was no
+  surface to configure. It returns as a single list of Unix socket paths — the
+  narrowest form the daemon actually needs — and still has no IP grant.
 - **Glob-based `refuse`/`hide`.** They only made sense at the deleted VFS layer.
 - **The command-count guard.** It counted `exec` calls, not processes, so it did
   not bound a fork bomb.
@@ -273,31 +295,59 @@ reported as `session.started`/`exited`/`failed`. Supervision is opt-in: a
 session may be restarted up to `max_restarts` times when it exits non-zero
 (`session.restarted`), and may be given a `lifetime`, after which it is killed
 (`session.failed`). A `session.status.requested` event is answered with a
-`session.status` listing the active sessions. The daemon binary starts the
-manager when `--session-command` (with `--sandbox-policy`) is given.
+`session.status` listing the active sessions. On startup the manager reconciles
+the in-memory active set with the durable log: a session the log shows as
+started but never terminated is recorded as failed (a restarted daemon cannot
+re-adopt a process it did not spawn), so the status never reports a phantom
+session. The daemon binary starts the manager when `--session-command` (with
+`--sandbox-policy`) is given.
 
 ### Layer 1 backends
 
 | Concern                | Linux                                                        | macOS                                 |
 | ---------------------- | ------------------------------------------------------------ | ------------------------------------- |
-| Filesystem confinement | bubblewrap bind mounts (preferred); Landlock ABI V5 fallback  | Seatbelt profile `(deny default)`      |
-| Syscall narrowing      | seccomp filter (block `ptrace`, `io_uring_*`, network)        | not available; profile covers most    |
-| Process isolation      | `--unshare-user/pid/ipc`, `--unshare-net`                     | not available                         |
-| Network                | `--unshare-net` + seccomp                                     | denied by `deny default` (no grant)   |
+| Filesystem confinement | bubblewrap: read-only host root, read-write write entries; Landlock allowlist fallback | Seatbelt profile `(deny default)`      |
+| Denials                | bubblewrap masks after the binds; Landlock omits the path    | `deny` read rules after the broad read grant |
+| Syscall narrowing      | seccomp deny-list in the fallback (`ptrace`, `io_uring_*`, `bpf`, `userfaultfd`, ...) | not available; profile covers most    |
+| Process isolation      | `--unshare-all`, `--die-with-parent`                          | not available                         |
+| Network                | `--unshare-all` drops the network namespace; the fallback denies TCP with Landlock net rules | `deny default`; only `network.unix_sockets` granted |
 | Host binary control    | a fixed system `PATH`; the profile, not the path, confines    | same                                  |
 
-**bubblewrap is preferred over Landlock** because it gives read-only root binds,
-a private `/dev`, namespaces, and `--cap-drop ALL` in one mechanism, whereas
-Landlock confines paths only. `find_system_bwrap_in_path` must exclude a `bwrap`
-inside the workspace, so a repo cannot supply the very binary that builds the
-boundary. When the system bwrap lacks `--ro-bind-fd`, it is rewritten to
-`--ro-bind /proc/self/fd/<fd>` with a mount verification.
+**bubblewrap is preferred over Landlock** because it gives a read-only host root,
+a private `/dev`, namespaces, and network isolation in one mechanism, whereas
+Landlock confines paths only and cannot subtract a nested denial. The binary is
+looked up on `PATH` and a `bwrap` inside a policy `write` root is rejected, so a
+repository cannot supply the very binary that builds the boundary. Reads are
+broad (the whole host root is bound read-only), matching macOS; write entries are
+bound read-write; an existing protected name (`.git`, `.agents`) inside a write
+root is re-bound read-only; a `deny` nested in a write root is masked after the
+binds, so a later mount overrides the earlier grant. Unlike macOS, that mask
+hides a denied directory entirely rather than carving it out read-only, and
+`AF_UNIX` sockets are not path-scoped because `--unshare-net` does not isolate
+them — stated gaps.
 
-**One binary, two personalities.** The Linux helper is not a second binary:
-`agentd` places a `agentd-sandbox` symlink to its own executable in its runtime
-directory, prepends that directory to `PATH`, and dispatches on `argv[0]`
-(`codex-linux-sandbox`'s arg0 trick). This keeps the helper on a trusted path and
-avoids shipping and locating a separate executable.
+**When bubblewrap is absent**, the [`agentd-sandbox-helper`](#the-landlock-helper)
+binary applies a Landlock allowlist and a seccomp deny-list before `exec`. The
+executor renders the policy into the path allowlist (system roots read-execute,
+read entries read-only, write roots read-write, `deny` entries omitted because
+Landlock cannot subtract), writes it to the scratch directory, and invokes the
+helper. The helper also handles Landlock network access without allowing it, so
+TCP bind and connect are denied; `AF_UNIX` is unaffected. Network handling needs
+Landlock ABI v4 (Linux 6.7) and is best-effort, so on an older kernel the
+fallback leaves egress unconfined — a stated gap.
+
+### The Landlock helper
+
+Applying confinement to a child without the `unsafe` `pre_exec` the workspace
+forbids needs a separate program. The helper is a dedicated binary
+(`agentd-sandbox-helper`) rather than an `argv[0]` overloading of the daemon:
+a separate binary is directly testable and needs no daemon wiring. It is found
+on `PATH`, or via `AGENTD_SANDBOX_HELPER`; a helper inside a policy `write` root
+is rejected. It is invoked as `agentd-sandbox-helper <spec> <program> [args...]`
+and fails closed: any setup error exits non-zero before `exec`, so the command
+never runs unconfined. It is a workspace binary, so it must be built explicitly
+(`cargo build --workspace --bins`) and installed next to the daemon or on
+`PATH`; a dependency build does not produce it.
 
 ## Permission and violation events
 
@@ -361,7 +411,8 @@ Prevented:
   entry).
 - **Self-approval.** A client cannot publish a `sandbox.permission.*` event
   without the `authority` claim, so an agent cannot approve its own command.
-- **Network egress.** A confined command cannot open an IP connection.
+- **Network egress.** A confined command cannot open an IP connection; the only
+  network reachable is a Unix socket the policy names.
 - Reads of the paths named in `deny` entries, held against a spawned host
   binary and verified end to end.
 
@@ -382,9 +433,13 @@ Stated gaps:
   allow-list matches paths, so a pre-existing hard link under the root can be
   written through. Creating the link requires access outside the sandbox, so it
   is a precondition, not something a confined command can set up.
-- **Linux is not implemented yet.** The bwrap/Landlock/seccomp backends and the
-  arg0 helper are the immediate follow-up; the crate compiles on Linux but runs
-  nothing.
+- **Linux denials are coarser than macOS.** With bubblewrap a `deny` nested in a
+  write root is masked (hidden) rather than carved out read-only, and a fresh
+  protected name can still be created inside a write root. With the Landlock
+  fallback a nested `deny` is not enforced at all (Landlock cannot subtract), and
+  TCP denial needs Landlock ABI v4 (Linux 6.7) — on an older kernel the fallback
+  leaves egress unconfined. `AF_UNIX` sockets are not path-scoped on either
+  backend.
 
 ## Testing strategy
 
@@ -401,11 +456,20 @@ Modeled on Sheena's methodology and codex's, adapted to Rust:
 - **Violation flow tests**: a structured `sandbox.violation.*` for a recognised
   OS denial, and no violation for an unrelated failure.
 - **Session tests**: `sandbox.session.started`/`exited` over the log, piped
-  stdin/stdout streaming, approval denial, and a real confined session that
-  streams I/O under the Seatbelt profile.
+  stdin/stdout streaming, approval denial, a real confined session that streams
+  I/O under the Seatbelt profile, and a real sandboxed process that reaches a
+  granted Unix socket but not an ungranted one.
 - **Session manager tests**: `session.*` lifecycle, restart within the budget, a
-  lifetime kill, a spawn failure, and a status request answered with the active
-  sessions.
+  lifetime kill, a spawn failure, a status request answered with the active
+  sessions, and startup reconciliation (an open session is failed, a terminated
+  one is left alone).
+- **Linux tests**: the bubblewrap argument renderer, and, where a namespace can
+  be built, real writes reaching a write entry, a denial masking a path, an
+  outside write failing, environment scrubbing, session streaming, and a
+  timeout killing the process group; the Landlock spec, and a real Landlock
+  session that confines the filesystem, refuses a denied read, denies TCP, and
+  reports seccomp active through `/proc/self/status`. The Nix build sandbox
+  cannot nest bubblewrap, so those spawn tests skip there as on macOS.
 - **Differential tests**: golden files recorded from real bash + coreutils for
   layer 1 behavior, replayed in CI without the recorded host.
 - **Benchmarks**: sandbox construction, trivial `exec` overhead, parallel
@@ -415,26 +479,28 @@ Modeled on Sheena's methodology and codex's, adapted to Rust:
 
 Triggers, not dates — none of these steps are taken early:
 
-1. Allow the daemon UDS in the rendered profile when the session manager needs
-   it (egress is otherwise denied already; whether a macOS Unix socket needs a
-   `network-outbound` grant is unverified).
-2. Linux backend: bubblewrap preferred, Landlock fallback, seccomp for network
-   and syscall narrowing, with the arg0 self-exec helper.
-3. Session persistence: the active-session set is in memory, so a daemon restart
-   forgets running sessions; reconcile the log on startup.
+1. The macOS differential test corpus: golden files from real bash and coreutils,
+   replayed in CI without the recorded host.
+2. Benchmarks: sandbox construction, trivial `exec` overhead, and parallel
+   throughput, to measure the "lighter than a container" claim.
 
 ## Implementation status
 
-The crate matches this design except for the follow-ups above: `Policy` is the
-three-domain path-entry model with no allowlist or caps, the macOS profile
-renders the entries with protected metadata and root-unlink denial and opens no
-network, a denial is classified into a `sandbox.violation.*` event, the
-human-in-the-loop approval flow runs over the log with `request_id`
-correlation, the long-lived session spawn API is in place, and the deleted
-concepts (VFS, allowlist, caps) are gone from the code. The daemon-side
-`agentd::session` manager is started by the binary (`--session-command` with
-`--sandbox-policy`), launches a configured node on `session.requested`, reports
-`session.*` lifecycle, restarts within a budget, enforces a lifetime, and answers
-a status request. What remains unimplemented is the Linux backend, the daemon UDS
-allowance, and session persistence across a daemon restart. A crate doc comment
-records the same status next to the code.
+The crate matches this design: `Policy` is the four-domain
+model (filesystem path entries, shell, network Unix sockets, limits) with no
+allowlist or caps, the macOS profile renders the entries with protected metadata
+and root-unlink denial, denies IP egress, and grants only the policy's Unix
+domain sockets by path, the Linux executor renders the policy into a bubblewrap
+command (read-only host root, read-write write entries, masked denials, network
+unshared) or, without bubblewrap, into a Landlock allowlist plus a seccomp
+deny-list applied by the `agentd-sandbox-helper` binary, a denial is classified
+into a `sandbox.violation.*` event, the human-in-the-loop approval flow runs over
+the log with `request_id` correlation, the long-lived session spawn API is in
+place, and the deleted concepts (VFS, allowlist, caps) are gone from the code.
+The daemon-side `agentd::session` manager is started by the binary
+(`--session-command` with `--sandbox-policy`), grants the daemon's own socket to
+the session policy, launches a configured node on `session.requested`, reports
+`session.*` lifecycle, restarts within a budget, enforces a lifetime, reconciles
+the durable log on startup (failing any session the previous daemon left open),
+and answers a status request. The remaining work is the stated gaps above, not a
+missing backend. A crate doc comment records the same status next to the code.

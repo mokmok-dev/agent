@@ -9,9 +9,10 @@
 //!   the fate of the process group on timeout. Inside a write root, the
 //!   protected metadata names (`.git`, `.agents`) are carved out read-only, and
 //!   the root itself cannot be renamed or unlinked.
-//! - **Network is denied**: there is no `network-outbound`/`network-inbound`
-//!   grant, so egress and ingress fall under `deny default`. The daemon's Unix
-//!   socket exception arrives with the session manager; see `docs/sandbox.md`.
+//! - **Network is denied** except for the policy's Unix domain sockets: there
+//!   is no IP grant, so egress and ingress fall under `deny default`, while
+//!   each `network.unix_sockets` entry renders as a path-scoped
+//!   `network-outbound` grant. See `docs/sandbox.md`.
 //! - **File reads are NOT path-confined** at the OS level: on macOS 26,
 //!   platform binaries abort inside `dyld4::CacheFinder` when their reads are
 //!   filtered (`file-read*`/`file-read-data` with subpath filters abort
@@ -25,33 +26,14 @@
 //! Seatbelt is officially unsupported by Apple and profiles are best-effort.
 
 use std::fs;
-use std::io;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-
-use nix::sys::signal::{Signal, killpg};
-use nix::unistd::Pid;
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
-use tokio::time::timeout;
 
 use crate::error::SandboxError;
 use crate::executor::{ExecResult, SpawnError};
 use crate::policy::{Access, FsPolicy, Policy};
-
-/// The system directories the confined `PATH` is built from.
-const SYSTEM_BIN_DIRS: &[&str] = &[
-    "/bin",
-    "/sbin",
-    "/usr/bin",
-    "/usr/sbin",
-    "/usr/local/bin",
-    "/opt/homebrew/bin",
-];
+use crate::process;
 
 /// The Seatbelt front-end. Unconfined itself: it applies the profile to its
 /// child.
@@ -59,10 +41,6 @@ const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 /// The shell the command runs under.
 const BASH: &str = "/bin/bash";
-
-const EXIT_CANNOT_EXECUTE: i32 = 126;
-const EXIT_TIMED_OUT: i32 = 124;
-const SIGKILL_EXIT: i32 = 128 + 9;
 
 /// The macOS layer-1 executor: renders a Seatbelt profile from the policy at
 /// construction and spawns commands under it.
@@ -110,14 +88,20 @@ impl ConfinedProcessExecutor {
     /// unusable workdir or path entry, and [`SandboxError::Io`] when the
     /// scratch directory or profile cannot be written.
     pub fn new(policy: &Policy) -> Result<Self, SandboxError> {
+        // Validate here as well as in `Sandbox::new`: this constructor is
+        // public, and an unrepresentable path must fail closed rather than
+        // inject a profile clause.
+        policy
+            .validate()
+            .map_err(|error| SandboxError::InvalidPolicy(error.to_string()))?;
         if fs::metadata(SANDBOX_EXEC).is_err() {
             return Err(SandboxError::UnsupportedPlatform(
                 "sandbox-exec is not available",
             ));
         }
-        let workdir = validate_workdir(&policy.shell.workdir, &policy.fs)?;
-        let path_dirs = system_path_dirs();
-        let scratch = create_scratch()?;
+        let workdir = process::validate_workdir(&policy.shell.workdir, &policy.fs)?;
+        let path_dirs = process::system_path_dirs();
+        let scratch = process::create_scratch()?;
 
         // The scratch directory now exists, so every later failure must remove
         // it rather than leak a directory per rejected policy.
@@ -144,15 +128,6 @@ impl ConfinedProcessExecutor {
             timeout: policy.limits.timeout,
             max_output_bytes: policy.limits.max_output_bytes,
         })
-    }
-
-    fn cannot_execute(message: &str) -> ExecResult {
-        ExecResult {
-            stdout: String::new(),
-            stderr: format!("[agentd-sandbox] {message}"),
-            exit_code: EXIT_CANNOT_EXECUTE,
-            denied: false,
-        }
     }
 
     /// Builds the confined `sandbox-exec` command for `command`, with the
@@ -187,200 +162,13 @@ impl ConfinedProcessExecutor {
         &self,
         command: &str,
     ) -> ExecResult {
-        let mut std_command = self.std_command(command);
-        std_command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = match Command::from(std_command).spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                return Self::cannot_execute(&format!(
-                    "spawning the confined command failed: {error}"
-                ));
-            },
-        };
-        let pid = child.id();
-
-        let stdout_data = &mut Vec::new();
-        let stderr_data = &mut Vec::new();
-        let remaining = Arc::new(AtomicU64::new(self.max_output_bytes));
-        let truncated = Arc::new(AtomicBool::new(false));
-        let stdout_pipe = child.stdout.take();
-        let stderr_pipe = child.stderr.take();
-
-        let wait = async {
-            let stdout_state = Capture {
-                data: stdout_data,
-                remaining: remaining.clone(),
-                truncated: truncated.clone(),
-                pid,
-            };
-            let stderr_state = Capture {
-                data: stderr_data,
-                remaining: remaining.clone(),
-                truncated: truncated.clone(),
-                pid,
-            };
-            let (stdout_read, stderr_read) = tokio::join!(
-                capture(stdout_pipe, stdout_state),
-                capture(stderr_pipe, stderr_state),
-            );
-            match (stdout_read, stderr_read) {
-                (Ok(()), Ok(())) => child.wait().await,
-                (Err(error), _) | (_, Err(error)) => Err(error),
-            }
-        };
-
-        let (mut exit_code, timed_out) = match timeout(self.timeout, Box::pin(wait)).await {
-            Ok(Ok(status)) => (
-                status.code().unwrap_or_else(|| {
-                    status
-                        .signal()
-                        .map_or(EXIT_CANNOT_EXECUTE, |signal| 128 + signal)
-                }),
-                false,
-            ),
-            Ok(Err(error)) => {
-                kill_group(pid);
-                let _ = child.wait().await;
-                return Self::cannot_execute(&format!("waiting for the command failed: {error}"));
-            },
-            Err(_) => {
-                kill_group(pid);
-                let _ = timeout(Duration::from_secs(5), child.wait()).await;
-                (EXIT_TIMED_OUT, true)
-            },
-        };
-        // The capture task already killed the process group when the cap was
-        // hit; the child is reaped by now, so the pid must not be signalled
-        // again (it may belong to someone else).
-        if truncated.load(Ordering::Relaxed) {
-            exit_code = exit_code.max(SIGKILL_EXIT);
-        }
-
-        let stdout = String::from_utf8_lossy(stdout_data).into_owned();
-        let mut stderr = String::from_utf8_lossy(stderr_data).into_owned();
-        if timed_out {
-            stderr.push_str("\n[agentd-sandbox] command exceeded the wall-clock timeout");
-        }
-        if truncated.load(Ordering::Relaxed) {
-            stderr.push_str("\n[agentd-sandbox] output truncated at max_output_bytes");
-        }
-        ExecResult {
-            stdout,
-            stderr,
-            exit_code,
-            denied: false,
-        }
+        process::run(
+            self.std_command(command),
+            self.timeout,
+            self.max_output_bytes,
+        )
+        .await
     }
-}
-
-fn kill_group(pid: Option<u32>) {
-    let Some(pid) = pid else {
-        return;
-    };
-    let Ok(raw) = i32::try_from(pid) else {
-        return;
-    };
-    let _ = killpg(Pid::from_raw(raw), Signal::SIGKILL);
-}
-
-/// One output-capture pipe's read loop: appends up to the shared remaining
-/// byte budget, then kills the process group so the producer cannot fill the
-/// pipe forever.
-struct Capture<'a> {
-    data: &'a mut Vec<u8>,
-    remaining: Arc<AtomicU64>,
-    truncated: Arc<AtomicBool>,
-    pid: Option<u32>,
-}
-
-async fn capture<R: tokio::io::AsyncRead + Unpin>(
-    pipe: Option<R>,
-    state: Capture<'_>,
-) -> io::Result<()> {
-    let Some(mut pipe) = pipe else {
-        return Ok(());
-    };
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = pipe.read(&mut buffer).await?;
-        if read == 0 {
-            return Ok(());
-        }
-        let allowed = usize::try_from(state.remaining.load(Ordering::Relaxed))
-            .unwrap_or(usize::MAX)
-            .min(read);
-        state.data.extend_from_slice(&buffer[..allowed]);
-        state.remaining.fetch_sub(allowed as u64, Ordering::Relaxed);
-        if allowed < read {
-            state.truncated.store(true, Ordering::Relaxed);
-            kill_group(state.pid);
-            return Ok(());
-        }
-    }
-}
-
-/// Validates the workdir and returns its canonical form.
-///
-/// The workdir must be absolute, exist as a directory, and be covered by a
-/// `write` entry: a workdir the process cannot write is not a workspace. A
-/// workdir outside every write root is rejected rather than silently running
-/// read-only.
-fn validate_workdir(
-    workdir: &Path,
-    fs_policy: &FsPolicy,
-) -> Result<PathBuf, SandboxError> {
-    if !workdir.is_absolute() {
-        return Err(SandboxError::InvalidPolicy(format!(
-            "workdir {:?} must be absolute",
-            workdir.display().to_string()
-        )));
-    }
-    let metadata = fs::metadata(workdir).map_err(|error| {
-        SandboxError::InvalidPolicy(format!(
-            "workdir {} is not accessible: {error}",
-            workdir.display()
-        ))
-    })?;
-    if !metadata.is_dir() {
-        return Err(SandboxError::InvalidPolicy(format!(
-            "workdir {} is not a directory",
-            workdir.display()
-        )));
-    }
-    let canonical = workdir.canonicalize()?;
-    let covered = fs_policy.entries.iter().any(|entry| {
-        entry.access == Access::Write
-            && entry
-                .path
-                .canonicalize()
-                .is_ok_and(|root| canonical.starts_with(&root))
-    });
-    if !covered {
-        return Err(SandboxError::InvalidPolicy(format!(
-            "workdir {} is not inside a write entry",
-            workdir.display()
-        )));
-    }
-    Ok(canonical)
-}
-
-fn create_scratch() -> Result<PathBuf, SandboxError> {
-    let scratch = std::env::temp_dir().join(format!("agentd-sandbox-{}", uuid::Uuid::now_v7()));
-    fs::create_dir_all(&scratch)?;
-    Ok(scratch)
-}
-
-/// The system directories that exist, as the confined `PATH`.
-fn system_path_dirs() -> Vec<PathBuf> {
-    SYSTEM_BIN_DIRS
-        .iter()
-        .filter(|dir| Path::new(dir).is_dir())
-        .map(PathBuf::from)
-        .collect()
 }
 
 /// The canonical host directories that receive OS-level write grants.
@@ -493,12 +281,7 @@ fn prepare(
 ) -> Result<(PathBuf, String), SandboxError> {
     let deny = validate_deny(&policy.fs, workdir, path_dirs, scratch)?;
     writable_hosts(&policy.fs)?;
-    let path_env = std::env::join_paths(path_dirs.iter().map(Path::new))
-        .map_err(|error| {
-            SandboxError::InvalidPolicy(format!("confined PATH is malformed: {error}"))
-        })?
-        .to_string_lossy()
-        .into_owned();
+    let path_env = process::join_path(path_dirs)?;
 
     let profile = render_profile(policy, scratch, &deny);
     let profile_path = scratch.join("profile.sb");
@@ -536,6 +319,31 @@ fn regex_escape(text: &str) -> String {
         escaped.push(character);
     }
     escaped
+}
+
+/// The `network-outbound` grants for the policy's Unix domain sockets.
+///
+/// Seatbelt matches an `AF_UNIX` connect against a subject that carries an
+/// address prefix ahead of the socket path, so a `^`-anchored pattern cannot
+/// start at the path: `^.*<path>$` anchors the path's end while absorbing the
+/// prefix. The leading `^.*` is not a blanket grant — Seatbelt only consults
+/// this filter for an `AF_UNIX` connect, and the pattern must still end with the
+/// named path, so TCP egress stays denied and a different socket does not match.
+fn unix_socket_grants(policy: &Policy) -> Vec<String> {
+    let mut grants: Vec<String> = policy
+        .network
+        .unix_sockets
+        .iter()
+        .map(|socket| {
+            format!(
+                "(allow network-outbound (remote unix-socket (regex #\"^.*{}$\")))",
+                regex_escape(&socket.display().to_string())
+            )
+        })
+        .collect();
+    grants.sort();
+    grants.dedup();
+    grants
 }
 
 /// The protected-metadata denial for one write root: writing anything at
@@ -606,7 +414,11 @@ fn render_profile(
 
     lines.push(String::from("(allow sysctl-read)"));
 
-    // No network grant: egress and ingress fall under `deny default`.
+    // Network is denied by default; only the policy's Unix domain sockets are
+    // reachable. The `.*` absorbs the address prefix Seatbelt matches ahead of
+    // the socket path, so the grant anchors the path's end without opening
+    // egress to anything else (see `unix_socket_grants`).
+    lines.extend(unix_socket_grants(policy));
 
     // Protected metadata is carved out of the write roots, and the roots
     // themselves cannot be renamed or unlinked. Both are denials emitted after
@@ -643,25 +455,19 @@ impl crate::executor::Executor for ConfinedProcessExecutor {
         &self,
         command: &str,
     ) -> Result<tokio::process::Child, SpawnError> {
-        let mut std_command = self.std_command(command);
-        std_command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let child = Command::from(std_command).spawn()?;
-        Ok(child)
+        process::spawn(self.std_command(command))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfinedProcessExecutor, regex_escape, render_profile, validate_deny, validate_workdir,
-        writable_hosts,
+        ConfinedProcessExecutor, regex_escape, render_profile, validate_deny, writable_hosts,
     };
     use crate::error::SandboxError;
     use crate::executor::Executor;
-    use crate::policy::{Access, EnvVar, FsEntry, FsPolicy, Policy, ShellPolicy};
+    use crate::policy::{Access, EnvVar, FsEntry, FsPolicy, NetworkPolicy, Policy, ShellPolicy};
+    use crate::process::validate_workdir;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
@@ -761,6 +567,41 @@ mod tests {
             "a read entry must not be writable: {write_line}"
         );
         assert!(write_line.contains("(literal \"/dev/null\")"));
+    }
+
+    #[test]
+    fn a_unix_socket_renders_a_path_scoped_outbound_grant() {
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        let socket = host.join("agentd.sock");
+        let policy = Policy {
+            network: NetworkPolicy {
+                unix_sockets: vec![socket.clone()],
+            },
+            ..workdir_policy(&host)
+        };
+
+        let profile = render_profile(&policy, Path::new("/tmp/scratch"), &[]);
+
+        let pattern = format!(
+            "(allow network-outbound (remote unix-socket (regex #\"^.*{}$\")))",
+            regex_escape(&socket.display().to_string())
+        );
+        assert!(
+            profile.contains(&pattern),
+            "the socket must be granted by path: {profile}"
+        );
+        // The grant is the only network clause: ingress and IP egress stay
+        // denied, because no other `network-*` line is rendered.
+        assert!(
+            !profile.contains("network-inbound"),
+            "ingress must stay denied: {profile}"
+        );
+        assert_eq!(
+            profile.matches("network-").count(),
+            1,
+            "only the socket grant may appear: {profile}"
+        );
     }
 
     #[test]
@@ -1263,6 +1104,76 @@ mod tests {
         let tmp = executor.blocking_exec("touch /tmp/agentd-sandbox-blocked");
         assert_ne!(tmp.exit_code, 0, "stderr: {}", tmp.stderr);
         assert!(!Path::new("/tmp/agentd-sandbox-blocked").exists());
+    }
+
+    #[test]
+    fn a_sandboxed_process_reaches_only_a_granted_unix_socket() {
+        use std::io::{Read, Write};
+
+        if !spawn_tests_supported() {
+            return;
+        }
+
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        let granted = host.join("granted.sock");
+        let other = host.join("other.sock");
+
+        let listener = std::os::unix::net::UnixListener::bind(&granted).expect("bind granted");
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().expect("accept");
+            let mut buf = [0_u8; 64];
+            let read = conn.read(&mut buf).expect("read");
+            conn.write_all(b"ok").expect("write");
+            String::from_utf8_lossy(&buf[..read]).into_owned()
+        });
+
+        let policy = Policy {
+            fs: FsPolicy {
+                entries: vec![FsEntry {
+                    path: host.clone(),
+                    access: Access::Write,
+                }],
+                ..FsPolicy::default()
+            },
+            shell: ShellPolicy {
+                workdir: host,
+                ..ShellPolicy::default()
+            },
+            network: NetworkPolicy {
+                unix_sockets: vec![granted.clone()],
+            },
+            ..Policy::default()
+        };
+        let executor = executor(&policy);
+
+        let reached =
+            executor.blocking_exec(&format!("echo ping | /usr/bin/nc -U {}", granted.display()));
+        let received = server.join().expect("server thread");
+        assert_eq!(reached.exit_code, 0, "stderr: {}", reached.stderr);
+        assert_eq!(received, "ping\n");
+
+        // A socket the policy does not name is refused even though it exists
+        // and is served, so the grant is scoped to the named path and not to
+        // `AF_UNIX` at large. The served socket closes immediately, so a grant
+        // that wrongly allowed the connection would let `nc` exit zero fast
+        // rather than hang until the executor timeout.
+        let other_listener = std::os::unix::net::UnixListener::bind(&other).expect("bind other");
+        let other_server = std::thread::spawn(move || {
+            if let Ok((mut conn, _)) = other_listener.accept() {
+                let _ = conn.write_all(b"ok");
+            }
+        });
+        let denied =
+            executor.blocking_exec(&format!("echo ping | /usr/bin/nc -U {}", other.display()));
+        assert_ne!(
+            denied.exit_code, 0,
+            "an ungranted socket must be refused: `nc` exited {}",
+            denied.exit_code
+        );
+        // Unblock and join the server when the connection was correctly denied.
+        let _ = std::os::unix::net::UnixStream::connect(&other);
+        other_server.join().expect("other server");
     }
 
     #[test]

@@ -5,10 +5,11 @@
 //!
 //! The crate is deny-by-default for what a command can *do*: the [`Policy`]
 //! zero value grants no path access, runs no command, and opens no listener.
-//! Network egress and ingress are denied outright; the filesystem policy is one
-//! list of path entries (`Access::Read`/`Write`/`Deny`) that the executor
-//! renders into an OS confinement profile — Seatbelt on macOS, with a
-//! bubblewrap/Landlock backend planned for Linux. The executor renders from the
+//! Network egress and ingress are denied outright except for the Unix domain
+//! sockets in the policy's network domain; the filesystem policy is one list of
+//! path entries (`Access::Read`/`Write`/`Deny`) that the executor renders into
+//! an OS confinement profile — Seatbelt on macOS, bubblewrap on Linux with a
+//! Landlock-plus-seccomp helper as the fallback. The executor renders from the
 //! policy; the policy is the interface.
 //!
 //! # Example
@@ -50,7 +51,13 @@
 mod error;
 mod events;
 mod executor;
+#[cfg(target_os = "linux")]
+pub mod helper;
+#[cfg(target_os = "linux")]
+mod linux;
 mod policy;
+#[cfg(unix)]
+mod process;
 mod sandbox;
 #[cfg(target_os = "macos")]
 mod seatbelt;
@@ -65,7 +72,8 @@ pub use events::{
 };
 pub use executor::{ConfinedProcessExecutor, ExecResult, Executor, SpawnError};
 pub use policy::{
-    Access, EnvAllowlist, EnvVar, FsEntry, FsPolicy, Limits, Policy, PolicyError, ShellPolicy,
+    Access, EnvAllowlist, EnvVar, FsEntry, FsPolicy, Limits, NetworkPolicy, Policy, PolicyError,
+    ShellPolicy,
 };
 pub use sandbox::{Approval, Sandbox, Session};
 pub use violation::{

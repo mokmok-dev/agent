@@ -141,17 +141,23 @@ The remaining work is on the daemon side and is tracked in `docs/sandbox.md`:
 1. The session manager `agentd::session` (behind the `sandbox` feature, started
    by the binary via `--session-command`/`--sandbox-policy`) reacts to a
    `session.requested` event by launching a configured sandboxed node, reports
-   `session.*` lifecycle, and restarts a crashed node within a budget. Sessions
-   are in memory, so a daemon restart does not yet reconcile running nodes.
+   `session.*` lifecycle, and restarts a crashed node within a budget. On
+   startup it reconciles the active set with the durable log, failing any node
+   the previous daemon left open (a process cannot be re-adopted across a
+   restart).
 2. The sandbox has a long-lived spawn API (`Sandbox::spawn` returning a
    `Session` with piped stdio).
 3. The whole node process is confined by one profile; child processes inherit
    it, so per-command `sandbox.permission.*` events are not emitted.
 4. The node's connection to the daemon is the one allowed network path: egress is
-   denied outright, and the sandbox must explicitly permit the daemon's Unix
-   socket (the macOS `network-outbound` requirement for a Unix socket is still
-   unverified). The node needs no read of host files, and the database lives in
-   its own session write entry, so the file-effect policy is otherwise unchanged.
+   denied outright, and the daemon grants its own Unix socket to the session
+   policy (`network.unix_sockets`), rendered as a path-scoped Seatbelt
+   `network-outbound (remote unix-socket ...)` grant. Because the sandbox
+   overrides `HOME` to its scratch directory, the node's default
+   `~/.agentd/agentd.sock` resolves to the scratch path, so `--session-command`
+   must pass the daemon's absolute `--socket` (and its `--token-file`). The node
+   needs no read of host files, and the database lives in its own session write
+   entry, so the file-effect policy is otherwise unchanged.
 
 ## Stated gaps
 

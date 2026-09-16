@@ -98,6 +98,9 @@ struct SessionOptions {
     policy_path: PathBuf,
     agent_id: String,
     supervision: agentd::session::Supervision,
+    /// The daemon's own event socket, granted to the session's policy so the
+    /// launched node can reach the daemon it is supervised by.
+    socket: PathBuf,
 }
 
 /// Starts the session manager and a shutdown watcher for it.
@@ -106,8 +109,11 @@ fn start_session_manager(
     log: &EventLog,
     options: SessionOptions,
 ) -> Result<(), RunError> {
-    let policy: agentd_sandbox::Policy =
+    let mut policy: agentd_sandbox::Policy =
         serde_json::from_str(&std::fs::read_to_string(&options.policy_path)?)?;
+    if !policy.network.unix_sockets.contains(&options.socket) {
+        policy.network.unix_sockets.push(options.socket.clone());
+    }
     let manager = agentd::session::SessionManager::new(
         log.clone(),
         &policy,
@@ -180,6 +186,7 @@ async fn run() -> Result<(), RunError> {
                         policy_path,
                         agent_id: session_agent_id.clone(),
                         supervision,
+                        socket: socket.clone(),
                     },
                 )?;
             }

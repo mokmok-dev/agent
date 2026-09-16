@@ -334,7 +334,6 @@ impl Session {
     ///
     /// Returns an I/O error when the child cannot be signalled.
     pub async fn kill(&mut self) -> std::io::Result<()> {
-        #[cfg(target_os = "macos")]
         if let Some(pid) = self.pid
             && let Ok(raw) = i32::try_from(pid)
         {

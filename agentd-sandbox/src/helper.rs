@@ -1,0 +1,199 @@
+//! The Linux confinement helper: a small executable that applies a Landlock
+//! ruleset and a seccomp filter to itself, then `exec`s the confined command.
+//!
+//! Applying confinement to a child process without the `unsafe` `pre_exec` that
+//! the workspace forbids needs a separate program: the executor serializes a
+//! [`Spec`] to a file in its scratch directory and invokes this helper, which is
+//! the only process that calls the confinement syscalls. The helper is a
+//! dedicated binary rather than an `argv[0]` overloading of the daemon, because
+//! a separate binary is directly testable and needs no daemon wiring.
+//!
+//! The helper is invoked as `agentd-sandbox-helper <spec> <program> [args...]`.
+//! It fails closed: any setup error exits non-zero before `exec`, so the
+//! command never runs unconfined.
+
+use std::ffi::OsString;
+use std::fs;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use landlock::{
+    ABI, Access, AccessFs, AccessNet, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+};
+use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetArch};
+use serde::{Deserialize, Serialize};
+
+/// The filesystem confinement the helper applies.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Spec {
+    /// The path rules, evaluated as an allowlist.
+    pub paths: Vec<PathRule>,
+}
+
+/// One Landlock path rule.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PathRule {
+    /// The absolute host path.
+    pub path: PathBuf,
+    /// The access granted on `path` and everything under it.
+    pub access: PathAccess,
+}
+
+/// The access a [`PathRule`] grants.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PathAccess {
+    /// Read files and list directories.
+    Read,
+    /// Read and execute, for the system directories a shell needs.
+    ReadExecute,
+    /// Read, write, and execute.
+    Write,
+}
+
+/// The syscalls the helper refuses with `EPERM`.
+///
+/// This is a deny-list, a defence in depth on top of Landlock and the network
+/// namespace: the calls that escape a sandbox or smuggle kernel access. It does
+/// not block ordinary commands, so it cannot be observed from a shell other
+/// than through `/proc/self/status`.
+pub(crate) const BLOCKED_SYSCALLS: &[i64] = &[
+    libc::SYS_ptrace,
+    libc::SYS_process_vm_readv,
+    libc::SYS_process_vm_writev,
+    libc::SYS_io_uring_setup,
+    libc::SYS_io_uring_enter,
+    libc::SYS_io_uring_register,
+    libc::SYS_bpf,
+    libc::SYS_userfaultfd,
+    libc::SYS_keyctl,
+    libc::SYS_add_key,
+    libc::SYS_request_key,
+    libc::SYS_kexec_load,
+    libc::SYS_open_by_handle_at,
+    libc::SYS_perf_event_open,
+];
+
+/// The helper entry point: reads the spec, confines itself, and `exec`s.
+///
+/// Never returns on success — `exec` replaces the process. On failure it prints
+/// the reason and returns a non-zero code, so the command is not run.
+#[must_use]
+pub fn run() -> ExitCode {
+    let mut args = std::env::args_os();
+    let _program = args.next();
+    let Some(spec_path) = args.next() else {
+        eprintln!(
+            "[agentd-sandbox-helper] usage: agentd-sandbox-helper <spec> <program> [args...]"
+        );
+        return ExitCode::FAILURE;
+    };
+    let command: Vec<OsString> = args.collect();
+    if let Err(error) = confine(Path::new(&spec_path), &command) {
+        eprintln!("[agentd-sandbox-helper] {error}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// Reads `spec_path`, applies the confinement, and replaces the process with
+/// `command`.
+///
+/// # Errors
+///
+/// Returns a message when the spec cannot be read or parsed, a rule cannot be
+/// applied, or the command is empty or cannot be executed.
+pub(crate) fn confine(
+    spec_path: &Path,
+    command: &[OsString],
+) -> Result<(), String> {
+    let raw = fs::read(spec_path).map_err(|error| format!("cannot read the spec: {error}"))?;
+    let spec: Spec =
+        serde_json::from_slice(&raw).map_err(|error| format!("cannot parse the spec: {error}"))?;
+    apply_landlock(&spec.paths)?;
+    apply_seccomp(BLOCKED_SYSCALLS)?;
+    let (program, args) = command
+        .split_first()
+        .ok_or_else(|| String::from("no command to run"))?;
+    let error = std::process::Command::new(program).args(args).exec();
+    Err(format!(
+        "cannot execute {}: {error}",
+        program.to_string_lossy()
+    ))
+}
+
+/// Applies the Landlock allowlist ruleset to the current thread and its
+/// children.
+///
+/// Filesystem access is allowlisted by the rules. Network access is *handled*
+/// but never allowed, so TCP bind and connect are denied outright; `AF_UNIX`
+/// sockets are filesystem objects and are unaffected. Network handling needs
+/// Landlock ABI v4 (Linux 6.7) and is best-effort: on an older kernel it is
+/// silently dropped and egress is not confined.
+fn apply_landlock(rules: &[PathRule]) -> Result<(), String> {
+    let abi = ABI::V1;
+    let handled = AccessFs::from_all(abi);
+    let net = AccessNet::from_all(ABI::V4);
+    let mut ruleset = Ruleset::default()
+        .handle_access(handled)
+        .and_then(|ruleset| ruleset.handle_access(net))
+        .and_then(Ruleset::create)
+        .map_err(|error| format!("cannot create the Landlock ruleset: {error}"))?;
+    for rule in rules {
+        let access = access_for(rule.access, abi);
+        if !rule.path.exists() {
+            // Landlock cannot express a missing path; the executor only lists
+            // paths it verified, so a vanished path grants nothing.
+            continue;
+        }
+        let fd = PathFd::new(&rule.path)
+            .map_err(|error| format!("cannot open {:?}: {error}", rule.path.display()))?;
+        ruleset = ruleset
+            .add_rule(PathBeneath::new(fd, access))
+            .map_err(|error| format!("cannot add a rule for {:?}: {error}", rule.path.display()))?;
+    }
+    ruleset
+        .restrict_self()
+        .map_err(|error| format!("cannot enforce the Landlock ruleset: {error}"))?;
+    Ok(())
+}
+
+/// Maps a policy access to the Landlock rights it grants.
+fn access_for(
+    access: PathAccess,
+    abi: ABI,
+) -> landlock::BitFlags<AccessFs> {
+    match access {
+        PathAccess::Read => AccessFs::from_read(abi),
+        // `from_read` does not include `Execute`, which a shell needs to run a
+        // binary from a system directory.
+        PathAccess::ReadExecute => {
+            AccessFs::from_read(abi) | landlock::BitFlags::from(AccessFs::Execute)
+        },
+        PathAccess::Write => AccessFs::from_all(abi),
+    }
+}
+
+/// Installs the seccomp filter that refuses `blocked` with `EPERM`.
+fn apply_seccomp(blocked: &[i64]) -> Result<(), String> {
+    let rules = blocked
+        .iter()
+        .map(|syscall| (*syscall, Vec::<SeccompRule>::new()))
+        .collect();
+    let arch = TargetArch::try_from(std::env::consts::ARCH)
+        .map_err(|error| format!("unsupported architecture: {error}"))?;
+    let filter: BpfProgram = SeccompFilter::new(
+        rules,
+        SeccompAction::Allow,
+        SeccompAction::Errno(u32::try_from(libc::EPERM).unwrap_or(1)),
+        arch,
+    )
+    .map_err(|error| format!("cannot build the seccomp filter: {error}"))?
+    .try_into()
+    .map_err(|error| format!("cannot compile the seccomp filter: {error}"))?;
+    seccompiler::apply_filter(&filter)
+        .map_err(|error| format!("cannot install the seccomp filter: {error}"))
+}
