@@ -138,16 +138,19 @@ does not require rework:
 
 The remaining work is on the daemon side and is tracked in `docs/sandbox.md`:
 
-1. A session manager in `agentd` spawns and supervises a sandboxed node and
-   reports lifecycle through `session.*` events.
-2. The sandbox gains a long-lived spawn API (today `Sandbox::exec` is a one-shot
-   with a timeout that waits for exit).
+1. The session manager `agentd::session` (behind the `sandbox` feature) reacts to
+   a `session.requested` event by launching a configured sandboxed node and
+   reporting `session.*` lifecycle. The daemon binary does not start it yet, and
+   it does not yet restart a crashed node.
+2. The sandbox has a long-lived spawn API (`Sandbox::spawn` returning a
+   `Session` with piped stdio).
 3. The whole node process is confined by one profile; child processes inherit
    it, so per-command `sandbox.permission.*` events are not emitted.
 4. The node's connection to the daemon is the one allowed network path: egress is
-   denied outright, and the sandbox explicitly permits only the daemon's Unix
-   socket. The node needs no read of host files, and the database lives in its
-   own session write entry, so the file-effect policy is otherwise unchanged.
+   denied outright, and the sandbox must explicitly permit the daemon's Unix
+   socket (the macOS `network-outbound` requirement for a Unix socket is still
+   unverified). The node needs no read of host files, and the database lives in
+   its own session write entry, so the file-effect policy is otherwise unchanged.
 
 ## Stated gaps
 

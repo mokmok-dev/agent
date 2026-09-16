@@ -308,8 +308,12 @@ network egress: inference is a daemon capability, reached over the daemon's Unix
 socket, which is the only endpoint a confined command may connect to. Its
 layer-1 executor is macOS-only so far (the Linux backend is the follow-up), the
 macOS profile renders the policy's path entries with protected metadata and
-opens no network, and no component drives the sandbox yet, so the feature exists
-to validate the dependency graph under CI's `--all-features`.
+opens no network, and the `sandbox` feature also carries a session manager
+(`agentd::session`) that launches a configured sandboxed node on a
+`session.requested` event and reports `session.*` lifecycle. The daemon binary
+does not start the manager yet — it has no policy or command config surface —
+so the feature still exists mainly to validate the dependency graph under CI's
+`--all-features`.
 
 Further structural steps keep explicit triggers and are not taken early:
 

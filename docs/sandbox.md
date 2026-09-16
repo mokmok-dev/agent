@@ -177,7 +177,8 @@ Network has no allow surface. Egress and ingress are denied at the OS level by
 agent asks the daemon over its Unix socket, and the daemon holds the provider
 credentials and reaches the network. The sandbox thus has no exfiltration
 channel, so per-host rules and an SSRF guard are unnecessary. The daemon-socket
-exception arrives with the session manager; until then the profile denies all
+exception is still pending (roadmap 1: whether a macOS Unix socket needs a
+`network-outbound` grant is unverified); until then the profile denies all
 network access, and a future remote service reached directly would reintroduce
 the managed-proxy model as a separate opt-in.
 
@@ -395,11 +396,15 @@ Modeled on Sheena's methodology and codex's, adapted to Rust:
 Triggers, not dates — none of these steps are taken early:
 
 1. Allow the daemon UDS in the rendered profile when the session manager needs
-   it (egress is otherwise denied already).
+   it (egress is otherwise denied already; whether a macOS Unix socket needs a
+   `network-outbound` grant is unverified).
 2. Linux backend: bubblewrap preferred, Landlock fallback, seccomp for network
    and syscall narrowing, with the arg0 self-exec helper.
-3. A session manager in `agentd` that launches a sandboxed node and reports
-   lifecycle through `session.*` events.
+3. Start the session manager from the daemon binary: `agentd::session` is
+   implemented and tested, but `main` has no policy/command config surface to
+   build the manager yet.
+4. Supervise sessions: restart a crashed node, enforce a session-level
+   lifetime, and expose the managed sessions to clients.
 
 ## Implementation status
 
@@ -409,6 +414,9 @@ renders the entries with protected metadata and root-unlink denial and opens no
 network, a denial is classified into a `sandbox.violation.*` event, the
 human-in-the-loop approval flow runs over the log with `request_id`
 correlation, the long-lived session spawn API is in place, and the deleted
-concepts (VFS, allowlist, caps) are gone from the code. What remains
-unimplemented is the Linux backend and the daemon-side session manager. A crate
-doc comment records the same status next to the code.
+concepts (VFS, allowlist, caps) are gone from the code. The daemon-side
+`agentd::session` manager launches a configured node on `session.requested` and
+reports `session.*` lifecycle, but `main` does not start it yet. What remains
+unimplemented is the Linux backend, the daemon UDS allowance, and starting the
+manager from the binary. A crate doc comment records the same status next to the
+code.
