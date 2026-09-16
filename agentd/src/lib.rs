@@ -5,6 +5,7 @@
 //! embedded elsewhere and exercised by integration tests.
 
 pub mod auth;
+pub mod init;
 pub mod server;
 #[cfg(feature = "sandbox")]
 pub mod session;

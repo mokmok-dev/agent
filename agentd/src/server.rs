@@ -105,7 +105,7 @@ pub async fn run(
 
 /// Sets a filesystem mode on Unix; a no-op elsewhere.
 #[cfg(unix)]
-fn set_mode(
+pub(crate) fn set_mode(
     path: &std::path::Path,
     mode: u32,
 ) -> std::io::Result<()> {
@@ -115,7 +115,7 @@ fn set_mode(
 
 /// Sets a filesystem mode on Unix; a no-op elsewhere.
 #[cfg(not(unix))]
-fn set_mode(
+pub(crate) fn set_mode(
     _path: &std::path::Path,
     _mode: u32,
 ) -> std::io::Result<()> {
@@ -127,14 +127,14 @@ fn set_mode(
 /// A shared directory would let another local user unlink and replace the
 /// socket, so the daemon refuses to serve from one.
 #[cfg(unix)]
-fn is_shared_directory(path: &std::path::Path) -> bool {
+pub(crate) fn is_shared_directory(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o002 != 0)
 }
 
 /// Whether a directory is writable by users other than its owner.
 #[cfg(not(unix))]
-fn is_shared_directory(_path: &std::path::Path) -> bool {
+pub(crate) fn is_shared_directory(_path: &std::path::Path) -> bool {
     false
 }
 
