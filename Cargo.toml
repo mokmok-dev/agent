@@ -13,10 +13,16 @@ agentd-events = { path = "agentd-events" }
 agentd-inference = { path = "agentd-inference" }
 agentd-node = { path = "agentd-node" }
 agentd-sandbox = { path = "agentd-sandbox" }
+async-stream = "0.3"
 async-trait = "0.1.89"
 axum = { version = "0.8.9" }
 clap = { version = "4.6.6" }
 futures-util = { version = "0.3.34", features = ["sink"] }
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls",
+  "stream",
+] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151" }

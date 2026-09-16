@@ -13,9 +13,19 @@
 //! node-side transport.
 
 pub mod client;
+#[cfg(feature = "providers")]
+pub mod config;
 pub mod provider;
+#[cfg(feature = "providers")]
+pub mod providers;
+#[cfg(feature = "providers")]
+pub mod registry;
 pub mod wire;
 
 pub use client::{ClientError, InferenceClient};
+#[cfg(feature = "providers")]
+pub use config::{ConfigError, ModelRoute, ProviderConfig, ProviderKind, ProvidersConfig};
 pub use provider::{FakeProvider, InferenceStream, Provider, ProviderError};
+#[cfg(feature = "providers")]
+pub use registry::ProviderRegistry;
 pub use wire::{Delta, InferenceRequest, Message, Role, ToolCall, ToolSpec};

@@ -3,9 +3,17 @@ edition.workspace = true
 name = "agentd-inference"
 version.workspace = true
 
+[features]
+default = []
+# The real provider adapters. Off by default so a node (which only needs the
+# wire contract and the client) does not pull an HTTP client or TLS.
+providers = ["dep:async-stream", "dep:reqwest"]
+
 [dependencies]
+async-stream = { workspace = true, optional = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
+reqwest = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

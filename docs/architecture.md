@@ -310,6 +310,10 @@ The current structure follows these rules:
 - `agentd-sandbox` is a first-class crate like `agentd-node`: it depends on
   `agentd-events` only, and `agentd` exposes it behind the optional
   `sandbox = ["dep:agentd-sandbox"]` feature.
+- `agentd-inference` holds the provider-neutral inference contract and the
+  node-side client; the real provider adapters sit behind its optional
+  `providers` feature, so the daemon — which owns the credentials — is the only
+  crate that pulls an HTTP client.
 - First-class crates document their deviations from their design docs next to
   the code that embodies them, so a reader never has to reconcile two sources of
   truth from memory.

@@ -1,7 +1,7 @@
 use agentd::auth::TokenStore;
 use agentd::server;
 use agentd_events::log::{self, EventLog};
-use agentd_inference::FakeProvider;
+use agentd_inference::{FakeProvider, Provider, ProviderRegistry, ProvidersConfig};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,6 +51,10 @@ enum Command {
         /// Kill a session after this many seconds.
         #[arg(long)]
         session_lifetime_secs: Option<u64>,
+        /// The provider config JSON enabling real models on `/inference`.
+        /// Without it the daemon serves a deterministic fake provider.
+        #[arg(long)]
+        providers_config: Option<PathBuf>,
     },
     /// Verify the event log's hash chain.
     VerifyLog {
@@ -80,6 +84,8 @@ enum RunError {
     #[cfg(feature = "sandbox")]
     #[error("failed to build the session manager: {0}")]
     Session(#[from] agentd::session::SessionError),
+    #[error("failed to load the provider config: {0}")]
+    Providers(#[from] agentd_inference::ConfigError),
 }
 
 /// The directory holding the daemon's socket, log, and token file.
@@ -162,6 +168,7 @@ async fn run() -> Result<(), RunError> {
             session_agent_id,
             session_max_restarts,
             session_lifetime_secs,
+            providers_config,
         } => {
             let runtime = runtime_dir();
             let socket = socket.unwrap_or_else(|| runtime.join("agentd.sock"));
@@ -204,7 +211,13 @@ async fn run() -> Result<(), RunError> {
                 session_lifetime_secs,
             );
 
-            let provider = Arc::new(FakeProvider::default());
+            let provider: Arc<dyn Provider> = match providers_config {
+                Some(path) => {
+                    let config = ProvidersConfig::load(&path)?;
+                    Arc::new(ProviderRegistry::new(&config)?)
+                },
+                None => Arc::new(FakeProvider::default()),
+            };
             let () = server::run(socket, log, tokens, provider)
                 .await
                 .map_err(RunError::Serve)?;

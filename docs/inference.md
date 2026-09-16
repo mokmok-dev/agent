@@ -29,6 +29,8 @@ Goals:
 
 - A sandboxed node can request a completion without any network egress and
   without holding provider credentials.
+- Multiple providers and models are reachable through one boundary, and a model
+  can be swapped by configuration rather than by changing the agent.
 - The provider is swappable behind a trait, so the agent loop can be tested with
   a deterministic fake and a real provider is a thin adapter.
 - The volatile token stream never bloats or leaks into the durable audit log;
@@ -91,6 +93,59 @@ answered with an error delta and the connection stays open.
 The shapes mirror the streaming completion protocol most providers expose, so a
 provider adapter is mostly a field mapping. `arguments` is kept as the
 provider's JSON string, so the contract does not depend on a tool's schema.
+Streamed tool-call fragments are reassembled by the adapter and emitted as
+complete `tool_call` deltas before the terminal one.
+
+## Providers and model routing
+
+The daemon is the gateway: it holds the providers and their credentials, and it
+resolves the `model` a request names. Real adapters live in `agentd-inference`
+behind the optional `providers` feature, so a node (which only needs the wire
+contract and the client) never pulls an HTTP client or TLS.
+
+| `kind`               | Covers                                                            |
+| -------------------- | ----------------------------------------------------------------- |
+| `open_ai_compatible` | `OpenAI`, `OpenRouter`, `Ollama`, `vLLM`, `Groq`, and compatible servers |
+| `anthropic`          | Claude (`/v1/messages`, tool-use blocks)                          |
+
+A provider is configured with a kind, an optional base URL (a kind default is
+used otherwise), and a credential. Credentials come from a private file (mode
+`0600`, as for the event token) or an environment variable — never inline. A
+local server names neither and is reached unauthenticated.
+
+```json
+{
+  "providers": {
+    "openrouter": {
+      "kind": "open_ai_compatible",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY"
+    },
+    "anthropic": {
+      "kind": "anthropic",
+      "api_key_file": "/etc/agentd/anthropic.key"
+    },
+    "local": {
+      "kind": "open_ai_compatible",
+      "base_url": "http://127.0.0.1:11434/v1"
+    }
+  },
+  "models": {
+    "fast": { "provider": "openrouter", "model": "openai/gpt-4o-mini" },
+    "smart": { "provider": "anthropic", "model": "claude-sonnet-4-5" }
+  },
+  "default_model": "fast"
+}
+```
+
+A request's `model` is resolved in order: a configured **alias**; a
+`provider/model` pair split on the first slash; the **sole** provider with the
+name unchanged; and, when the request names none, `default_model`. An
+unresolvable model is a `Delta::Error`. The agent asks for an alias
+(`agentd-agent --model smart`) and never learns a provider id or a credential.
+
+The daemon is started with `--providers-config <path>`; without it, it serves
+the deterministic `FakeProvider` used by tests and offline development.
 
 ## Durability line
 
@@ -137,9 +192,18 @@ conversation read model; other events advance the checkpoint unapplied.
 
 ## Stated gaps
 
-- **One provider, offline.** The daemon ships the deterministic `FakeProvider`;
-  a real provider adapter is the next step and needs a configured credential and
-  an HTTP client. The contract is stable, so the adapter is additive.
+- **The adapters are not yet exercised against live APIs.** They map the
+  documented streaming shapes and are unit-tested, but a recorded-fixture or
+  live test corpus is the follow-up; a provider-specific quirk may surface there.
+- **Anthropic `max_tokens` is a fixed default.** The adapter sends 8192 because
+  the API requires the field and the request does not carry one yet.
+- **No provider timeout in the endpoint.** A provider that stalls holds the
+  stream open; each adapter's HTTP client is expected to enforce its own
+  request timeout.
+- **No fallback or retry.** A failed model fails the turn; cross-provider
+  fallback and retry are a later layer over the registry.
+- **No token accounting.** The `done` delta may carry a finish reason but usage
+  is not yet recorded, even though the adapters see it.
 - **One request at a time per connection.** The connection is
   request/response; concurrent inference uses one connection each.
 - **One turn at a time.** The agent runs a turn synchronously, so a prompt that
@@ -151,9 +215,3 @@ conversation read model; other events advance the checkpoint unapplied.
 - **A turn is not resumable.** If the agent dies mid-turn, the messages
   finalized before the crash survive in the log, but the in-flight turn is lost.
   The conversation is not corrupted, and a new inbox starts a fresh turn.
-- **No provider timeout in the endpoint.** A provider that stalls holds the
-  stream open; the real adapter is expected to enforce its own request timeout.
-  The request/response contract is additive (a `model` field is a coordinated
-  change), so this lands with the first real provider.
-- **No token accounting.** The `done` delta may carry a finish reason but usage
-  is not yet recorded.

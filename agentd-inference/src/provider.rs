@@ -103,10 +103,7 @@ mod tests {
     use futures_util::StreamExt;
 
     fn request() -> InferenceRequest {
-        InferenceRequest {
-            messages: Vec::new(),
-            tools: Vec::new(),
-        }
+        InferenceRequest::default()
     }
 
     fn done() -> Delta {

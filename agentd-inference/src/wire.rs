@@ -126,8 +126,12 @@ pub struct ToolSpec {
 
 /// One inference request from a node to the daemon.
 ///
-/// `Default` has an empty conversation and no tools, so callers that need only
-/// one of the two fields can use struct-update syntax.
+/// `model` names the model to use. The daemon resolves it: a configured alias,
+/// a `provider/model` pair, or the configured default when `None`. The
+/// provider-neutral adapter receives an already-resolved concrete model name.
+///
+/// `Default` has an empty conversation, no tools, and no model, so callers that
+/// need only some fields can use struct-update syntax.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct InferenceRequest {
     /// The conversation so far, oldest first, including the system instruction.
@@ -135,6 +139,9 @@ pub struct InferenceRequest {
     /// The tools the model may call.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolSpec>,
+    /// The model to use, or `None` for the daemon's configured default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// One streamed piece of an inference response.
@@ -204,6 +211,7 @@ mod tests {
                 description: String::from("run a shell command"),
                 parameters: json!({ "type": "object" }),
             }],
+            model: Some(String::from("test-model")),
         };
 
         let encoded = serde_json::to_string(&request).expect("request should serialize");

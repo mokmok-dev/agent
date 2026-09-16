@@ -1229,7 +1229,7 @@ mod tests {
             &mut client,
             &InferenceRequest {
                 messages: vec![agentd_inference::Message::user("hi")],
-                tools: Vec::new(),
+                ..InferenceRequest::default()
             },
         )
         .await;
@@ -1261,14 +1261,7 @@ mod tests {
         let server = spawn_server_with(socket.clone(), open_log(dir.path()), tokens(), provider);
 
         let mut client = connect_with("ws://localhost/inference", &socket, INFER_TOKEN).await;
-        send_request(
-            &mut client,
-            &InferenceRequest {
-                messages: Vec::new(),
-                tools: Vec::new(),
-            },
-        )
-        .await;
+        send_request(&mut client, &InferenceRequest::default()).await;
 
         assert_eq!(
             recv_delta(&mut client).await,
