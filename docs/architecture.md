@@ -49,6 +49,9 @@ flowchart LR
 | JSONL log          | `agentd-events` | Append-only source of truth; one CloudEvents envelope per line, position = one-based line number (`Seq`).          |
 | Projections        | `agentd-events` | Read models derived from the log, resuming from an `applied_seq` checkpoint (`agentd_events::projection`).          |
 | Node               | `agentd-node`   | Long-lived client that consumes `/events` and keeps a SQLite projection current (see [node](node.md)).               |
+| Inference endpoint | `agentd`        | Model gateway on the same Unix socket, behind the `infer` claim; streams transient deltas that are never logged (see [inference](inference.md)). |
+| `Provider`         | `agentd-inference` | Provider-neutral completion trait; the daemon ships a deterministic `FakeProvider`.                              |
+| Agent node         | `agentd-node`   | Node specialization that runs the agent loop: reacts to `agent.inbox`, infers, runs the shell tool, publishes (see [inference](inference.md)). |
 
 ## Event model
 
@@ -111,11 +114,13 @@ The daemon is not an open bus. Every connection presents an
 | `read`      | Subscribe to the stream (replay and live).                                            |
 | `publish`   | Append non-reserved events.                                                           |
 | `authority` | Publish the reserved daemon-authority types `error.*`, `sandbox.*`, and `session.*`.  |
+| `infer`     | Request model inference on `/inference`.                                              |
 
 A read-only connection cannot append; a publish attempt is answered with an
 `error.unauthorized` notice. A token without `authority` cannot publish a
 reserved type, so a client cannot forge `sandbox.permission.granted`/`denied`
-and hijack the approval flow. The daemon overwrites the client-supplied
+and hijack the approval flow, nor forge `session.*` lifecycle. A token without
+`infer` cannot reach `/inference`. The daemon overwrites the client-supplied
 `source` (with the authenticated principal's) and `time` (with its own), and
 validates `specversion`, `type`, and `id`, so an event's provenance in the log
 is daemon-owned.
@@ -126,7 +131,8 @@ refuses to start otherwise. The socket directory and protocol files default to
 `~/.agentd` and are created mode `0700`/`0600`. The token is a **capability**:
 strong isolation from a compromised same-uid agent depends on the agent running
 inside the sandbox with the token file in `deny_read` (see
-[sandbox](sandbox.md)) — wiring the sandbox is the remaining step.
+[sandbox](sandbox.md)); a sandboxed node holds only `read`, `publish`, and
+`infer`, so it can neither forge daemon-authority events nor reach the network.
 
 ## Sequences
 
@@ -296,9 +302,11 @@ The current structure follows these rules:
   and must never depend on the `agentd` binary crate.
 - The durable JSONL event log is core: it lives in `agentd-events`, is the
   source of truth, and is never feature-gated.
-- `agentd-node` depends on `agentd-events` only and is neither the daemon binary
-  nor an extension: it is the client-side node library and binary, run out of
-  process (and eventually inside the sandbox; see [node](node.md)).
+- `agentd-node` depends on `agentd-events` and `agentd-inference` and is neither
+  the daemon binary nor an extension: it is the client-side node library and
+  binaries (the generic projection node and the `agentd-agent` agent node), run
+  out of process, and eventually inside the sandbox; see [node](node.md) and
+  [inference](inference.md).
 - `agentd-sandbox` is a first-class crate like `agentd-node`: it depends on
   `agentd-events` only, and `agentd` exposes it behind the optional
   `sandbox = ["dep:agentd-sandbox"]` feature.
@@ -317,7 +325,8 @@ boundary is the platform's native isolation (Seatbelt on macOS;
 bubblewrap-preferred with a Landlock fallback on Linux), and the sandbox has no
 network egress: inference is a daemon capability, reached over the daemon's Unix
 socket, which is the only endpoint a confined command may connect to (granted by
-path via the policy's `network` domain; IP egress stays denied). Its
+path via the policy's `network` domain; IP egress stays denied). The daemon
+serves that inference on `/inference` (see [inference](inference.md)). Its
 layer-1 executor renders a Seatbelt profile on macOS and a bubblewrap command on
 Linux, falling back to a Landlock-plus-seccomp helper when bubblewrap is absent,
 the macOS profile renders the policy's path entries with protected metadata and grants only
