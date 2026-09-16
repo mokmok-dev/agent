@@ -4,8 +4,6 @@
 use agentd_events::Event;
 use serde_json::json;
 
-use crate::executor::DenialReason;
-
 /// A command or resource access needs a decision.
 pub const PERMISSION_REQUESTED: &str = "sandbox.permission.requested";
 /// A static policy rule allowed the access.
@@ -95,9 +93,8 @@ pub fn exec_completed(
     duration_ms: u64,
     stdout_bytes: u64,
     stderr_bytes: u64,
-    denied_by: Option<&DenialReason>,
 ) -> Event {
-    let mut data = json!({
+    let data = json!({
         "sandbox_id": sandbox_id,
         "agent_id": agent_id,
         "resource": RESOURCE_SHELL,
@@ -108,9 +105,6 @@ pub fn exec_completed(
         "stdout_bytes": stdout_bytes,
         "stderr_bytes": stderr_bytes,
     });
-    if let Some(reason) = denied_by {
-        data["denied_by"] = json!(reason.as_str());
-    }
     Event::new(EXEC_COMPLETED, data)
 }
 
@@ -121,7 +115,6 @@ mod tests {
         PERMISSION_REQUESTED, RESOURCE_SHELL, exec_completed, permission_denied,
         permission_granted, permission_requested,
     };
-    use crate::executor::DenialReason;
     use agentd_events::{DAEMON_SOURCE, SPEC_VERSION};
     use serde_json::json;
 
@@ -158,16 +151,7 @@ mod tests {
 
     #[test]
     fn completed_event_reports_the_terminal_state() {
-        let event = exec_completed(
-            "sbx-1",
-            "coder-1",
-            "ls",
-            0,
-            12,
-            32,
-            0,
-            Some(&DenialReason::CommandNotAllowed),
-        );
+        let event = exec_completed("sbx-1", "coder-1", "ls", 0, 12, 32, 0);
 
         assert_eq!(event.r#type, EXEC_COMPLETED);
         assert_eq!(
@@ -182,15 +166,7 @@ mod tests {
                 "duration_ms": 12,
                 "stdout_bytes": 32,
                 "stderr_bytes": 0,
-                "denied_by": "command_not_allowed",
             })
         );
-    }
-
-    #[test]
-    fn completed_event_omits_denied_by_when_not_denied() {
-        let event = exec_completed("sbx-1", "coder-1", "ls", 0, 1, 0, 0, None);
-
-        assert!(event.data.get("denied_by").is_none());
     }
 }

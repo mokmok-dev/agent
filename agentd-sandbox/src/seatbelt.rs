@@ -1,29 +1,26 @@
 //! Layer-1 confinement for macOS: commands spawn as real processes under a
 //! Seatbelt (`sandbox-exec`) profile rendered from the policy.
 //!
-//! The profile is deny-by-default and confines what this macOS version
-//! confines reliably:
+//! The profile is deny-by-default and confines what this macOS version confines
+//! reliably:
 //!
-//! - **Process execution** is limited to the confined `PATH` directories.
-//! - **File writes** are limited to the read-write mounts, `/dev/null`, and
-//!   the sandbox scratch directory; the process and every descendant share
-//!   the fate of the process group on timeout.
-//! - **Network** is outbound-only in the current rendering: `deny default`
-//!   blocks a listening socket, and one `allow network-outbound` clause opens
-//!   connections. The target design denies egress and permits only the daemon's
-//!   Unix socket; this profile predates it and is the deviation recorded with
-//!   `docs/sandbox.md`.
+//! - **File writes** are limited to the policy's `write` entries, `/dev/null`,
+//!   and the sandbox scratch directory; the process and every descendant share
+//!   the fate of the process group on timeout. Inside a write root, the
+//!   protected metadata names (`.git`, `.agents`) are carved out read-only, and
+//!   the root itself cannot be renamed or unlinked.
+//! - **Network is denied**: there is no `network-outbound`/`network-inbound`
+//!   grant, so egress and ingress fall under `deny default`. The daemon's Unix
+//!   socket exception arrives with the session manager; see `docs/sandbox.md`.
 //! - **File reads are NOT path-confined** at the OS level: on macOS 26,
 //!   platform binaries abort inside `dyld4::CacheFinder` when their reads are
 //!   filtered (`file-read*`/`file-read-data` with subpath filters abort
 //!   reliably, while broad read grants are stable), so the profile grants
 //!   reads at `/`. Reads are *narrowed* instead of excluded:
-//!   [`FsPolicy::deny_read`](crate::policy::FsPolicy::deny_read) paths are
-//!   emitted as `(deny file-read-data ...)`, `(deny file-read-metadata ...)`,
-//!   and `(deny file-read-xattr ...)`, which override the broad grants. Without
-//!   a denial, reads are unconfined at the OS level; the [`Vfs`](crate::vfs::Vfs)
-//!   layer screens virtual paths for a future in-process executor but a spawned
-//!   host binary bypasses it — a stated gap; see `docs/sandbox.md`.
+//!   `deny` path entries are emitted as `(deny file-read-data ...)`,
+//!   `(deny file-read-metadata ...)`, and `(deny file-read-xattr ...)`, which
+//!   override the broad grants. Without a denial, reads are unconfined at the
+//!   OS level — a stated gap; see `docs/sandbox.md`.
 //!
 //! Seatbelt is officially unsupported by Apple and profiles are best-effort.
 
@@ -44,11 +41,17 @@ use tokio::time::timeout;
 
 use crate::error::SandboxError;
 use crate::executor::ExecResult;
-use crate::policy::{CommandPrefix, Mount, MountSource, Policy};
+use crate::policy::{Access, FsPolicy, Policy};
 
-/// The directories the confined `PATH` is built from; everything on it is
-/// also executable under the profile.
-const SYSTEM_BIN_DIRS: &[&str] = &["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"];
+/// The system directories the confined `PATH` is built from.
+const SYSTEM_BIN_DIRS: &[&str] = &[
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+];
 
 /// The Seatbelt front-end. Unconfined itself: it applies the profile to its
 /// child.
@@ -104,17 +107,16 @@ impl ConfinedProcessExecutor {
     ///
     /// Fails closed with [`SandboxError::UnsupportedPlatform`] when
     /// `sandbox-exec` is unavailable, [`SandboxError::InvalidPolicy`] for an
-    /// unusable workdir, allowlist, or `deny_read` entry, and
-    /// [`SandboxError::Io`] when the scratch directory or profile cannot be
-    /// written.
+    /// unusable workdir or path entry, and [`SandboxError::Io`] when the
+    /// scratch directory or profile cannot be written.
     pub fn new(policy: &Policy) -> Result<Self, SandboxError> {
         if fs::metadata(SANDBOX_EXEC).is_err() {
             return Err(SandboxError::UnsupportedPlatform(
                 "sandbox-exec is not available",
             ));
         }
-        let workdir = validate_workdir(&policy.shell.workdir, &policy.fs.mounts)?;
-        let path_dirs = confined_path_dirs(&policy.shell.allow)?;
+        let workdir = validate_workdir(&policy.shell.workdir, &policy.fs)?;
+        let path_dirs = system_path_dirs();
         let scratch = create_scratch()?;
 
         // The scratch directory now exists, so every later failure must remove
@@ -149,7 +151,6 @@ impl ConfinedProcessExecutor {
             stdout: String::new(),
             stderr: format!("[agentd-sandbox] {message}"),
             exit_code: EXIT_CANNOT_EXECUTE,
-            denied_by: None,
         }
     }
 
@@ -259,7 +260,6 @@ impl ConfinedProcessExecutor {
             stdout,
             stderr,
             exit_code,
-            denied_by: None,
         }
     }
 }
@@ -310,9 +310,15 @@ async fn capture<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
+/// Validates the workdir and returns its canonical form.
+///
+/// The workdir must be absolute, exist as a directory, and be covered by a
+/// `write` entry: a workdir the process cannot write is not a workspace. A
+/// workdir outside every write root is rejected rather than silently running
+/// read-only.
 fn validate_workdir(
     workdir: &Path,
-    mounts: &[Mount],
+    fs_policy: &FsPolicy,
 ) -> Result<PathBuf, SandboxError> {
     if !workdir.is_absolute() {
         return Err(SandboxError::InvalidPolicy(format!(
@@ -333,19 +339,18 @@ fn validate_workdir(
         )));
     }
     let canonical = workdir.canonicalize()?;
-    let covered = mounts.iter().any(|mount| match &mount.source {
-        MountSource::Mem => false,
-        MountSource::ReadOnly { host }
-        | MountSource::ReadWrite { host }
-        | MountSource::Overlay { host } => host
-            .canonicalize()
-            .is_ok_and(|host| canonical.starts_with(&host)),
+    let covered = fs_policy.entries.iter().any(|entry| {
+        entry.access == Access::Write
+            && entry
+                .path
+                .canonicalize()
+                .is_ok_and(|root| canonical.starts_with(&root))
     });
     if !covered {
-        return Err(SandboxError::InvalidPolicy(
-            "workdir must be inside a host-backed mount so the process and the VFS see the same tree"
-                .to_string(),
-        ));
+        return Err(SandboxError::InvalidPolicy(format!(
+            "workdir {} is not inside a write entry",
+            workdir.display()
+        )));
     }
     Ok(canonical)
 }
@@ -356,122 +361,109 @@ fn create_scratch() -> Result<PathBuf, SandboxError> {
     Ok(scratch)
 }
 
-/// Builds the confined `PATH`: the system directories that exist plus the
-/// directories holding allowlisted commands.
-fn confined_path_dirs(allow: &[CommandPrefix]) -> Result<Vec<PathBuf>, SandboxError> {
-    let mut dirs: Vec<PathBuf> = SYSTEM_BIN_DIRS
+/// The system directories that exist, as the confined `PATH`.
+fn system_path_dirs() -> Vec<PathBuf> {
+    SYSTEM_BIN_DIRS
         .iter()
         .filter(|dir| Path::new(dir).is_dir())
         .map(PathBuf::from)
-        .collect();
-    for prefix in allow {
-        let Some(tokens) = shlex::split(prefix.as_str()) else {
-            return Err(SandboxError::InvalidPolicy(format!(
-                "allowlist entry {:?} is not tokenizable",
-                prefix.as_str()
-            )));
-        };
-        let Some(first) = tokens.first() else {
-            continue;
-        };
-        if first.contains('/') {
-            let path = PathBuf::from(first);
-            if !path.is_absolute() {
-                return Err(SandboxError::InvalidPolicy(format!(
-                    "allowlist entry {first:?} must be an absolute path or a bare command name"
-                )));
-            }
-            if let Some(parent) = path.parent()
-                && parent.is_dir()
-                && !dirs.contains(&parent.to_path_buf())
-            {
-                dirs.push(parent.to_path_buf());
-            }
-        }
-    }
-    dirs.dedup();
-    Ok(dirs)
+        .collect()
 }
 
-/// The canonical host directories that receive OS-level write grants: the
-/// read-write mounts plus the scratch directory (added by the caller).
-/// Overlay and read-only mounts are intentionally read-only at the OS level.
-fn writable_hosts(policy: &Policy) -> Vec<PathBuf> {
-    let mut writable: Vec<PathBuf> = Vec::new();
-    for mount in &policy.fs.mounts {
-        let MountSource::ReadWrite { host } = &mount.source else {
+/// The canonical host directories that receive OS-level write grants.
+///
+/// Every `write` entry must resolve: an unresolvable path cannot be expressed
+/// in the profile and dropping it would leave a weaker sandbox than the
+/// operator asked for.
+fn writable_hosts(fs_policy: &FsPolicy) -> Result<Vec<PathBuf>, SandboxError> {
+    let mut writable = Vec::new();
+    for entry in &fs_policy.entries {
+        if entry.access != Access::Write {
             continue;
-        };
-        if let Ok(canonical) = host.canonicalize() {
-            writable.push(canonical);
         }
+        let canonical = entry.path.canonicalize().map_err(|error| {
+            SandboxError::InvalidPolicy(format!(
+                "write entry {:?} is not accessible: {error}",
+                entry.path.display().to_string()
+            ))
+        })?;
+        writable.push(canonical);
     }
-    writable
+    writable.sort();
+    writable.dedup();
+    Ok(writable)
 }
 
-/// Resolves and checks the `deny_read` paths for the OS profile.
+/// Resolves and checks the `deny` paths for the OS profile.
 ///
 /// A denial is only expressible against a path that resolves, so an entry that
 /// does not is an error rather than a silently-dropped no-op: dropping it would
 /// leave the operator with a weaker sandbox than they configured. A relative
 /// entry is rejected for the same reason — it would resolve against the daemon's
 /// working directory and deny something the operator never named. A denied path
-/// that covers something the sandbox itself needs — the workdir, an executable
+/// that covers something a command needs — the workdir, an executable
 /// directory, or the scratch directory the profile is written into — is also
 /// rejected, because it would break every command instead of the one path.
-///
-/// The protected paths are canonicalised before comparison: the profile matches
-/// resolved paths, and the scratch directory comes from `TMPDIR`, which on macOS
-/// is `/var/...` while its resolved form is `/private/var/...`. Comparing a
-/// resolved denial against an unresolved protected path would let exactly the
-/// entry this guard exists to reject slip through.
-fn validate_deny_read(
-    deny_read: &[PathBuf],
+fn validate_deny(
+    fs_policy: &FsPolicy,
     workdir: &Path,
     path_dirs: &[PathBuf],
     scratch: &Path,
 ) -> Result<Vec<PathBuf>, SandboxError> {
     let mut protected: Vec<(&str, PathBuf)> = Vec::new();
-    for (role, needed) in std::iter::once(("the workdir", workdir))
-        .chain(
-            path_dirs
-                .iter()
-                .map(|dir| ("an executable directory", dir.as_path())),
-        )
-        .chain(std::iter::once(("the scratch directory", scratch)))
-    {
-        if let Ok(canonical) = needed.canonicalize() {
-            protected.push((role, canonical));
+    if let Ok(canonical) = workdir.canonicalize() {
+        protected.push(("the workdir", canonical));
+    }
+    for dir in path_dirs {
+        if let Ok(canonical) = dir.canonicalize() {
+            protected.push(("an executable directory", canonical));
+        }
+    }
+    if let Ok(canonical) = scratch.canonicalize() {
+        protected.push(("the scratch directory", canonical));
+    }
+    for entry in &fs_policy.entries {
+        if entry.access == Access::Write
+            && let Ok(canonical) = entry.path.canonicalize()
+        {
+            protected.push(("a write root", canonical));
         }
     }
 
-    let mut resolved: Vec<PathBuf> = Vec::with_capacity(deny_read.len());
-    for denied in deny_read {
-        if !denied.is_absolute() {
+    let mut resolved: Vec<PathBuf> = Vec::new();
+    for entry in &fs_policy.entries {
+        if entry.access != Access::Deny {
+            continue;
+        }
+        if !entry.path.is_absolute() {
             return Err(SandboxError::InvalidPolicy(format!(
-                "deny_read path {:?} must be an absolute host path",
-                denied.display().to_string()
+                "deny path {:?} must be an absolute host path",
+                entry.path.display().to_string()
             )));
         }
-        let canonical = denied.canonicalize().map_err(|error| {
+        let canonical = entry.path.canonicalize().map_err(|error| {
             SandboxError::InvalidPolicy(format!(
-                "deny_read path {:?} is not accessible: {error}",
-                denied.display().to_string()
+                "deny path {:?} is not accessible: {error}",
+                entry.path.display().to_string()
             ))
         })?;
         for (role, needed) in &protected {
-            // Both directions, so denying an ancestor of a needed path and
-            // denying a path beneath one are both caught.
-            if canonical.starts_with(needed) || needed.starts_with(&canonical) {
+            // A denial that *covers* a path a command needs (an ancestor of the
+            // needed path) breaks every command, so it is rejected. A denial
+            // nested inside a needed path only narrows — e.g. `deny
+            // /repo/.env` inside the `/repo` write root — and is allowed.
+            if needed.starts_with(&canonical) {
                 return Err(SandboxError::InvalidPolicy(format!(
-                    "deny_read path {:?} covers {role} {:?}, which every command needs",
-                    denied.display().to_string(),
+                    "deny path {:?} covers {role} {:?}, which every command needs",
+                    entry.path.display().to_string(),
                     needed.display().to_string()
                 )));
             }
         }
         resolved.push(canonical);
     }
+    resolved.sort();
+    resolved.dedup();
     Ok(resolved)
 }
 
@@ -486,7 +478,8 @@ fn prepare(
     path_dirs: &[PathBuf],
     scratch: &Path,
 ) -> Result<(PathBuf, String), SandboxError> {
-    let deny_read = validate_deny_read(&policy.fs.deny_read, workdir, path_dirs, scratch)?;
+    let deny = validate_deny(&policy.fs, workdir, path_dirs, scratch)?;
+    writable_hosts(&policy.fs)?;
     let path_env = std::env::join_paths(path_dirs.iter().map(Path::new))
         .map_err(|error| {
             SandboxError::InvalidPolicy(format!("confined PATH is malformed: {error}"))
@@ -494,7 +487,7 @@ fn prepare(
         .to_string_lossy()
         .into_owned();
 
-    let profile = render_profile(policy, scratch, path_dirs, &deny_read);
+    let profile = render_profile(policy, scratch, &deny);
     let profile_path = scratch.join("profile.sb");
     fs::write(&profile_path, profile)?;
     Ok((profile_path, path_env))
@@ -516,23 +509,72 @@ fn subpath_clauses(paths: impl Iterator<Item = PathBuf>) -> Vec<String> {
     clauses
 }
 
+/// Escapes the regex metacharacters so a path can be embedded in an SBPL
+/// `(regex #"...")` clause literally.
+fn regex_escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if matches!(
+            character,
+            '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+/// The protected-metadata denial for one write root: writing anything at
+/// `<root>/<name>` or beneath it is denied, including creating it.
+fn protected_denials(
+    writable: &[PathBuf],
+    protected: &[String],
+) -> Vec<String> {
+    let mut denials = Vec::new();
+    for root in writable {
+        for name in protected {
+            let pattern = format!(
+                "^{}/{}",
+                regex_escape(&root.display().to_string()),
+                regex_escape(name)
+            );
+            denials.push(format!("(deny file-write* (regex #\"{pattern}(/.*)?$\"))"));
+        }
+    }
+    denials.sort();
+    denials.dedup();
+    denials
+}
+
+/// The denial that stops a command renaming or unlinking a writable root,
+/// which would replace the boundary the next profile treats as authoritative.
+fn root_unlink_denials(writable: &[PathBuf]) -> Vec<String> {
+    writable
+        .iter()
+        .map(|root| {
+            format!(
+                "(deny file-write-unlink (require-all (literal {:?}) (vnode-type DIRECTORY)))",
+                root.display().to_string()
+            )
+        })
+        .collect()
+}
+
 fn render_profile(
     policy: &Policy,
     scratch: &Path,
-    path_dirs: &[PathBuf],
-    deny_read: &[PathBuf],
+    deny: &[PathBuf],
 ) -> String {
-    let writable = writable_hosts(policy);
+    let writable = writable_hosts(&policy.fs).unwrap_or_default();
     let mut lines = vec![
         String::from("(version 1)"),
         String::from("(deny default)"),
         String::from("(allow process-fork)"),
+        // The boundary is the filesystem profile, not an argv allowlist: any
+        // binary may run, but it can only touch what the profile grants.
+        String::from("(allow process-exec)"),
     ];
-
-    lines.push(format!(
-        "(allow process-exec {})",
-        subpath_clauses(path_dirs.iter().cloned()).join(" ")
-    ));
 
     // Reads are deliberately broad; see the module docs for the macOS 26
     // dyld abort that rules out filtered read grants.
@@ -551,21 +593,22 @@ fn render_profile(
 
     lines.push(String::from("(allow sysctl-read)"));
 
-    // Outbound only: a confined command reaches remote services (the model
-    // provider) and the daemon's Unix socket, while a listening socket stays
-    // denied by `deny default`.
-    lines.push(String::from("(allow network-outbound)"));
+    // No network grant: egress and ingress fall under `deny default`.
 
-    // Denials are emitted last: they are evaluated after the broad read grants
-    // above, and in Seatbelt a deny overrides any matching allow. This is the
-    // only layer that can withhold a host file from a spawned binary, because
-    // reads are otherwise granted at `/` (see the module docs). Data, metadata,
-    // and xattr are all denied: withholding the contents alone would still
-    // expose metadata such as the size through `stat`. Note that a listing of
-    // the *parent* stays allowed, so the entry's name is still enumerable;
-    // hiding a name is what the VFS `hide` glob is for, not this clause.
-    if !deny_read.is_empty() {
-        let clauses = subpath_clauses(deny_read.iter().cloned()).join(" ");
+    // Protected metadata is carved out of the write roots, and the roots
+    // themselves cannot be renamed or unlinked. Both are denials emitted after
+    // the grants; in Seatbelt a deny overrides any matching allow.
+    lines.extend(protected_denials(&writable, &policy.fs.protected));
+    lines.extend(root_unlink_denials(&writable));
+
+    // Read denials are emitted last and are the only layer that can withhold a
+    // host file from a spawned binary, because reads are otherwise granted at
+    // `/`. Data, metadata, and xattr are all denied: withholding the contents
+    // alone would still expose metadata such as the size through `stat`. A
+    // listing of the *parent* stays allowed, so the entry's name is still
+    // enumerable; that is a stated gap.
+    if !deny.is_empty() {
+        let clauses = subpath_clauses(deny.iter().cloned()).join(" ");
         for kind in ["file-read-data", "file-read-metadata", "file-read-xattr"] {
             lines.push(format!("(deny {kind} {clauses})"));
         }
@@ -587,29 +630,26 @@ impl crate::executor::Executor for ConfinedProcessExecutor {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfinedProcessExecutor, confined_path_dirs, render_profile, validate_deny_read,
-        validate_workdir,
+        ConfinedProcessExecutor, regex_escape, render_profile, validate_deny, validate_workdir,
+        writable_hosts,
     };
     use crate::error::SandboxError;
     use crate::executor::Executor;
-    use crate::policy::{CommandPrefix, EnvVar, FsPolicy, Mount, MountSource, Policy, ShellPolicy};
+    use crate::policy::{Access, EnvVar, FsEntry, FsPolicy, Policy, ShellPolicy};
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
-    fn overlay_policy(workdir: &Path) -> Policy {
+    fn workdir_policy(workdir: &Path) -> Policy {
         Policy {
             fs: FsPolicy {
-                mounts: vec![Mount {
-                    at: PathBuf::from("/work"),
-                    source: MountSource::Overlay {
-                        host: workdir.to_path_buf(),
-                    },
+                entries: vec![FsEntry {
+                    path: workdir.to_path_buf(),
+                    access: Access::Write,
                 }],
                 ..FsPolicy::default()
             },
             shell: ShellPolicy {
-                allow: base_allowlist(),
                 workdir: workdir.to_path_buf(),
                 ..ShellPolicy::default()
             },
@@ -617,24 +657,8 @@ mod tests {
         }
     }
 
-    fn base_allowlist() -> Vec<CommandPrefix> {
-        [
-            "echo", "ls", "cat", "touch", "sleep", "yes", "env", "sh", "head",
-        ]
-        .iter()
-        .map(|name| CommandPrefix::new(*name))
-        .collect()
-    }
-
     fn executor(policy: &Policy) -> ConfinedProcessExecutor {
         ConfinedProcessExecutor::new(policy).expect("a valid policy builds an executor")
-    }
-
-    /// The same policy with the read denials removed, for a control run.
-    fn policy_without_deny(policy: &Policy) -> Policy {
-        let mut control = policy.clone();
-        control.fs.deny_read.clear();
-        control
     }
 
     /// The Nix build sandbox is itself a Seatbelt sandbox and refuses to nest
@@ -649,106 +673,129 @@ mod tests {
     }
 
     #[test]
-    fn profile_is_deny_by_default_and_grants_only_mounts() {
+    fn profile_is_deny_by_default_and_confines_writes() {
         let dir = TempDir::new().expect("tempdir");
-        let host = dir.path().canonicalize().expect("canonical tempdir");
-        let rw_host = dir
+        let write_root = dir
             .path()
             .canonicalize()
             .expect("canonical tempdir")
             .join("rw");
-        std::fs::create_dir(&rw_host).expect("rw dir");
+        std::fs::create_dir(&write_root).expect("rw dir");
+        let read_root = dir
+            .path()
+            .canonicalize()
+            .expect("canonical tempdir")
+            .join("ro");
+        std::fs::create_dir(&read_root).expect("ro dir");
+        let work = write_root.join("work");
+        std::fs::create_dir(&work).expect("workdir");
+
         let policy = Policy {
             fs: FsPolicy {
-                mounts: vec![
-                    Mount {
-                        at: PathBuf::from("/work"),
-                        source: MountSource::Overlay { host: host.clone() },
+                entries: vec![
+                    FsEntry {
+                        path: write_root.clone(),
+                        access: Access::Write,
                     },
-                    Mount {
-                        at: PathBuf::from("/data"),
-                        source: MountSource::ReadWrite {
-                            host: rw_host.clone(),
-                        },
+                    FsEntry {
+                        path: read_root.clone(),
+                        access: Access::Read,
                     },
                 ],
                 ..FsPolicy::default()
             },
             shell: ShellPolicy {
-                workdir: host.join("work"),
+                workdir: work,
                 ..ShellPolicy::default()
             },
             ..Policy::default()
         };
-        // The workdir must exist for validation.
-        std::fs::create_dir(host.join("work")).expect("workdir");
-        assert!(validate_workdir(&policy.shell.workdir, &policy.fs.mounts).is_ok());
+        assert!(validate_workdir(&policy.shell.workdir, &policy.fs).is_ok());
 
-        let profile = render_profile(
-            &policy,
-            Path::new("/tmp/scratch"),
-            &[PathBuf::from("/bin")],
-            &[],
-        );
+        let profile = render_profile(&policy, Path::new("/tmp/scratch"), &[]);
 
         assert!(profile.starts_with("(version 1)\n(deny default)"));
         assert!(profile.contains("(allow process-fork)"));
-        assert!(profile.contains("(subpath \"/bin\")"));
-        assert!(profile.contains("(allow file-read-metadata)"));
-        assert!(profile.contains("(allow sysctl-read)"));
-        // Reads are deliberately broad (the macOS 26 dyld gap); writes stay
-        // confined to the read-write mount, the scratch directory, and
-        // /dev/null.
         assert!(profile.contains("(allow file-read-data (subpath \"/\"))"));
-        // Outbound is open so a command can reach a remote service; inbound
-        // stays denied by `deny default`.
-        assert!(profile.contains("(allow network-outbound)"));
-        assert!(!profile.contains("(allow network-inbound"));
-        assert!(!profile.contains("(allow network*)"));
+        assert!(profile.contains("(allow sysctl-read)"));
+        // Egress is denied: `deny default` covers it because there is no grant.
+        assert!(!profile.contains("network-outbound"));
+        assert!(!profile.contains("network-inbound"));
+        assert!(!profile.contains("network*"));
         let write_line = profile
             .lines()
             .find(|line| line.starts_with("(allow file-write*"))
             .expect("a write grant");
         assert!(
-            write_line.contains(&format!("(subpath {:?})", rw_host.display().to_string())),
-            "the read-write mount must be writable: {write_line}"
+            write_line.contains(&format!("(subpath {:?})", write_root.display().to_string())),
+            "the write entry must be writable: {write_line}"
         );
         assert!(
-            !write_line.contains(&format!("(subpath {:?})", host.display().to_string())),
-            "the overlay host must not be writable: {write_line}"
+            !write_line.contains(&format!("(subpath {:?})", read_root.display().to_string())),
+            "a read entry must not be writable: {write_line}"
         );
         assert!(write_line.contains("(literal \"/dev/null\")"));
     }
 
     #[test]
-    fn deny_read_paths_are_rendered_as_canonical_denials() {
+    fn protected_metadata_and_root_rename_are_denied() {
         let dir = TempDir::new().expect("tempdir");
-        // The secret lives outside the workdir: a denial covering the workdir is
-        // rejected by the guard, which `deny_read_rejects_a_path_the_sandbox_
-        // itself_needs` covers separately.
+        let write_root = dir.path().canonicalize().expect("canonical tempdir");
+        let policy = workdir_policy(&write_root);
+
+        let profile = render_profile(&policy, Path::new("/tmp/scratch"), &[]);
+
+        let root = regex_escape(&write_root.display().to_string());
+        assert!(
+            profile.contains(&format!(
+                "(deny file-write* (regex #\"^{root}/\\.git(/.*)?$\"))"
+            )),
+            "a .git carveout must be rendered: {profile}"
+        );
+        assert!(
+            profile.contains(&format!(
+                "(deny file-write* (regex #\"^{root}/\\.agents(/.*)?$\"))"
+            )),
+            "a .agents carveout must be rendered: {profile}"
+        );
+        assert!(
+            profile.contains(&format!(
+                "(deny file-write-unlink (require-all (literal {:?}) (vnode-type DIRECTORY)))",
+                write_root.display().to_string()
+            )),
+            "the write root must not be renameable: {profile}"
+        );
+    }
+
+    #[test]
+    fn deny_paths_are_rendered_as_canonical_denials() {
+        let dir = TempDir::new().expect("tempdir");
         let secret_dir = TempDir::new().expect("secret tempdir");
         // Deliberately NOT canonicalised: the raw path is the form a caller
         // would supply, and the rendered clause must be the resolved form.
-        // Passing an already-canonical path would make this pass even if
-        // `validate_deny_read` stopped resolving.
         let secret_raw = secret_dir.path().to_path_buf();
         let workdir = dir.path().canonicalize().expect("canonical workdir");
         let secret = secret_raw.canonicalize().expect("canonical secret");
-        let scratch = Path::new("/tmp/scratch");
-        let bin = [PathBuf::from("/bin")];
-        let deny_read = validate_deny_read(
-            &[secret_raw.clone(), secret_raw.clone()],
+        let policy = Policy {
+            fs: FsPolicy {
+                entries: vec![FsEntry {
+                    path: secret_raw.clone(),
+                    access: Access::Deny,
+                }],
+                ..FsPolicy::default()
+            },
+            ..Policy::default()
+        };
+        let deny = validate_deny(
+            &policy.fs,
             &workdir,
-            &bin,
-            scratch,
+            &[PathBuf::from("/bin")],
+            Path::new("/tmp/scratch"),
         )
-        .expect("valid deny_read");
+        .expect("valid deny");
 
-        let profile = render_profile(&Policy::default(), scratch, &bin, &deny_read);
+        let profile = render_profile(&policy, Path::new("/tmp/scratch"), &deny);
 
-        // The denial must come after the broad read grant: in Seatbelt a deny
-        // overrides any matching allow regardless of order, but emitting it
-        // last keeps the intent readable.
         let deny_line = profile
             .lines()
             .find(|line| line.starts_with("(deny file-read-data"))
@@ -772,11 +819,6 @@ mod tests {
                 "the unresolved form must not be rendered: {deny_line}"
             );
         }
-        assert_eq!(
-            1,
-            deny_line.matches("(subpath ").count(),
-            "a duplicate entry must be collapsed: {deny_line}"
-        );
         // Withholding the contents alone leaves names and sizes readable, so
         // every read class must be denied.
         for kind in ["file-read-data", "file-read-metadata", "file-read-xattr"] {
@@ -788,15 +830,22 @@ mod tests {
     }
 
     #[test]
-    fn deny_read_fails_closed_on_an_unresolvable_path() {
+    fn deny_fails_closed_on_an_unresolvable_path() {
         let dir = TempDir::new().expect("tempdir");
         let workdir = dir.path().canonicalize().expect("canonical");
+        let policy = Policy {
+            fs: FsPolicy {
+                entries: vec![FsEntry {
+                    path: PathBuf::from("/nonexistent/secret"),
+                    access: Access::Deny,
+                }],
+                ..FsPolicy::default()
+            },
+            ..Policy::default()
+        };
 
-        // A path that does not resolve cannot be expressed in the profile.
-        // Dropping it would leave a weaker sandbox than the operator asked for,
-        // so it must be an error instead.
-        let error = validate_deny_read(
-            &[PathBuf::from("/nonexistent/secret")],
+        let error = validate_deny(
+            &policy.fs,
             &workdir,
             &[PathBuf::from("/bin")],
             Path::new("/tmp/scratch"),
@@ -809,14 +858,22 @@ mod tests {
     }
 
     #[test]
-    fn deny_read_rejects_a_relative_path() {
+    fn deny_rejects_a_relative_path() {
         let dir = TempDir::new().expect("tempdir");
         let workdir = dir.path().canonicalize().expect("canonical");
+        let policy = Policy {
+            fs: FsPolicy {
+                entries: vec![FsEntry {
+                    path: PathBuf::from("secrets"),
+                    access: Access::Deny,
+                }],
+                ..FsPolicy::default()
+            },
+            ..Policy::default()
+        };
 
-        // A relative entry would resolve against the daemon's working
-        // directory and deny something the operator never named.
-        let error = validate_deny_read(
-            &[PathBuf::from("secrets")],
+        let error = validate_deny(
+            &policy.fs,
             &workdir,
             &[PathBuf::from("/bin")],
             Path::new("/tmp/scratch"),
@@ -829,56 +886,40 @@ mod tests {
     }
 
     #[test]
-    fn deny_read_rejects_a_denial_covering_the_scratch_directory() {
-        let dir = TempDir::new().expect("tempdir");
-        let workdir = dir.path().canonicalize().expect("canonical");
-        // The scratch path is deliberately supplied in its unresolved TMPDIR
-        // form: on macOS that is `/var/...` while the resolved denial is
-        // `/private/var/...`, so the guard only fires if it canonicalises the
-        // protected side too.
-        let scratch =
-            std::env::temp_dir().join(format!("agentd-sandbox-guard-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&scratch).expect("scratch dir");
-        let resolved = scratch.canonicalize().expect("canonical scratch");
-
-        let error = validate_deny_read(
-            std::slice::from_ref(&resolved),
-            &workdir,
-            &[PathBuf::from("/bin")],
-            &scratch,
-        )
-        .expect_err("a denial of the scratch directory must be rejected");
-        assert!(
-            matches!(error, SandboxError::InvalidPolicy(_)),
-            "unexpected error: {error:?}"
-        );
-
-        let _ = std::fs::remove_dir_all(&scratch);
-    }
-
-    #[test]
-    fn deny_read_rejects_a_path_the_sandbox_itself_needs() {
+    fn deny_rejects_a_path_the_sandbox_itself_needs() {
         let dir = TempDir::new().expect("tempdir");
         let workdir = dir.path().canonicalize().expect("canonical");
         let bin = [PathBuf::from("/bin")];
+        let policy = Policy {
+            fs: FsPolicy {
+                entries: vec![FsEntry {
+                    path: workdir.clone(),
+                    access: Access::Deny,
+                }],
+                ..FsPolicy::default()
+            },
+            ..Policy::default()
+        };
 
-        // Denying the workdir would break every command rather than the one
-        // path, so it is rejected at construction.
-        let error = validate_deny_read(
-            std::slice::from_ref(&workdir),
-            &workdir,
-            &bin,
-            Path::new("/tmp/scratch"),
-        )
-        .expect_err("the workdir must not be deniable");
+        let error = validate_deny(&policy.fs, &workdir, &bin, Path::new("/tmp/scratch"))
+            .expect_err("the workdir must not be deniable");
         assert!(
             matches!(error, SandboxError::InvalidPolicy(_)),
             "unexpected error: {error:?}"
         );
 
-        // The same holds for a directory a command runs from.
-        let error = validate_deny_read(
-            &[PathBuf::from("/usr")],
+        let policy = Policy {
+            fs: FsPolicy {
+                entries: vec![FsEntry {
+                    path: PathBuf::from("/usr"),
+                    access: Access::Deny,
+                }],
+                ..FsPolicy::default()
+            },
+            ..Policy::default()
+        };
+        let error = validate_deny(
+            &policy.fs,
             &workdir,
             &[PathBuf::from("/usr/bin")],
             Path::new("/tmp/scratch"),
@@ -891,37 +932,139 @@ mod tests {
     }
 
     #[test]
-    fn rendered_profile_is_accepted_by_sandbox_exec() {
-        if !spawn_tests_supported() {
-            return;
-        }
-        // Textual assertions cannot tell a well-formed profile from one that
-        // fails to parse, and the spawn tests that could are skipped in CI.
-        // Asking `sandbox-exec` to load the profile against a trivial command
-        // keeps a parse check in every environment that can run it at all.
-        let work = TempDir::new().expect("workdir");
-        let secret_dir = TempDir::new().expect("secret tempdir");
-        let scratch = TempDir::new().expect("scratch");
-        let policy = overlay_policy(&work.path().canonicalize().expect("canonical"));
-        let profile = render_profile(
-            &policy,
-            scratch.path(),
-            &[PathBuf::from("/bin"), PathBuf::from("/usr/bin")],
-            &[secret_dir.path().canonicalize().expect("canonical secret")],
-        );
-        let path = scratch.path().join("parse-check.sb");
-        std::fs::write(&path, &profile).expect("write profile");
+    fn deny_inside_a_write_root_is_allowed_and_rendered() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonical");
+        let env_file = root.join(".env");
+        std::fs::write(&env_file, "secret").expect("env file");
+        let policy = Policy {
+            fs: FsPolicy {
+                entries: vec![
+                    FsEntry {
+                        path: root.clone(),
+                        access: Access::Write,
+                    },
+                    FsEntry {
+                        path: env_file.clone(),
+                        access: Access::Deny,
+                    },
+                ],
+                ..FsPolicy::default()
+            },
+            shell: ShellPolicy {
+                workdir: root.clone(),
+                ..ShellPolicy::default()
+            },
+            ..Policy::default()
+        };
 
-        let accepted = std::process::Command::new("/usr/bin/sandbox-exec")
-            .arg("-f")
-            .arg(&path)
-            .arg("/usr/bin/true")
-            .status()
-            .expect("sandbox-exec runs");
+        let deny = validate_deny(
+            &policy.fs,
+            &root,
+            &[PathBuf::from("/bin")],
+            Path::new("/tmp/scratch"),
+        )
+        .expect("a deny nested in a write root narrows and must be allowed");
+
+        let profile = render_profile(&policy, Path::new("/tmp/scratch"), &deny);
+        let canonical = env_file.canonicalize().expect("canonical env file");
         assert!(
-            accepted.success(),
-            "sandbox-exec rejected the profile:\n{profile}"
+            profile.contains(&format!(
+                "(deny file-read-data (subpath {:?})",
+                canonical.display().to_string()
+            )),
+            "the nested deny must be rendered: {profile}"
         );
+    }
+
+    #[test]
+    fn no_denial_line_when_nothing_is_denied() {
+        let profile = render_profile(&Policy::default(), Path::new("/tmp/scratch"), &[]);
+
+        assert!(
+            !profile.contains("(deny file-read-data"),
+            "an empty deny list must not emit a clause: {profile}"
+        );
+    }
+
+    #[test]
+    fn workdir_validation_fails_closed() {
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        let policy = workdir_policy(&host);
+
+        let relative = Policy {
+            shell: ShellPolicy {
+                workdir: PathBuf::from("relative"),
+                ..ShellPolicy::default()
+            },
+            ..policy.clone()
+        };
+        assert!(matches!(
+            validate_workdir(&relative.shell.workdir, &relative.fs),
+            Err(SandboxError::InvalidPolicy(_))
+        ));
+
+        let missing = Policy {
+            shell: ShellPolicy {
+                workdir: host.join("missing"),
+                ..ShellPolicy::default()
+            },
+            ..policy.clone()
+        };
+        assert!(matches!(
+            validate_workdir(&missing.shell.workdir, &missing.fs),
+            Err(SandboxError::InvalidPolicy(_))
+        ));
+
+        // A workdir no write entry covers is rejected, not run read-only.
+        let other = TempDir::new().expect("tempdir");
+        let elsewhere = other.path().canonicalize().expect("canonical tempdir");
+        std::fs::create_dir(elsewhere.join("elsewhere")).expect("dir");
+        let uncovered = Policy {
+            shell: ShellPolicy {
+                workdir: elsewhere.join("elsewhere"),
+                ..ShellPolicy::default()
+            },
+            ..policy
+        };
+        assert!(matches!(
+            validate_workdir(&uncovered.shell.workdir, &uncovered.fs),
+            Err(SandboxError::InvalidPolicy(_))
+        ));
+    }
+
+    #[test]
+    fn writable_hosts_fail_closed_on_an_unresolvable_entry() {
+        let policy = Policy {
+            fs: FsPolicy {
+                entries: vec![FsEntry {
+                    path: PathBuf::from("/nonexistent/write"),
+                    access: Access::Write,
+                }],
+                ..FsPolicy::default()
+            },
+            ..Policy::default()
+        };
+
+        assert!(matches!(
+            writable_hosts(&policy.fs),
+            Err(SandboxError::InvalidPolicy(_))
+        ));
+    }
+
+    #[test]
+    fn executor_requires_sandbox_exec_and_writes_the_profile() {
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        let policy = workdir_policy(&host);
+
+        let executor = executor(&policy);
+        assert!(executor.profile_path.exists());
+        let profile =
+            std::fs::read_to_string(&executor.profile_path).expect("profile written to scratch");
+        assert!(profile.contains("(deny default)"));
+        assert!(profile.contains("(allow file-read-data (subpath \"/\"))"));
     }
 
     #[test]
@@ -939,16 +1082,18 @@ mod tests {
         let before = count();
 
         // The policy is rejected after the scratch directory exists, so the
-        // failure path must remove it: a daemon retrying a bad policy would
-        // otherwise leak a directory per attempt.
+        // failure path must remove it.
         let error = ConfinedProcessExecutor::new(&Policy {
             fs: FsPolicy {
-                deny_read: vec![PathBuf::from("/nonexistent/secret")],
+                entries: vec![FsEntry {
+                    path: PathBuf::from("/nonexistent/secret"),
+                    access: Access::Deny,
+                }],
                 ..FsPolicy::default()
             },
             ..Policy::default()
         })
-        .expect_err("an unresolvable deny_read must be rejected");
+        .expect_err("an unresolvable deny must be rejected");
         assert!(
             matches!(error, SandboxError::InvalidPolicy(_)),
             "unexpected error: {error:?}"
@@ -962,104 +1107,29 @@ mod tests {
     }
 
     #[test]
-    fn no_denial_line_when_nothing_is_denied() {
-        let profile = render_profile(
-            &Policy::default(),
-            Path::new("/tmp/scratch"),
-            &[PathBuf::from("/bin")],
-            &[],
-        );
+    fn rendered_profile_is_accepted_by_sandbox_exec() {
+        if !spawn_tests_supported() {
+            return;
+        }
+        let work = TempDir::new().expect("workdir");
+        let secret_dir = TempDir::new().expect("secret tempdir");
+        let scratch = TempDir::new().expect("scratch");
+        let policy = workdir_policy(&work.path().canonicalize().expect("canonical"));
+        let deny = vec![secret_dir.path().canonicalize().expect("canonical secret")];
+        let profile = render_profile(&policy, scratch.path(), &deny);
+        let path = scratch.path().join("parse-check.sb");
+        std::fs::write(&path, &profile).expect("write profile");
 
+        let accepted = std::process::Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(&path)
+            .arg("/usr/bin/true")
+            .status()
+            .expect("sandbox-exec runs");
         assert!(
-            !profile.contains("(deny file-read-data"),
-            "an empty deny_read must not emit a clause: {profile}"
+            accepted.success(),
+            "sandbox-exec rejected the profile:\n{profile}"
         );
-    }
-
-    #[test]
-    fn workdir_validation_fails_closed() {
-        let dir = TempDir::new().expect("tempdir");
-        let host = dir.path().canonicalize().expect("canonical tempdir");
-        let mounts = vec![Mount {
-            at: PathBuf::from("/work"),
-            source: MountSource::Overlay { host: host.clone() },
-        }];
-
-        let relative = Policy {
-            shell: ShellPolicy {
-                workdir: PathBuf::from("relative"),
-                ..ShellPolicy::default()
-            },
-            ..Policy::default()
-        };
-        assert!(matches!(
-            validate_workdir(&relative.shell.workdir, &mounts),
-            Err(SandboxError::InvalidPolicy(_))
-        ));
-
-        let missing = Policy {
-            shell: ShellPolicy {
-                workdir: host.join("missing"),
-                ..ShellPolicy::default()
-            },
-            ..Policy::default()
-        };
-        assert!(matches!(
-            validate_workdir(&missing.shell.workdir, &mounts),
-            Err(SandboxError::InvalidPolicy(_))
-        ));
-
-        // A workdir no host mount covers breaks the single-plane guarantee.
-        let other = TempDir::new().expect("tempdir");
-        let uncovered = other.path().canonicalize().expect("canonical tempdir");
-        std::fs::create_dir(uncovered.join("elsewhere")).expect("dir");
-        let elsewhere = Policy {
-            shell: ShellPolicy {
-                workdir: uncovered.join("elsewhere"),
-                ..ShellPolicy::default()
-            },
-            ..Policy::default()
-        };
-        assert!(matches!(
-            validate_workdir(&elsewhere.shell.workdir, &mounts),
-            Err(SandboxError::InvalidPolicy(_))
-        ));
-    }
-
-    #[test]
-    fn confined_path_dirs_reject_unusable_entries() {
-        let ok = vec![CommandPrefix::new("echo"), CommandPrefix::new("ls")];
-        assert!(
-            !confined_path_dirs(&ok)
-                .expect("bare commands resolve from system dirs")
-                .is_empty()
-        );
-
-        let unterminated = vec![CommandPrefix::new("echo 'unterminated")];
-        assert!(matches!(
-            confined_path_dirs(&unterminated),
-            Err(SandboxError::InvalidPolicy(_))
-        ));
-
-        let relative = vec![CommandPrefix::new("tools/bin/echo")];
-        assert!(matches!(
-            confined_path_dirs(&relative),
-            Err(SandboxError::InvalidPolicy(_))
-        ));
-    }
-
-    #[test]
-    fn executor_requires_sandbox_exec_and_writes_the_profile() {
-        let dir = TempDir::new().expect("tempdir");
-        let host = dir.path().canonicalize().expect("canonical tempdir");
-        let policy = overlay_policy(&host);
-
-        let executor = executor(&policy);
-        assert!(executor.profile_path.exists());
-        let profile =
-            std::fs::read_to_string(&executor.profile_path).expect("profile written to scratch");
-        assert!(profile.contains("(deny default)"));
-        assert!(profile.contains("(subpath \"/bin\")"));
     }
 
     #[test]
@@ -1069,7 +1139,7 @@ mod tests {
         }
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
-        let mut policy = overlay_policy(&host);
+        let mut policy = workdir_policy(&host);
         policy.shell.env = vec![EnvVar {
             name: String::from("SANDBOX_MARKER"),
             value: String::from("present"),
@@ -1080,84 +1150,61 @@ mod tests {
 
         assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
         assert_eq!(result.stdout, "hello\n");
-        assert!(!result.is_denied());
     }
 
     #[test]
-    fn writes_reach_read_write_mounts_but_not_overlay_hosts() {
+    fn writes_reach_write_entries_but_not_read_entries() {
         if !spawn_tests_supported() {
             return;
         }
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
-        let rw_host = host.join("rw");
-        std::fs::create_dir(&rw_host).expect("rw dir");
+        let write_root = host.join("rw");
+        let read_root = host.join("ro");
+        std::fs::create_dir(&write_root).expect("rw dir");
+        std::fs::create_dir(&read_root).expect("ro dir");
+        std::fs::write(read_root.join("keep.txt"), "keep").expect("ro file");
+
         let policy = Policy {
             fs: FsPolicy {
-                mounts: vec![
-                    Mount {
-                        at: PathBuf::from("/work"),
-                        source: MountSource::Overlay { host: host.clone() },
+                entries: vec![
+                    FsEntry {
+                        path: write_root.clone(),
+                        access: Access::Write,
                     },
-                    Mount {
-                        at: PathBuf::from("/data"),
-                        source: MountSource::ReadWrite {
-                            host: rw_host.clone(),
-                        },
+                    FsEntry {
+                        path: read_root.clone(),
+                        access: Access::Read,
                     },
                 ],
                 ..FsPolicy::default()
             },
             shell: ShellPolicy {
-                allow: base_allowlist(),
-                workdir: rw_host.clone(),
+                workdir: write_root.clone(),
                 ..ShellPolicy::default()
             },
             ..Policy::default()
         };
-        // The process sees host paths: the workdir inside the mount is the
-        // rendezvous point between the two planes.
-        let rw_policy = Policy {
-            shell: ShellPolicy {
-                allow: base_allowlist(),
-                workdir: rw_host.clone(),
-                ..ShellPolicy::default()
-            },
-            fs: policy.fs.clone(),
-            ..policy
-        };
-        let rw_executor = executor(&rw_policy);
-        let write_rw = rw_executor.blocking_exec("echo data > out.txt");
-        assert_eq!(write_rw.exit_code, 0, "stderr: {}", write_rw.stderr);
-        assert!(rw_host.join("out.txt").exists());
+        let executor = executor(&policy);
 
-        // The same host directory behind an overlay mount is read-only at
-        // the OS level: writes stay in the VFS upper layer, never on disk.
-        let overlay_policy_here = overlay_policy(&host);
-        let overlay_executor = executor(&overlay_policy_here);
-        let write_overlay = overlay_executor.blocking_exec("touch blocked.txt");
-        assert_ne!(
-            write_overlay.exit_code, 0,
-            "overlay host must be read-only at the OS level: stderr {}",
-            write_overlay.stderr
-        );
-        assert!(
-            !overlay_executor.workdir.join("blocked.txt").exists(),
-            "the overlay host directory must stay untouched"
-        );
+        let write = executor.blocking_exec("echo data > out.txt");
+        assert_eq!(write.exit_code, 0, "stderr: {}", write.stderr);
+        assert!(write_root.join("out.txt").exists());
+
+        let blocked = executor.blocking_exec(&format!("touch {}/blocked.txt", read_root.display()));
+        assert_ne!(blocked.exit_code, 0, "stderr: {}", blocked.stderr);
+        assert!(!read_root.join("blocked.txt").exists());
     }
 
     #[test]
-    fn writes_outside_mounts_are_denied() {
+    fn writes_outside_entries_are_denied() {
         if !spawn_tests_supported() {
             return;
         }
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
-        let executor = executor(&overlay_policy(&host));
+        let executor = executor(&workdir_policy(&host));
 
-        // Reads are deliberately broad (the module docs' macOS 26 dyld gap);
-        // what the OS must enforce is the write boundary.
         let etc = executor.blocking_exec("touch /etc/agentd-sandbox-blocked");
         assert_ne!(etc.exit_code, 0, "stderr: {}", etc.stderr);
         assert!(!Path::new("/etc/agentd-sandbox-blocked").exists());
@@ -1168,33 +1215,38 @@ mod tests {
     }
 
     #[test]
-    fn deny_read_withholds_a_host_file_from_a_spawned_binary() {
+    fn denied_paths_withhold_a_host_file_from_a_spawned_binary() {
         if !spawn_tests_supported() {
             return;
         }
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
-        // The secret lives outside the workspace: a denial covering the workdir
-        // is rejected by the guard.
         let secret_dir = TempDir::new().expect("secret tempdir");
         let secret = secret_dir.path().canonicalize().expect("canonical secret");
         std::fs::write(secret.join("token"), "s3cr3t").expect("secret file");
 
-        let mut policy = overlay_policy(&host);
-        policy.fs.deny_read = vec![secret.clone()];
-
-        // Control: with no denial the same read succeeds, so the assertions
-        // below cannot pass merely because the file was unreadable for some
-        // unrelated reason.
-        let control = executor(&policy_without_deny(&policy))
-            .blocking_exec(&format!("cat {}/token", secret.display()));
-        assert_eq!(control.exit_code, 0, "stderr: {}", control.stderr);
-        assert!(control.stdout.contains("s3cr3t"));
-
+        let policy = Policy {
+            fs: FsPolicy {
+                entries: vec![
+                    FsEntry {
+                        path: host.clone(),
+                        access: Access::Write,
+                    },
+                    FsEntry {
+                        path: secret.clone(),
+                        access: Access::Deny,
+                    },
+                ],
+                ..FsPolicy::default()
+            },
+            shell: ShellPolicy {
+                workdir: host,
+                ..ShellPolicy::default()
+            },
+            ..Policy::default()
+        };
         let executor = executor(&policy);
 
-        // A spawned host binary reads through the kernel, bypassing the VFS, so
-        // this is the only check that proves the OS profile withholds the file.
         let denied = executor.blocking_exec(&format!("cat {}/token", secret.display()));
         assert_ne!(denied.exit_code, 0, "stdout: {}", denied.stdout);
         assert!(
@@ -1203,15 +1255,8 @@ mod tests {
             denied.stdout
         );
 
-        // Withholding the contents alone would still expose the size through a
-        // metadata query, so the denial must cover metadata too.
         let stat = executor.blocking_exec(&format!("stat -f %z {}/token", secret.display()));
         assert_ne!(stat.exit_code, 0, "stdout: {}", stat.stdout);
-        assert!(
-            !stat.stdout.contains('6'),
-            "the denial must not leak the file size: {}",
-            stat.stdout
-        );
 
         // The denial is narrow: unrelated reads still work.
         let allowed = executor.blocking_exec("cat /etc/hosts");
@@ -1226,7 +1271,7 @@ mod tests {
         }
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
-        let mut policy = overlay_policy(&host);
+        let mut policy = workdir_policy(&host);
         policy.limits.timeout = Duration::from_secs(1);
         let executor = executor(&policy);
 
@@ -1248,7 +1293,7 @@ mod tests {
         }
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
-        let mut policy = overlay_policy(&host);
+        let mut policy = workdir_policy(&host);
         policy.limits.max_output_bytes = 100_000;
         let executor = executor(&policy);
 

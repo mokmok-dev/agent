@@ -1,12 +1,12 @@
 //! The sandbox policy model.
 //!
-//! A [`Policy`] is deny-by-default in every domain: the zero value mounts
-//! nothing, allows no command, and imposes safe resource limits. Reads are
-//! narrowed from the broad OS grant only by [`FsPolicy::deny_read`], and network
-//! egress is the *intended* default-deny; the current implementation predates
-//! that and its rendered profile still opens outbound (see `docs/sandbox.md` and
-//! [`NetworkPolicy`]). Policies serialize into JSON so they can arrive as event
-//! data; every field defaults to its inert value when absent.
+//! A [`Policy`] is deny-by-default in every domain: the zero value grants no
+//! path access, runs no command, and imposes safe resource limits. The
+//! filesystem domain is a single list of path entries evaluated with the
+//! precedence `deny > write > read`; the network has no configurability because
+//! egress and ingress are denied outright. The policy serializes into JSON so
+//! it can arrive as event data; every field defaults to an inert value when
+//! absent.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,16 +14,14 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error as ThisError;
 
-/// The four-domain deny-by-default configuration a sandbox runs under.
+/// The deny-by-default configuration a sandbox runs under.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Policy {
-    /// Filesystem policy: mounts, refused and hidden path globs, byte caps.
+    /// Filesystem policy: path entries and protected metadata names.
     pub fs: FsPolicy,
-    /// Shell policy: allowed command prefixes, environment, working directory.
+    /// Shell policy: environment and working directory.
     pub shell: ShellPolicy,
-    /// Network policy: nothing to configure in this version.
-    pub network: NetworkPolicy,
     /// Resource limits: guards, not grants — safe values even when omitted.
     pub limits: Limits,
 }
@@ -33,22 +31,21 @@ impl Policy {
     ///
     /// # Errors
     ///
-    /// Returns [`PolicyError`] for a command prefix that tokenizes to nothing
-    /// (which would match every command), a zero timeout, or a per-file byte cap
-    /// above the total byte cap.
+    /// Returns [`PolicyError`] for a zero timeout, a relative path entry, or a
+    /// protected name that is empty or contains a separator.
     pub fn validate(&self) -> Result<(), PolicyError> {
-        for prefix in &self.shell.allow {
-            if !prefix.is_usable() {
-                return Err(PolicyError::EmptyCommandPrefix(prefix.as_str().to_string()));
-            }
-        }
         if self.limits.timeout.is_zero() {
             return Err(PolicyError::ZeroTimeout);
         }
-        if let (Some(file), Some(total)) = (self.fs.max_file_bytes, self.fs.max_total_bytes)
-            && file > total
-        {
-            return Err(PolicyError::FileCapExceedsTotal { file, total });
+        for entry in &self.fs.entries {
+            if !entry.path.is_absolute() {
+                return Err(PolicyError::RelativeEntry(entry.path.clone()));
+            }
+        }
+        for name in &self.fs.protected {
+            if name.is_empty() || name.contains('/') {
+                return Err(PolicyError::InvalidProtectedName(name.clone()));
+            }
         }
         Ok(())
     }
@@ -57,186 +54,74 @@ impl Policy {
 /// A policy input that fails closed.
 #[derive(Debug, Clone, PartialEq, Eq, ThisError)]
 pub enum PolicyError {
-    /// A command prefix tokenizes to nothing, so it would match every command.
-    #[error("command prefix {0:?} tokenizes to nothing and would match every command")]
-    EmptyCommandPrefix(String),
     /// A zero wall-clock timeout would kill every command before it runs.
     #[error("the wall-clock timeout must be greater than zero")]
     ZeroTimeout,
-    /// A per-file cap above the total cap makes the total cap unreachable.
-    #[error("max_file_bytes ({file}) exceeds max_total_bytes ({total})")]
-    FileCapExceedsTotal {
-        /// The per-file cap.
-        file: u64,
-        /// The total cap it exceeds.
-        total: u64,
-    },
+    /// A path entry must be an absolute host path.
+    #[error("path entry {0:?} must be absolute")]
+    RelativeEntry(PathBuf),
+    /// A protected name must be one path component, e.g. `.git`.
+    #[error("protected name {0:?} must be a single non-empty path component")]
+    InvalidProtectedName(String),
 }
 
-/// Filesystem policy for the virtual filesystem.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+/// Filesystem policy for the OS confinement profile.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FsPolicy {
-    /// The mounts that make up the virtual filesystem; unmounted paths are
-    /// absent.
-    pub mounts: Vec<Mount>,
-    /// Access denied wherever the pattern matches, e.g. `.env`, `*.pem`,
-    /// `.git/**`.
-    pub refuse: Vec<Pattern>,
-    /// Paths that appear absent, including in directory listings.
-    pub hide: Vec<Pattern>,
-    /// Host paths the OS confinement layer must not let a spawned command read,
-    /// e.g. `/home/dev/.ssh`.
+    /// Path entries, evaluated with the precedence `deny > write > read`.
     ///
-    /// [`refuse`](Self::refuse) and [`hide`](Self::hide) screen *virtual* paths
-    /// at the [`Vfs`](crate::vfs::Vfs) layer, which a spawned host binary
-    /// bypasses; this list is rendered into the OS profile, so it holds for real
-    /// processes. Honoured by the macOS layer-1 executor (the
-    /// [`ConfinedProcessExecutor`](crate::ConfinedProcessExecutor)) only: a
-    /// custom [`Executor`](crate::executor::Executor) may ignore it, and it
-    /// never affects [`Vfs`](crate::vfs::Vfs) reads.
-    ///
-    /// Entries are absolute host paths, not globs and not `~`-prefixed: `~` is a
-    /// shell expansion that a path type does not perform. Each must resolve at
-    /// construction, or the sandbox fails closed rather than withholding
-    /// nothing. A path covering the workdir, an executable directory, or the
-    /// sandbox scratch directory is rejected, since every command needs those.
-    /// Empty by default — the operator names what their host considers secret.
-    pub deny_read: Vec<PathBuf>,
-    /// Cap on the total bytes written through the sandbox.
-    pub max_total_bytes: Option<u64>,
-    /// Cap on the bytes of a single file written through the sandbox.
-    pub max_file_bytes: Option<u64>,
+    /// A `read` or `write` entry covers a directory (and everything under it)
+    /// or a single file; `deny` removes access wherever it matches. A `write`
+    /// entry is what the OS profile grants write access to; reads are granted
+    /// broadly by the profile (see `docs/sandbox.md`) and narrowed by `deny`.
+    pub entries: Vec<FsEntry>,
+    /// Names fixed read-only inside any `write` root. Defaults to `.git` and
+    /// `.agents`, so a command cannot rewrite the repository history it is
+    /// diffed against or its own instructions.
+    pub protected: Vec<String>,
 }
 
-/// A mount binds a virtual location to a backing source.
+impl Default for FsPolicy {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            protected: vec![String::from(".git"), String::from(".agents")],
+        }
+    }
+}
+
+/// One filesystem path rule.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct Mount {
-    /// The virtual mount point, sandbox-absolute (e.g. `/work`). Mounting at
-    /// `/` backs the whole virtual root.
-    pub at: PathBuf,
-    /// What backs the mount.
-    pub source: MountSource,
+#[serde(deny_unknown_fields)]
+pub struct FsEntry {
+    /// The host path the rule applies to: a directory or a single file.
+    pub path: PathBuf,
+    /// The access the rule grants or removes.
+    pub access: Access,
 }
 
-/// What backs a [`Mount`].
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum MountSource {
-    /// Fully in-memory and byte-accounted; the default and the safest backing.
-    Mem,
-    /// A host directory, read-only through the sandbox.
-    ReadOnly {
-        /// The host directory the mount is rooted at.
-        host: PathBuf,
-    },
-    /// A host directory, writable through the sandbox: the only write path to
-    /// the host.
-    ReadWrite {
-        /// The host directory the mount is rooted at.
-        host: PathBuf,
-    },
-    /// A host directory with copy-on-write: reads fall through to the host,
-    /// writes stay in memory. The host side is never written through the
-    /// sandbox; in layer 1 it is additionally read-only at the OS level.
-    Overlay {
-        /// The host directory the mount is rooted at.
-        host: PathBuf,
-    },
-}
-
-/// A glob pattern evaluated against virtual paths.
-///
-/// Patterns use deny-anywhere semantics: a pattern matches a path when it
-/// matches the full path or any path suffix starting after a separator, so
-/// `.env` denies `/work/.env` and `/work/sub/.env`, and `.git/**` denies
-/// everything under any `.git` directory.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Pattern(String);
-
-impl Pattern {
-    /// Creates a pattern from a glob string.
-    #[must_use]
-    pub fn new(pattern: impl Into<String>) -> Self {
-        Self(pattern.into())
-    }
-
-    /// The glob string.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<&str> for Pattern {
-    fn from(pattern: &str) -> Self {
-        Self(String::from(pattern))
-    }
-}
-
-impl From<String> for Pattern {
-    fn from(pattern: String) -> Self {
-        Self(pattern)
-    }
+/// The access an [`FsEntry`] grants or removes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Access {
+    /// Read access; reads are granted broadly and this narrows from the top.
+    Read,
+    /// Write access; the only path that can reach the host writable.
+    Write,
+    /// No access, overriding any matching `read` or `write`.
+    Deny,
 }
 
 /// Shell policy for commands executed through the sandbox.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ShellPolicy {
-    /// Allowed command prefixes. Deny-by-default: an empty list means no
-    /// command runs.
-    pub allow: Vec<CommandPrefix>,
     /// The environment handed to commands, verbatim. The host environ is
     /// never inherited.
     pub env: EnvAllowlist,
     /// Host working directory for spawned commands.
     pub workdir: PathBuf,
-}
-
-/// An allowed command prefix: the command's tokens must start with exactly
-/// these tokens.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct CommandPrefix(String);
-
-impl CommandPrefix {
-    /// Creates a prefix from its token list, e.g. `cargo test`.
-    #[must_use]
-    pub fn new(prefix: impl Into<String>) -> Self {
-        Self(prefix.into())
-    }
-
-    /// The prefix string.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Whether the prefix tokenizes to at least one token.
-    ///
-    /// A prefix that tokenizes to nothing — empty, whitespace-only, or with
-    /// unbalanced quotes — must never be treated as matching, because an empty
-    /// token list would match every command. [`Policy::validate`] rejects one at
-    /// construction.
-    #[must_use]
-    pub fn is_usable(&self) -> bool {
-        shlex::split(self.as_str()).is_some_and(|tokens| !tokens.is_empty())
-    }
-}
-
-impl From<&str> for CommandPrefix {
-    fn from(prefix: &str) -> Self {
-        Self(String::from(prefix))
-    }
-}
-
-impl From<String> for CommandPrefix {
-    fn from(prefix: String) -> Self {
-        Self(prefix)
-    }
 }
 
 /// The environment handed to commands: literal variables, never derived from
@@ -253,43 +138,26 @@ pub struct EnvVar {
     pub value: String,
 }
 
-/// Network policy.
-///
-/// This version has no configurable surface. The target design is **deny by
-/// default**: egress and ingress are denied, and the only reachable endpoint is
-/// the daemon's Unix socket, so inference is a daemon capability the sandbox
-/// asks for over that socket. The current code predates this: the rendered
-/// macOS profile still opens *outbound* IP connections (`allow network-outbound`)
-/// while denying inbound. Per-host rules and an SSRF guard are not implemented
-/// and are unnecessary once egress is denied. See `docs/sandbox.md`, including
-/// the file-read denials that bound what a compromised command could read.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct NetworkPolicy {}
-
 /// Resource limits guarding against runaway commands.
+///
+/// There is deliberately no memory or byte cap: macOS has no mechanism to
+/// enforce one, and an unenforced field would be a false promise. See
+/// `docs/sandbox.md`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Limits {
     /// Wall-clock timeout per command.
     #[serde(with = "duration_seconds")]
     pub timeout: Duration,
-    /// Command count per sandbox: a fork-bomb and runaway-loop guard.
-    pub max_command_count: u32,
     /// Cap on captured command output bytes.
     pub max_output_bytes: u64,
-    /// Best-effort memory cap. Configuration-only in this version: there is
-    /// no hard memory ceiling for spawned commands on macOS, and enforcing
-    /// rlimits is out of scope; see `docs/sandbox.md`.
-    pub max_memory_bytes: Option<u64>,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(60),
-            max_command_count: 1_000,
             max_output_bytes: 1024 * 1024,
-            max_memory_bytes: None,
         }
     }
 }
@@ -313,10 +181,7 @@ mod duration_seconds {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CommandPrefix, EnvVar, Limits, Mount, MountSource, NetworkPolicy, Pattern, Policy,
-        PolicyError, ShellPolicy,
-    };
+    use super::{Access, EnvVar, FsEntry, FsPolicy, Limits, Policy, PolicyError, ShellPolicy};
     use serde_json::{Value, from_value, json, to_value};
     use std::path::PathBuf;
     use std::time::Duration;
@@ -325,15 +190,17 @@ mod tests {
     fn default_policy_is_fully_inert() {
         let policy = Policy::default();
 
-        assert!(policy.fs.mounts.is_empty());
-        assert!(policy.fs.refuse.is_empty());
-        assert!(policy.fs.hide.is_empty());
-        assert_eq!(policy.fs.max_total_bytes, None);
-        assert_eq!(policy.fs.max_file_bytes, None);
-        assert!(policy.shell.allow.is_empty());
+        assert!(policy.fs.entries.is_empty());
         assert!(policy.shell.env.is_empty());
         assert_eq!(policy.shell.workdir, PathBuf::new());
-        assert_eq!(policy.network, NetworkPolicy {});
+    }
+
+    #[test]
+    fn default_protected_names_cover_repo_metadata() {
+        assert_eq!(
+            FsPolicy::default().protected,
+            [String::from(".git"), String::from(".agents")]
+        );
     }
 
     #[test]
@@ -341,9 +208,7 @@ mod tests {
         let limits = Limits::default();
 
         assert_eq!(limits.timeout, Duration::from_secs(60));
-        assert_eq!(limits.max_command_count, 1_000);
         assert_eq!(limits.max_output_bytes, 1024 * 1024);
-        assert_eq!(limits.max_memory_bytes, None);
     }
 
     #[test]
@@ -351,39 +216,36 @@ mod tests {
         let policy = from_value::<Policy>(json!({}))
             .expect("an empty JSON object is a valid, fully inert policy");
 
-        assert_eq!(policy, Policy::default());
+        assert_eq!(policy.fs.entries, Vec::new());
+        assert_eq!(policy.limits, Limits::default());
     }
 
     #[test]
     fn policy_round_trips_through_json() {
         let policy = Policy {
-            fs: super::FsPolicy {
-                mounts: vec![Mount {
-                    at: PathBuf::from("/work"),
-                    source: MountSource::Overlay {
-                        host: PathBuf::from("/repo"),
+            fs: FsPolicy {
+                entries: vec![
+                    FsEntry {
+                        path: PathBuf::from("/repo"),
+                        access: Access::Write,
                     },
-                }],
-                refuse: vec![Pattern::new(".env"), Pattern::new("*.pem")],
-                hide: vec![Pattern::new(".git/**")],
-                deny_read: vec![PathBuf::from("/home/dev/.ssh")],
-                max_total_bytes: Some(1 << 30),
-                max_file_bytes: Some(1 << 20),
+                    FsEntry {
+                        path: PathBuf::from("/home/dev/.ssh"),
+                        access: Access::Deny,
+                    },
+                ],
+                protected: vec![String::from(".git")],
             },
             shell: ShellPolicy {
-                allow: vec![CommandPrefix::new("cargo test")],
                 env: vec![EnvVar {
                     name: String::from("CARGO_HOME"),
                     value: String::from("/scratch/cargo"),
                 }],
                 workdir: PathBuf::from("/repo"),
             },
-            network: NetworkPolicy {},
             limits: Limits {
                 timeout: Duration::from_secs(30),
-                max_command_count: 100,
                 max_output_bytes: 4096,
-                max_memory_bytes: Some(1 << 28),
             },
         };
 
@@ -394,19 +256,15 @@ mod tests {
     }
 
     #[test]
-    fn mount_serializes_with_snake_case_tagging() {
-        let mount = Mount {
-            at: PathBuf::from("/work"),
-            source: MountSource::ReadWrite {
-                host: PathBuf::from("/repo"),
-            },
+    fn entry_serializes_with_snake_case_access() {
+        let entry = FsEntry {
+            path: PathBuf::from("/repo"),
+            access: Access::Write,
         };
 
-        let value = to_value(mount).expect("serializable mount");
-
         assert_eq!(
-            value,
-            json!({ "at": "/work", "source": { "read_write": { "host": "/repo" } } })
+            to_value(entry).expect("serializable entry"),
+            json!({ "path": "/repo", "access": "write" })
         );
     }
 
@@ -426,25 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_an_empty_command_prefix() {
-        for entry in ["", "   ", "'unterminated"] {
-            let policy = Policy {
-                shell: ShellPolicy {
-                    allow: vec![CommandPrefix::new(entry)],
-                    ..ShellPolicy::default()
-                },
-                ..Policy::default()
-            };
-
-            assert!(
-                matches!(policy.validate(), Err(PolicyError::EmptyCommandPrefix(_))),
-                "{entry:?} should be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn validate_rejects_degenerate_limits() {
+    fn validate_rejects_a_zero_timeout() {
         let zero = Policy {
             limits: Limits {
                 timeout: Duration::ZERO,
@@ -452,19 +292,39 @@ mod tests {
             },
             ..Policy::default()
         };
-        assert_eq!(zero.validate(), Err(PolicyError::ZeroTimeout));
 
-        let inverted = Policy {
-            fs: super::FsPolicy {
-                max_total_bytes: Some(1),
-                max_file_bytes: Some(2),
-                ..super::FsPolicy::default()
+        assert_eq!(zero.validate(), Err(PolicyError::ZeroTimeout));
+    }
+
+    #[test]
+    fn validate_rejects_relative_entries_and_bad_protected_names() {
+        let relative = Policy {
+            fs: FsPolicy {
+                entries: vec![FsEntry {
+                    path: PathBuf::from("repo"),
+                    access: Access::Read,
+                }],
+                ..FsPolicy::default()
             },
             ..Policy::default()
         };
         assert_eq!(
-            inverted.validate(),
-            Err(PolicyError::FileCapExceedsTotal { file: 2, total: 1 })
+            relative.validate(),
+            Err(PolicyError::RelativeEntry(PathBuf::from("repo")))
+        );
+
+        let nested = Policy {
+            fs: FsPolicy {
+                protected: vec![String::from(".git/hooks")],
+                ..FsPolicy::default()
+            },
+            ..Policy::default()
+        };
+        assert_eq!(
+            nested.validate(),
+            Err(PolicyError::InvalidProtectedName(String::from(
+                ".git/hooks"
+            )))
         );
     }
 
