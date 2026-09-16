@@ -310,9 +310,10 @@ layer-1 executor is macOS-only so far (the Linux backend is the follow-up), the
 macOS profile renders the policy's path entries with protected metadata and
 opens no network, and the `sandbox` feature also carries a session manager
 (`agentd::session`) that launches a configured sandboxed node on a
-`session.requested` event and reports `session.*` lifecycle. The daemon binary
-does not start the manager yet — it has no policy or command config surface —
-so the feature still exists mainly to validate the dependency graph under CI's
+`session.requested` event, reports `session.*` lifecycle, restarts a crashed
+node within a budget, enforces a session lifetime, and answers a status request.
+The binary starts the manager when `--session-command` (with `--sandbox-policy`)
+is given; without it the feature only validates the dependency graph under CI's
 `--all-features`.
 
 Further structural steps keep explicit triggers and are not taken early:

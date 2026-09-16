@@ -266,6 +266,16 @@ running. Because the whole process is confined by one profile and its children
 inherit it, per-command `sandbox.permission.*` events are not emitted for a
 session — its lifecycle events are the audit trail.
 
+The daemon's session manager (`agentd::session`, behind the `sandbox` feature)
+drives this from the log: a `session.requested` event starts the *configured*
+node command (never a command carried in the event), and its lifecycle is
+reported as `session.started`/`exited`/`failed`. Supervision is opt-in: a
+session may be restarted up to `max_restarts` times when it exits non-zero
+(`session.restarted`), and may be given a `lifetime`, after which it is killed
+(`session.failed`). A `session.status.requested` event is answered with a
+`session.status` listing the active sessions. The daemon binary starts the
+manager when `--session-command` (with `--sandbox-policy`) is given.
+
 ### Layer 1 backends
 
 | Concern                | Linux                                                        | macOS                                 |
@@ -304,6 +314,13 @@ existing dotted-type convention and `source: urn:mokmokd`:
 | `sandbox.exec.completed`      | Terminal state of an execution: exit code, duration, output sizes |
 | `sandbox.session.started`     | A long-lived session was spawned                                  |
 | `sandbox.session.exited`      | Terminal state of a session: exit code and duration               |
+| `session.requested`           | A client asks the daemon to start a managed session               |
+| `session.started`             | The managed session's sandboxed process started                   |
+| `session.restarted`           | The managed session's process restarted after a non-zero exit     |
+| `session.exited`              | The managed session's process exited                              |
+| `session.failed`              | The managed session could not start, or exceeded its lifetime     |
+| `session.status.requested`    | A client asks for the active managed sessions                     |
+| `session.status`              | The list of active managed sessions                               |
 
 Every permission event carries a `request_id` (a UUID) alongside `sandbox_id`, so
 a decision is correlated to one request even when execs run concurrently.
@@ -386,6 +403,9 @@ Modeled on Sheena's methodology and codex's, adapted to Rust:
 - **Session tests**: `sandbox.session.started`/`exited` over the log, piped
   stdin/stdout streaming, approval denial, and a real confined session that
   streams I/O under the Seatbelt profile.
+- **Session manager tests**: `session.*` lifecycle, restart within the budget, a
+  lifetime kill, a spawn failure, and a status request answered with the active
+  sessions.
 - **Differential tests**: golden files recorded from real bash + coreutils for
   layer 1 behavior, replayed in CI without the recorded host.
 - **Benchmarks**: sandbox construction, trivial `exec` overhead, parallel
@@ -400,11 +420,8 @@ Triggers, not dates — none of these steps are taken early:
    `network-outbound` grant is unverified).
 2. Linux backend: bubblewrap preferred, Landlock fallback, seccomp for network
    and syscall narrowing, with the arg0 self-exec helper.
-3. Start the session manager from the daemon binary: `agentd::session` is
-   implemented and tested, but `main` has no policy/command config surface to
-   build the manager yet.
-4. Supervise sessions: restart a crashed node, enforce a session-level
-   lifetime, and expose the managed sessions to clients.
+3. Session persistence: the active-session set is in memory, so a daemon restart
+   forgets running sessions; reconcile the log on startup.
 
 ## Implementation status
 
@@ -415,8 +432,9 @@ network, a denial is classified into a `sandbox.violation.*` event, the
 human-in-the-loop approval flow runs over the log with `request_id`
 correlation, the long-lived session spawn API is in place, and the deleted
 concepts (VFS, allowlist, caps) are gone from the code. The daemon-side
-`agentd::session` manager launches a configured node on `session.requested` and
-reports `session.*` lifecycle, but `main` does not start it yet. What remains
-unimplemented is the Linux backend, the daemon UDS allowance, and starting the
-manager from the binary. A crate doc comment records the same status next to the
-code.
+`agentd::session` manager is started by the binary (`--session-command` with
+`--sandbox-policy`), launches a configured node on `session.requested`, reports
+`session.*` lifecycle, restarts within a budget, enforces a lifetime, and answers
+a status request. What remains unimplemented is the Linux backend, the daemon UDS
+allowance, and session persistence across a daemon restart. A crate doc comment
+records the same status next to the code.

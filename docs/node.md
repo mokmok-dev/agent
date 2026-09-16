@@ -138,10 +138,11 @@ does not require rework:
 
 The remaining work is on the daemon side and is tracked in `docs/sandbox.md`:
 
-1. The session manager `agentd::session` (behind the `sandbox` feature) reacts to
-   a `session.requested` event by launching a configured sandboxed node and
-   reporting `session.*` lifecycle. The daemon binary does not start it yet, and
-   it does not yet restart a crashed node.
+1. The session manager `agentd::session` (behind the `sandbox` feature, started
+   by the binary via `--session-command`/`--sandbox-policy`) reacts to a
+   `session.requested` event by launching a configured sandboxed node, reports
+   `session.*` lifecycle, and restarts a crashed node within a budget. Sessions
+   are in memory, so a daemon restart does not yet reconcile running nodes.
 2. The sandbox has a long-lived spawn API (`Sandbox::spawn` returning a
    `Session` with piped stdio).
 3. The whole node process is confined by one profile; child processes inherit
