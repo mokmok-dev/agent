@@ -136,7 +136,8 @@ async fn deny_wins_over_a_forged_granted_event() {
         loop {
             match subscriber.recv().await {
                 Ok(recorded)
-                    if recorded.event.r#type == agentd_integration_sandbox::PERMISSION_REQUESTED =>
+                    if recorded.event.r#type
+                        == agentd_integration_sandbox::PERMISSION_REQUESTED =>
                 {
                     let _ = log
                         .publish(Event::new(
