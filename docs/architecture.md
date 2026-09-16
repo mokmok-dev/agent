@@ -43,9 +43,9 @@ flowchart LR
 | Unix domain socket | `agentd`        | Transport and single-instance boundary; a stale socket file is removed, a live one reports `AlreadyRunning`.       |
 | WebSocket endpoint | `agentd`        | Ingress and egress protocol. Inbound text frames must parse as CloudEvents; outbound events are forwarded verbatim. |
 | `EventBus`         | `agentd-events` | In-process live fanout to subscribers via a `tokio::sync::broadcast` channel (capacity 1024 per subscriber).       |
-| `EventLog`         | `agentd`        | Durable write path: owns the writer thread, the log sequence number, the JSONL file, and the live fanout.           |
-| JSONL log          | `agentd`        | Append-only source of truth; one CloudEvents envelope per line, position = one-based line number (`Lsn`).          |
-| Projections        | `agentd`        | Read models derived from the log, resuming from an `applied_lsn` checkpoint (`agentd::projection`).                |
+| `EventLog`         | `agentd-events` | Durable write path: owns the writer thread, the log sequence number, the JSONL file, and the live fanout.           |
+| JSONL log          | `agentd-events` | Append-only source of truth; one CloudEvents envelope per line, position = one-based line number (`Lsn`).          |
+| Projections        | `agentd-events` | Read models derived from the log, resuming from an `applied_lsn` checkpoint (`agentd_events::projection`).          |
 
 ## Event model
 
@@ -169,15 +169,16 @@ contracts:
 
 | Axis                       | Contract                                                        | Ships as                                                                                     | Examples                          |
 | -------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | --------------------------------- |
-| In-process integration     | `Event`/`EventBus` from the `agentd-events` crate                | A workspace crate under `integrations/<name>`, wired into `agentd` behind a cargo feature     | Projections, webhook forwarding   |
+| In-process integration     | `Event`/`EventLog` from the `agentd-events` crate                | A workspace crate under `integrations/<name>`, wired into `agentd` behind a cargo feature     | Projections, webhook forwarding   |
 | Out-of-process integration | CloudEvents 1.0 JSON over the WebSocket event API (Unix socket)  | Any external program in any language; no crate required                                       | Other stores, external tooling    |
 
 The current structure follows these rules:
 
-- `agentd-events` holds the event contract (`Event`, `EventBus`,
-  `SPEC_VERSION`, `DAEMON_SOURCE`) and nothing else. Integrations depend on
-  this crate and must never depend on the `agentd` binary crate.
-- The durable JSONL event log is core: it lives inside `agentd`, is the
+- `agentd-events` holds the event contract (`Event`, `SPEC_VERSION`,
+  `DAEMON_SOURCE`), the live fanout (`EventBus`), and the durable log
+  (`EventLog`) with its projection helpers. Integrations depend on this crate
+  and must never depend on the `agentd` binary crate.
+- The durable JSONL event log is core: it lives in `agentd-events`, is the
   source of truth, and is never feature-gated.
 - Future optional integrations are compiled in behind bin features, e.g.
   `webhook = ["dep:agentd-integration-webhook"]`; the event log is excluded
@@ -189,28 +190,24 @@ The current structure follows these rules:
 `agentd-integration-sandbox` (see `docs/sandbox.md`) is the second in-process
 integration. It follows the dependency model — its own crate under
 `integrations/sandbox`, depending only on `agentd-events`, wired into `agentd`
-behind `sandbox = ["dep:agentd-integration-sandbox"]` — and it publishes
-`sandbox.permission.*` and `sandbox.exec.completed` events for every decision,
-so approval flows are ordinary subscribers.
-
-**Known deviation:** the sandbox publishes through `EventBus` directly, which
-is live fanout only, so its events are not durable while it uses that path.
-The sandbox is not wired into `agentd` yet; when it is, it must publish through
-`EventLog` so its events reach the log. Its layer-1 executor is macOS-only so
-far (Seatbelt; Linux Landlock/seccomp is a follow-up), spawned-command reads
-are not path-confined on macOS 26 (dyld aborts on filtered read grants — a
-stated gap recorded in the crate docs), and no component drives the sandbox
-yet, so the feature exists to validate the dependency graph under CI's
+behind `sandbox = ["dep:agentd-integration-sandbox"]` — and it holds an
+`EventLog`, durably appending `sandbox.permission.*` and
+`sandbox.exec.completed` for every decision, so approval flows are ordinary
+subscribers and no decision is lost. `Sandbox::exec` returns a `Result` and
+surfaces `SandboxError::Publish` when an append fails; the decision is appended
+before a command runs, so a command never starts without its decision recorded.
+Its layer-1 executor is macOS-only so far
+(Seatbelt; Linux Landlock/seccomp is a follow-up), spawned-command reads are
+not path-confined on macOS 26 (dyld aborts on filtered read grants — a stated
+gap recorded in the crate docs), and no component drives the sandbox yet, so
+the feature exists to validate the dependency graph under CI's
 `--all-features`.
 
 Further structural steps keep explicit triggers and are not taken early:
 
-1. An in-process integration needs the durable publish path: move `EventLog`
-   (or a publishing trait) into a crate that integrations can depend on without
-   depending on the daemon.
-2. An external Rust consumer of the contract appears: start versioning and
+1. An external Rust consumer of the contract appears: start versioning and
    publishing `agentd-events`.
-3. Out-of-process consumers want convenience: add a thin client crate; the
+2. Out-of-process consumers want convenience: add a thin client crate; the
    wire format itself is already stable.
 
 Adding workspace members requires no build-infrastructure changes: crane

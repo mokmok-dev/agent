@@ -1,12 +1,12 @@
 ---
 type: Design
 title: sandbox
-description: AIエージェントがbashコマンドをsandbox上で安全に実行するための基盤設計。VFSとシェルのpermission設定をPolicyとして提供し、許可判断をCloudEventsとしてeventbusに公開する。
+description: AIエージェントがbashコマンドをsandbox上で安全に実行するための基盤設計。VFSとシェルのpermission設定をPolicyとして提供し、許可判断をCloudEventsとしてevent logに永続化する。
 tags:
   - sandbox
   - vfs
   - permission
-  - eventbus
+  - eventlog
 generated:
   by: human
   at: 2026-09-13T00:00:00Z
@@ -17,9 +17,9 @@ generated:
 The sandbox is the confinement layer through which an agent drives shell
 commands. Every command an agent requests runs against a virtual filesystem
 and a policy that the daemon operator configures — never directly against the
-host. Permission decisions are published as CloudEvents onto the event bus, so
-approval flows and audit trails are built from the same choreography model as
-everything else in `agentd`.
+host. Permission decisions are durably appended as CloudEvents to the event
+log, so approval flows and audit trails are built from the same choreography
+model as everything else in `agentd`.
 
 The design borrows its conceptual model from
 [goccy/sheena](https://github.com/goccy/sheena) — deny-by-default policy, a
@@ -34,7 +34,7 @@ Goals:
 - An agent can run bash commands with filesystem, network, and resource access
   confined by a `Policy`.
 - VFS and shell permissions are configurable per sandbox instance.
-- Permission grants and denials are observable events on the bus, enabling
+- Permission grants and denials are durable events in the log, enabling
   human-in-the-loop approval by any WS client.
 - The execution strategy behind the shell is swappable.
 
@@ -58,8 +58,8 @@ Non-goals (stated honestly, per the Sheena precedent):
    in-process interpreter with re-implemented commands (the Sheena model)
    without changing the policy or event contract.
 4. **Every decision is an event.** Each permission check produces a CloudEvent
-   (`requested` → `granted`/`denied`), so the audit log is a projection of the
-   bus, and approval UIs are ordinary bus subscribers.
+   (`requested` → `granted`/`denied`) durably appended to the log, so the audit
+   log is the log itself, and approval UIs are ordinary subscribers.
 5. **Kernel-enforced over convention-enforced.** Path confinement that the OS
    itself guarantees (Landlock rulesets, Seatbelt profiles) is preferred over
    in-process path checks, which a confused-deputy command can bypass.
@@ -119,13 +119,13 @@ into `agentd` behind a cargo feature (`sandbox = ["dep:agentd-integration-sandbo
 
 ```mermaid
 flowchart LR
-    A["Agent<br/>(eventbus consumer)"] -- "command request" --> E["Executor trait"]
+    A["Agent<br/>(log subscriber)"] -- "command request" --> E["Executor trait"]
     P["Policy"] -- "bound at construction" --> E
     E -- "maps policy to" --> K["OS confinement<br/>Landlock/seccomp or Seatbelt"]
     K -- "confined spawn" --> B["bash process"]
     B -- "stdio" --> E
     E -- "fs/net access" --> V["VFS trait"]
-    E -- "permission events" --> B2["EventBus"]
+    E -- "permission events" --> B2["EventLog"]
 
     style B fill:#f8f8f2,stroke:#888
 ```
@@ -244,7 +244,7 @@ correlation id.
 sequenceDiagram
     participant Ag as Agent
     participant Sb as Sandbox
-    participant B as EventBus
+    participant B as EventLog
     participant Ex as Executor
     participant OS as OS confinement
 
@@ -265,7 +265,9 @@ sequenceDiagram
 
 A `denied` outcome short-circuits: the agent receives a structured denial in
 `ExecResult` (not a Go-style error), so the model can react, and the denial is
-on the bus for audit.
+in the log for audit. Every decision is appended before the next step, so a
+command is never run without its audit trail: a failed append surfaces as
+`SandboxError::Publish`.
 
 ## Security guarantees and stated gaps
 
@@ -301,7 +303,7 @@ Modeled on Sheena's methodology, adapted to Rust:
   network (SSRF probes, default-deny), env leakage.
 - **Differential tests**: golden files recorded from real bash + coreutils for
   layer 1 behavior, replayed in CI without needing the recorded host.
-- **Permission flow tests**: end-to-end through the bus — `requested` →
+- **Permission flow tests**: end-to-end through the log — `requested` →
   `granted`/`denied` correlation, deny-wins semantics, pending-timeout
   behavior.
 - **VFS tests**: `Overlay` never writes the lower layer; `Refuse`/`Hide` globs
@@ -315,7 +317,7 @@ Triggers, not dates — none of these steps are taken early:
 
 1. `agentd-integration-sandbox` crate with `Policy`, VFS (`Mem`, `ReadOnlyMount`,
    `ReadWriteMount`, `Overlay`), and `ConfinedProcessExecutor` on Linux.
-2. macOS Seatbelt backend; permission events wired into the bus and the store.
+2. macOS Seatbelt backend; permission events wired into the log.
 3. Human-in-the-loop approval flow over the WS event API.
 4. Optional layer 2: an in-process interpreter backend for the `Executor`
    trait (Sheena's re-implemented command model) — only if layer 1's
