@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use futures_util::SinkExt;
-use futures_util::stream::{SplitSink, StreamExt};
+use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -267,7 +267,7 @@ async fn handle_inference_socket(
                         continue;
                     },
                 };
-                if !stream_response(&mut sink, provider.as_ref(), request).await {
+                if !stream_response(&mut sink, &mut inbound, provider.as_ref(), request).await {
                     break;
                 }
             },
@@ -281,10 +281,16 @@ async fn handle_inference_socket(
     }
 }
 
-/// Streams one provider response to `sink`, returning `false` when the socket
-/// can no longer be written.
+/// Streams one provider response to `sink`, returning `false` when the
+/// connection should close.
+///
+/// The client's half of the socket is polled alongside the provider stream, so
+/// a provider that stalls does not hold the task open after the client has
+/// disconnected; frames arriving mid-stream are ignored, because the client
+/// sends its next request only after a terminal delta.
 async fn stream_response(
     sink: &mut SplitSink<WebSocket, Message>,
+    inbound: &mut SplitStream<WebSocket>,
     provider: &dyn Provider,
     request: InferenceRequest,
 ) -> bool {
@@ -297,19 +303,35 @@ async fn stream_response(
             return send_delta(sink, &delta).await.is_ok();
         },
     };
-    while let Some(item) = deltas.next().await {
-        let delta = item.unwrap_or_else(|error| Delta::Error {
-            message: error.to_string(),
-        });
-        let terminal = delta.is_terminal();
-        if send_delta(sink, &delta).await.is_err() {
-            return false;
-        }
-        if terminal {
-            break;
+    loop {
+        tokio::select! {
+            item = deltas.next() => {
+                let Some(item) = item else {
+                    return true;
+                };
+                let delta = item.unwrap_or_else(|error| Delta::Error {
+                    message: error.to_string(),
+                });
+                let terminal = delta.is_terminal();
+                if send_delta(sink, &delta).await.is_err() {
+                    return false;
+                }
+                if terminal {
+                    return true;
+                }
+            },
+            message = inbound.next() => {
+                match message {
+                    Some(Ok(Message::Close(_))) | None => return false,
+                    Some(Err(error)) => {
+                        tracing::debug!(%error, "inference connection failed");
+                        return false;
+                    },
+                    Some(Ok(_)) => {},
+                }
+            },
         }
     }
-    true
 }
 
 /// Sends one inference delta as a JSON text frame.
