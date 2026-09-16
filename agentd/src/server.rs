@@ -1,4 +1,5 @@
 use agentd_events::{Event, EventLog, LogEntry, LogError, Seq, WireMessage};
+use agentd_inference::{Delta, InferenceRequest, Provider};
 use axum::Router;
 use axum::extract::Query;
 use axum::extract::State;
@@ -11,6 +12,7 @@ use futures_util::SinkExt;
 use futures_util::stream::{SplitSink, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::broadcast::error::RecvError;
 use tower_http::trace::TraceLayer;
@@ -58,6 +60,7 @@ pub async fn run(
     socket: std::path::PathBuf,
     log: EventLog,
     tokens: TokenStore,
+    provider: Arc<dyn Provider>,
 ) -> Result<(), ServerError> {
     if let Some(parent) = socket.parent()
         && !parent.as_os_str().is_empty()
@@ -88,7 +91,7 @@ pub async fn run(
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
-    let () = axum::serve(listener, router(log, tokens))
+    let () = axum::serve(listener, router(log, tokens, provider))
         .with_graceful_shutdown(async move {
             tokio::select! {
                 _ = interrupt.recv() => {},
@@ -135,24 +138,46 @@ fn is_shared_directory(_path: &std::path::Path) -> bool {
     false
 }
 
-/// Builds the router exposing the event API.
+/// Builds the router exposing the event API and the inference endpoint.
 pub fn router(
     log: EventLog,
     tokens: TokenStore,
+    provider: Arc<dyn Provider>,
 ) -> Router {
     Router::new()
         .route("/events", any(events_handler))
+        .route("/inference", any(inference_handler))
         .layer(TraceLayer::new_for_http())
-        .with_state(AppState { log, tokens })
+        .with_state(AppState {
+            log,
+            tokens,
+            provider,
+        })
 }
 
-/// The state shared by the event API handlers.
-#[derive(Debug, Clone)]
+/// The state shared by the API handlers.
+#[derive(Clone)]
 struct AppState {
     /// The durable event log that inbound events are appended to.
     log: EventLog,
     /// The configured bearer tokens.
     tokens: TokenStore,
+    /// The model provider inference is streamed from.
+    provider: Arc<dyn Provider>,
+}
+
+impl std::fmt::Debug for AppState {
+    /// Formats the state without the provider, which has no stable shape.
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("log", &self.log)
+            .field("tokens", &self.tokens)
+            .field("provider", &"<provider>")
+            .finish()
+    }
 }
 
 /// Query parameters of the event stream.
@@ -173,7 +198,7 @@ struct Resume {
 /// and then the live stream continues without gaps or duplicates. Without it,
 /// only events appended after the connection are sent.
 async fn events_handler(
-    State(AppState { log, tokens }): State<AppState>,
+    State(AppState { log, tokens, .. }): State<AppState>,
     Query(resume): Query<Resume>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
@@ -186,6 +211,119 @@ async fn events_handler(
         },
     };
     upgrade.on_upgrade(move |socket| handle_events_socket(socket, log, principal, resume.from))
+}
+
+/// Upgrades authenticated `GET /inference` connections to a model stream.
+///
+/// The connection must hold [`Claim::Infer`]; a missing or unknown token is
+/// answered with `401 Unauthorized`, a recognized token without the inference
+/// claim with `403 Forbidden`. The volatile delta stream is not written to the
+/// durable log.
+async fn inference_handler(
+    State(AppState {
+        tokens, provider, ..
+    }): State<AppState>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let principal = match tokens.authorize(&headers) {
+        Ok(principal) => principal,
+        Err(error) => {
+            tracing::debug!(%error, "rejected an unauthenticated inference connection");
+            return StatusCode::UNAUTHORIZED.into_response();
+        },
+    };
+    if !principal.has(Claim::Infer) {
+        tracing::debug!("a token without the inference claim attempted to use /inference");
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    upgrade.on_upgrade(move |socket| handle_inference_socket(socket, provider))
+}
+
+/// Streams inference responses back to one client until it disconnects.
+///
+/// Each text frame is one [`InferenceRequest`]; the response is a sequence of
+/// [`Delta`] text frames ending at the first terminal delta. A malformed
+/// request or a provider failure is answered with a [`Delta::Error`] and the
+/// connection stays open for the next request.
+async fn handle_inference_socket(
+    socket: WebSocket,
+    provider: Arc<dyn Provider>,
+) {
+    let (mut sink, mut inbound) = socket.split();
+    while let Some(message) = inbound.next().await {
+        match message {
+            Ok(Message::Text(text)) => {
+                let request = match serde_json::from_str::<InferenceRequest>(&text) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        tracing::debug!(%error, "client sent an invalid inference request");
+                        let delta = Delta::Error {
+                            message: format!("invalid inference request: {error}"),
+                        };
+                        if send_delta(&mut sink, &delta).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    },
+                };
+                if !stream_response(&mut sink, provider.as_ref(), request).await {
+                    break;
+                }
+            },
+            Ok(Message::Close(_)) => break,
+            Ok(_) => {},
+            Err(error) => {
+                tracing::debug!(%error, "inference connection failed");
+                break;
+            },
+        }
+    }
+}
+
+/// Streams one provider response to `sink`, returning `false` when the socket
+/// can no longer be written.
+async fn stream_response(
+    sink: &mut SplitSink<WebSocket, Message>,
+    provider: &dyn Provider,
+    request: InferenceRequest,
+) -> bool {
+    let mut deltas = match provider.stream(request).await {
+        Ok(deltas) => deltas,
+        Err(error) => {
+            let delta = Delta::Error {
+                message: error.to_string(),
+            };
+            return send_delta(sink, &delta).await.is_ok();
+        },
+    };
+    while let Some(item) = deltas.next().await {
+        let delta = item.unwrap_or_else(|error| Delta::Error {
+            message: error.to_string(),
+        });
+        let terminal = delta.is_terminal();
+        if send_delta(sink, &delta).await.is_err() {
+            return false;
+        }
+        if terminal {
+            break;
+        }
+    }
+    true
+}
+
+/// Sends one inference delta as a JSON text frame.
+///
+/// A delta that cannot be serialized is logged and skipped.
+async fn send_delta(
+    sink: &mut SplitSink<WebSocket, Message>,
+    delta: &Delta,
+) -> Result<(), axum::Error> {
+    let Ok(text) = serde_json::to_string(delta) else {
+        tracing::warn!("failed to serialize an inference delta");
+        return Ok(());
+    };
+    sink.send(Message::Text(text.into())).await
 }
 
 /// Pumps events in both directions between the log and the socket until the
@@ -462,10 +600,12 @@ mod tests {
     use super::{ServerError, router, run};
     use crate::auth::{Claim, Principal, Token, TokenStore};
     use agentd_events::{Event, EventLog, Seq, WireMessage};
+    use agentd_inference::{Delta, FakeProvider, InferenceRequest, Provider};
     use futures_util::SinkExt;
     use futures_util::StreamExt;
     use serde_json::json;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::net::UnixStream;
     use tokio_tungstenite::WebSocketStream;
@@ -478,8 +618,11 @@ mod tests {
     const WRITE_TOKEN: &str = "write-secret";
     /// A read, publish, and authority token secret.
     const AUTHORITY_TOKEN: &str = "authority-secret";
+    /// A read, publish, and inference token secret.
+    const INFER_TOKEN: &str = "infer-secret";
 
-    /// The token set used by the tests: read-only, read+publish, and authority.
+    /// The token set used by the tests: read-only, read+publish, authority, and
+    /// inference.
     fn tokens() -> TokenStore {
         TokenStore::new(vec![
             Token {
@@ -497,7 +640,19 @@ mod tests {
                     [Claim::Read, Claim::Publish, Claim::Authority],
                 ),
             },
+            Token {
+                secret: String::from(INFER_TOKEN),
+                principal: Principal::new(
+                    "urn:test:agent",
+                    [Claim::Read, Claim::Publish, Claim::Infer],
+                ),
+            },
         ])
+    }
+
+    /// A default fake provider for servers that do not exercise inference.
+    fn provider() -> Arc<dyn Provider> {
+        Arc::new(FakeProvider::default())
     }
 
     /// Opens a fresh log under `dir`.
@@ -510,18 +665,19 @@ mod tests {
         socket: PathBuf,
         log: EventLog,
     ) -> tokio::task::JoinHandle<std::io::Result<()>> {
-        spawn_server_with(socket, log, tokens())
+        spawn_server_with(socket, log, tokens(), provider())
     }
 
-    /// Spawns a server with an explicit token store.
+    /// Spawns a server with an explicit token store and provider.
     fn spawn_server_with(
         socket: PathBuf,
         log: EventLog,
         tokens: TokenStore,
+        provider: Arc<dyn Provider>,
     ) -> tokio::task::JoinHandle<std::io::Result<()>> {
         tokio::spawn(async move {
             let listener = tokio::net::UnixListener::bind(socket)?;
-            let () = axum::serve(listener, router(log, tokens)).await?;
+            let () = axum::serve(listener, router(log, tokens, provider)).await?;
             Ok(())
         })
     }
@@ -877,7 +1033,7 @@ mod tests {
         let _listener = tokio::net::UnixListener::bind(&socket)?;
 
         assert!(matches!(
-            run(socket, open_log(dir.path()), tokens()).await,
+            run(socket, open_log(dir.path()), tokens(), provider()).await,
             Err(ServerError::AlreadyRunning(_))
         ));
 
@@ -893,7 +1049,7 @@ mod tests {
         let socket = dir.path().join("test.sock");
 
         assert!(matches!(
-            run(socket, open_log(dir.path()), tokens()).await,
+            run(socket, open_log(dir.path()), tokens(), provider()).await,
             Err(ServerError::InsecureDirectory(_))
         ));
 
@@ -991,6 +1147,135 @@ mod tests {
         assert_eq!(seq, Some(1));
         assert_eq!(received.source, "urn:test:writer");
         assert_ne!(received.time, event.time);
+
+        server.abort();
+    }
+
+    /// Receives and decodes the next inference delta from `client`.
+    async fn recv_delta(client: &mut WebSocketStream<UnixStream>) -> Delta {
+        let received = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("timed out waiting for a delta")
+            .expect("stream should not end")
+            .expect("read should succeed");
+        let Message::Text(text) = received else {
+            panic!("expected a text message, got {received:?}");
+        };
+        serde_json::from_str(&text).expect("expected a valid delta")
+    }
+
+    /// Sends `request` as an inference frame.
+    async fn send_request(
+        client: &mut WebSocketStream<UnixStream>,
+        request: &InferenceRequest,
+    ) {
+        client
+            .send(Message::from(
+                serde_json::to_string(request).expect("request should serialize"),
+            ))
+            .await
+            .expect("send should succeed");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inference_requires_the_infer_claim() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let socket = dir.path().join("test.sock");
+        let server = spawn_server(socket.clone(), open_log(dir.path()));
+
+        for _ in 0..100 {
+            if let Ok(stream) = UnixStream::connect(&socket).await {
+                let mut request = "ws://localhost/inference"
+                    .into_client_request()
+                    .expect("client request");
+                request.headers_mut().insert(
+                    "authorization",
+                    format!("Bearer {WRITE_TOKEN}")
+                        .parse()
+                        .expect("header value"),
+                );
+                let result = tokio_tungstenite::client_async(request, stream).await;
+                assert!(
+                    result.is_err(),
+                    "a token without the infer claim must be refused"
+                );
+                server.abort();
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("could not connect to {socket:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inference_streams_a_scripted_response() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let socket = dir.path().join("test.sock");
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new(vec![vec![
+            Delta::Text {
+                text: String::from("hello "),
+            },
+            Delta::Text {
+                text: String::from("world"),
+            },
+            Delta::Done {
+                finish_reason: Some(String::from("stop")),
+            },
+        ]]));
+        let server = spawn_server_with(socket.clone(), open_log(dir.path()), tokens(), provider);
+
+        let mut client = connect_with("ws://localhost/inference", &socket, INFER_TOKEN).await;
+        send_request(
+            &mut client,
+            &InferenceRequest {
+                messages: vec![agentd_inference::Message::user("hi")],
+                tools: Vec::new(),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            recv_delta(&mut client).await,
+            Delta::Text {
+                text: String::from("hello ")
+            }
+        );
+        assert_eq!(
+            recv_delta(&mut client).await,
+            Delta::Text {
+                text: String::from("world")
+            }
+        );
+        assert!(matches!(recv_delta(&mut client).await, Delta::Done { .. }));
+
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inference_reports_a_provider_failure_as_an_error_delta() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let socket = dir.path().join("test.sock");
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new(vec![vec![Delta::Error {
+            message: String::from("boom"),
+        }]]));
+        let server = spawn_server_with(socket.clone(), open_log(dir.path()), tokens(), provider);
+
+        let mut client = connect_with("ws://localhost/inference", &socket, INFER_TOKEN).await;
+        send_request(
+            &mut client,
+            &InferenceRequest {
+                messages: Vec::new(),
+                tools: Vec::new(),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            recv_delta(&mut client).await,
+            Delta::Error {
+                message: String::from("boom")
+            }
+        );
 
         server.abort();
     }

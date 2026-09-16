@@ -1,11 +1,19 @@
 [workspace]
-members = ["agentd", "agentd-events", "agentd-node", "agentd-sandbox"]
+members = [
+  "agentd",
+  "agentd-events",
+  "agentd-inference",
+  "agentd-node",
+  "agentd-sandbox",
+]
 resolver = "3"
 
 [workspace.dependencies]
 agentd-events = { path = "agentd-events" }
+agentd-inference = { path = "agentd-inference" }
 agentd-node = { path = "agentd-node" }
 agentd-sandbox = { path = "agentd-sandbox" }
+async-trait = "0.1.89"
 axum = { version = "0.8.9" }
 clap = { version = "4.6.6" }
 futures-util = { version = "0.3.34", features = ["sink"] }

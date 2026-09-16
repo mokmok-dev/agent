@@ -12,10 +12,12 @@
 use agentd::auth::{Claim, Principal, Token, TokenStore};
 use agentd::server::router;
 use agentd_events::{Event, EventLog, Seq};
+use agentd_inference::FakeProvider;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio_tungstenite::WebSocketStream;
@@ -40,7 +42,11 @@ fn spawn_server(
 ) -> tokio::task::JoinHandle<std::io::Result<()>> {
     tokio::spawn(async move {
         let listener = tokio::net::UnixListener::bind(socket)?;
-        let () = axum::serve(listener, router(log, tokens())).await?;
+        let () = axum::serve(
+            listener,
+            router(log, tokens(), Arc::new(FakeProvider::default())),
+        )
+        .await?;
         Ok(())
     })
 }

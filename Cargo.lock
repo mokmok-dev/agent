@@ -7,6 +7,7 @@ name = "agentd"
 version = "0.0.0"
 dependencies = [
  "agentd-events",
+ "agentd-inference",
  "agentd-node",
  "agentd-sandbox",
  "async-trait",
@@ -41,13 +42,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentd-inference"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+]
+
+[[package]]
 name = "agentd-node"
 version = "0.0.0"
 dependencies = [
  "agentd-events",
+ "agentd-inference",
  "clap",
  "futures-util",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

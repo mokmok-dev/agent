@@ -1,8 +1,10 @@
 use agentd::auth::TokenStore;
 use agentd::server;
 use agentd_events::log::{self, EventLog};
+use agentd_inference::FakeProvider;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::Arc;
 #[cfg(feature = "sandbox")]
 use std::time::Duration;
 use thiserror::Error;
@@ -202,7 +204,8 @@ async fn run() -> Result<(), RunError> {
                 session_lifetime_secs,
             );
 
-            let () = server::run(socket, log, tokens)
+            let provider = Arc::new(FakeProvider::default());
+            let () = server::run(socket, log, tokens, provider)
                 .await
                 .map_err(RunError::Serve)?;
             Ok(())

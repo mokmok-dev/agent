@@ -4,10 +4,12 @@
 use agentd::auth::{Claim, Principal, Token, TokenStore};
 use agentd::server;
 use agentd_events::{Event, EventLog, LogEntry, Seq};
+use agentd_inference::FakeProvider;
 use agentd_node::{Node, SqliteError, SqliteProjection, SqliteReducer, TypePrefixes, WsClient};
 use rusqlite::{Connection, Transaction};
 use serde_json::json;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UnixListener;
 use tokio::sync::watch;
@@ -119,9 +121,12 @@ async fn node_projects_from_the_log_and_resumes_from_its_checkpoint() {
     let listener = UnixListener::bind(&socket).expect("listener should bind");
     let server_log = log.clone();
     let server = tokio::spawn(async move {
-        axum::serve(listener, server::router(server_log, tokens()))
-            .await
-            .expect("server should run");
+        axum::serve(
+            listener,
+            server::router(server_log, tokens(), Arc::new(FakeProvider::default())),
+        )
+        .await
+        .expect("server should run");
     });
 
     for index in 0..3 {
@@ -184,9 +189,12 @@ async fn ws_client_publishes_an_event_the_daemon_broadcasts_back() {
     let listener = UnixListener::bind(&socket).expect("listener should bind");
     let server_log = log.clone();
     let server = tokio::spawn(async move {
-        axum::serve(listener, server::router(server_log, tokens()))
-            .await
-            .expect("server should run");
+        axum::serve(
+            listener,
+            server::router(server_log, tokens(), Arc::new(FakeProvider::default())),
+        )
+        .await
+        .expect("server should run");
     });
 
     let mut client = WsClient::connect(&socket, None, NODE_TOKEN)

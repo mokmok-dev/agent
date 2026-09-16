@@ -4,9 +4,9 @@
 //! filesystem: the runtime directory is private to the daemon user (see
 //! [`crate::server::run`]). On top of that, every connection presents a bearer
 //! token whose [`Claim`]s decide what it may do — subscribe to the log
-//! ([`Claim::Read`]), append events ([`Claim::Publish`]), or publish the
+//! ([`Claim::Read`]), append events ([`Claim::Publish`]), publish the
 //! reserved daemon-authority types such as `sandbox.permission.*`
-//! ([`Claim::Authority`]).
+//! ([`Claim::Authority`]), or request model inference ([`Claim::Infer`]).
 //!
 //! Tokens are a *capability*: a client that must not publish authoritatively —
 //! above all an agent running inside a sandbox — should be denied read access to
@@ -33,6 +33,9 @@ pub enum Claim {
     /// Publish the reserved daemon-authority types (`error.*`, `sandbox.*`,
     /// `session.*`); implies the intent to publish.
     Authority,
+    /// Request model inference through the daemon's `/inference` endpoint. A
+    /// token holding only this claim may not read or publish events.
+    Infer,
 }
 
 /// An authenticated connection: what it may do and the `source` its events are
@@ -173,8 +176,8 @@ impl TokenStore {
     ///
     /// Returns [`AuthError::MissingToken`] when no `Authorization: Bearer` is
     /// present, [`AuthError::UnknownToken`] when the secret is not configured,
-    /// and [`AuthError::NoAccess`] when the matched token grants neither read
-    /// nor publish.
+    /// and [`AuthError::NoAccess`] when the matched token grants none of read,
+    /// publish, or inference.
     pub fn authorize(
         &self,
         headers: &HeaderMap,
@@ -189,7 +192,10 @@ impl TokenStore {
             }
         }
         let principal = matched.ok_or(AuthError::UnknownToken)?;
-        if !principal.has(Claim::Read) && !principal.has(Claim::Publish) {
+        if !principal.has(Claim::Read)
+            && !principal.has(Claim::Publish)
+            && !principal.has(Claim::Infer)
+        {
             return Err(AuthError::NoAccess);
         }
         Ok(principal.clone())
