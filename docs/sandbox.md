@@ -189,13 +189,14 @@ pub struct ExecResult {
 
 Layer 1 (`ConfinedProcessExecutor`) maps policy to OS mechanisms:
 
-| Concern                   | Linux                                                     | macOS                                       |
-| ------------------------- | --------------------------------------------------------- | ------------------------------------------- |
-| Filesystem confinement    | Landlock ruleset (per-mount read/write rights)            | Seatbelt profile `(deny default)`           |
-| Syscall narrowing         | seccomp filter (block ptrace, mount, namespace ops, ...)  | not available; profile covers most          |
-| Process/network isolation | Landlock network + optional namespace                     | no network clause emitted (deny by default) |
-| Memory / rlimits          | `prlimit` + optional cgroups v2                           | `setrlimit` (best-effort)                   |
-| Host binary control       | confined `PATH` built from the shell allowlist            | same                                        |
+| Concern                | Linux                                                    | macOS                                       |
+| ---------------------- | -------------------------------------------------------- | ------------------------------------------- |
+| Filesystem confinement | Landlock ruleset (per-mount read/write rights)           | Seatbelt profile `(deny default)`           |
+| Syscall narrowing      | seccomp filter (block ptrace, mount, namespace ops, ...) | not available; profile covers most          |
+| Process isolation      | optional namespace                                       | not available                               |
+| Network isolation      | Landlock TCP rules (ABI 4+); UDS only from ABI 9         | no network clause emitted (deny by default) |
+| Memory / rlimits       | `prlimit` + optional cgroups v2                          | `setrlimit` (best-effort)                   |
+| Host binary control    | confined `PATH` built from the shell allowlist           | same                                        |
 
 Because layer 1 spawns real binaries from the host, command-prefix
 allowlisting is policy-enforced in-process *and* the confinement profile
@@ -204,16 +205,18 @@ its reach is not.
 
 ### Reaching a Unix-domain socket from inside the profile
 
-A sandboxed node must connect to the daemon's UDS. The exact Seatbelt rule was
-verified against a real daemon on macOS 26.6: a socket connection is a *network*
-operation, so it needs a network grant and cannot be enabled by filesystem
-permissions alone.
+A sandboxed node must connect to the daemon's UDS. The mechanism differs by
+platform, and in opposite ways — a UDS connection is a *network* operation to
+Seatbelt but a *filesystem lookup* to Landlock, and Landlock cannot yet police
+it.
+
+#### macOS: a network grant is the only way
+
+Verified against a real daemon on macOS 26.6:
 
 ```scheme
 (allow network-outbound (literal "/private/tmp/mokmokd.sock"))
 ```
-
-Measured behaviour:
 
 - **Path filters use the resolved path.** `/tmp` is a symlink to `/private/tmp`,
   so `(literal "/tmp/mokmokd.sock")` is *denied* while
@@ -223,11 +226,36 @@ Measured behaviour:
   the same directory is denied, and `(allow network-outbound)` without a filter
   admits TCP as well. `literal` is the narrow form; `subpath` deliberately widens
   to a directory.
-- **Relocating the socket into a session mount does not work.** Granting
-  read-write access to the socket's directory does not permit the connection; the
-  filesystem and network permissions are orthogonal. Only the network clause
-  above connects. The earlier "move the socket into a session mount" alternative
-  is dropped.
+- **A filesystem grant does not help.** Granting read-write access to the
+  socket's directory does not permit the connection — the filesystem and network
+  permissions are orthogonal, so the socket stays unreachable until the network
+  clause above is present.
+
+#### Linux: Landlock does not cover it (ABI < 9)
+
+`connect(2)` on a pathname UNIX socket is governed by
+`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, which **only exists from Landlock ABI 9**.
+On an older ABI the kernel cannot express the restriction at all, so a
+deny-by-default ruleset does not stop the connection.
+
+Measured on kernel 6.8 (ABI 4) with a ruleset that denies all filesystem access
+except `/usr`, `/lib`, `/etc`, `/bin`, `/sbin`:
+
+| Operation on the ungranted socket directory | Result |
+| ------------------------------------------- | ------ |
+| `listdir`                                   | `EACCES` (denied, as intended) |
+| `connect(2)` to the socket                  | **succeeds** |
+
+The lesson is the opposite of macOS: on Linux the socket must be made reachable
+by *filesystem* means, because the file API is the only lever an older ABI
+gives. Two consequences follow:
+
+- Until the Linux backend targets ABI 9, UDS reachability cannot be a Landlock
+  rule; it falls out of whether the socket path is inside an accessible mount.
+- This makes the mount-based option live again on Linux, where it does nothing
+  on macOS. Any shared design must therefore express the socket path as an
+  explicit, platform-neutral input and let each backend map it to its own
+  mechanism.
 
 ## Permission events
 
@@ -365,6 +393,9 @@ Triggers, not dates — none of these steps are taken early:
    `sandbox.permission.*` events are not emitted for a sandboxed node.
 7. Unix-socket reachability: a sandboxed node must connect to the daemon's UDS,
    which the current deny-default profile blocks (`NetworkPolicy` is an empty
-   struct). The Seatbelt rule is settled (see "Reaching a Unix-domain socket
-   from inside the profile"); the remaining work is threading the resolved
-   socket path from policy into `render_profile`.
+   struct). Both platforms are settled and they differ (see "Reaching a
+   Unix-domain socket from inside the profile"): macOS needs a network clause
+   built from the canonicalised socket path, Linux needs the path to be
+   reachable as a file because Landlock cannot police it before ABI 9. The
+   remaining work is expressing the socket path as a policy input and letting
+   each backend map it.
