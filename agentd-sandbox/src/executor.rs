@@ -88,17 +88,21 @@ pub trait Executor: Send + Sync {
 /// The layer-1 confined-process executor.
 ///
 /// On macOS this renders a Seatbelt profile from the policy and spawns
-/// commands under it. On other platforms construction fails closed — the
-/// sandbox never spawns a command without OS confinement — and the Linux
-/// (bubblewrap/Landlock/seccomp) backend is a planned follow-up.
+/// commands under it; on Linux it renders the policy into a bubblewrap command
+/// or, when bubblewrap is unavailable, a Landlock ruleset. On other platforms
+/// construction fails closed — the sandbox never spawns a command without OS
+/// confinement.
 #[cfg(target_os = "macos")]
 pub use crate::seatbelt::ConfinedProcessExecutor;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+pub use crate::linux::ConfinedProcessExecutor;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[derive(Debug, Clone, Copy)]
 pub struct ConfinedProcessExecutor;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 impl ConfinedProcessExecutor {
     /// Always fails: there is no OS confinement layer on this platform yet.
     ///
@@ -107,12 +111,12 @@ impl ConfinedProcessExecutor {
     /// Returns [`SandboxError::UnsupportedPlatform`] unconditionally.
     pub fn new(_policy: &crate::policy::Policy) -> Result<Self, crate::error::SandboxError> {
         Err(crate::error::SandboxError::UnsupportedPlatform(
-            "the confined-process executor is implemented for macOS only so far",
+            "the confined-process executor is implemented for macOS and Linux only so far",
         ))
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[async_trait]
 impl Executor for ConfinedProcessExecutor {
     async fn exec(
