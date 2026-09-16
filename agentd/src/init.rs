@@ -21,6 +21,27 @@ use crate::server::{is_shared_directory, set_mode};
 /// The token file name inside the config directory.
 pub const TOKEN_FILE: &str = "tokens.json";
 
+/// The provider config file name inside the config directory.
+pub const PROVIDERS_FILE: &str = "providers.json";
+
+/// The provider config written on first init.
+///
+/// It names only a keyless local server (Ollama), so the daemon starts without
+/// any credential; a cloud provider is added by editing the file. Writing a
+/// provider with an `api_key_env` here would make `serve` fail until that
+/// variable is set, so the template deliberately omits one.
+const PROVIDERS_TEMPLATE: &str = r#"{
+  "providers": {
+    "local": {
+      "kind": "open_ai_compatible",
+      "base_url": "http://127.0.0.1:11434/v1"
+    }
+  },
+  "models": {},
+  "default_model": null
+}
+"#;
+
 /// One generated client: its name, secret, and single-secret file.
 #[derive(Debug, Clone)]
 pub struct ClientToken {
@@ -35,10 +56,15 @@ pub struct ClientToken {
 /// The result of [`init`].
 #[derive(Debug, Clone)]
 pub struct Initialized {
-    /// The config directory the token files were written to.
+    /// The config directory the files were written to.
     pub config_dir: PathBuf,
     /// The daemon's token file.
     pub tokens_path: PathBuf,
+    /// The provider config file.
+    pub providers_path: PathBuf,
+    /// Whether the provider template was written (`false` when one already
+    /// existed and was left untouched).
+    pub providers_created: bool,
     /// The generated clients.
     pub clients: Vec<ClientToken>,
 }
@@ -129,9 +155,21 @@ pub fn init(
         write_private(&client.path, &client.secret)?;
     }
 
+    // The provider config is a template the operator edits, so an existing one
+    // is never overwritten, even with `--force`.
+    let providers_path = dir.join(PROVIDERS_FILE);
+    let providers_created = if providers_path.exists() {
+        false
+    } else {
+        write_private(&providers_path, PROVIDERS_TEMPLATE)?;
+        true
+    };
+
     Ok(Initialized {
         config_dir: dir.to_path_buf(),
         tokens_path,
+        providers_path,
+        providers_created,
         clients,
     })
 }
@@ -166,8 +204,9 @@ fn write_private(
 
 #[cfg(test)]
 mod tests {
-    use super::{InitError, TOKEN_FILE, init};
+    use super::{InitError, PROVIDERS_FILE, TOKEN_FILE, init};
     use crate::auth::{Claim, TokenStore};
+    use agentd_inference::ProvidersConfig;
     use axum::http::HeaderMap;
     use axum::http::header::AUTHORIZATION;
 
@@ -189,6 +228,8 @@ mod tests {
         let result = init(dir.path(), false).expect("init should succeed");
 
         assert_eq!(result.tokens_path, dir.path().join(TOKEN_FILE));
+        assert_eq!(result.providers_path, dir.path().join(PROVIDERS_FILE));
+        assert!(result.providers_created);
         assert_eq!(result.clients.len(), 3);
 
         let mode = std::fs::metadata(&result.tokens_path)
@@ -216,6 +257,25 @@ mod tests {
             let contents = std::fs::read_to_string(&client.path).expect("client file");
             assert_eq!(contents, client.secret);
         }
+    }
+
+    #[test]
+    fn the_providers_template_is_valid_and_never_overwritten() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let first = init(dir.path(), false).expect("init should succeed");
+
+        // The generated template parses into the real config type.
+        let template = std::fs::read_to_string(&first.providers_path).expect("providers file");
+        serde_json::from_str::<ProvidersConfig>(&template).expect("template should parse");
+
+        // An operator's edit survives a forced re-init.
+        std::fs::write(&first.providers_path, "{\"providers\":{}}").expect("write edit");
+        let second = init(dir.path(), true).expect("re-init should succeed");
+        assert!(!second.providers_created);
+        assert_eq!(
+            std::fs::read_to_string(&second.providers_path).expect("providers file"),
+            "{\"providers\":{}}"
+        );
     }
 
     #[test]

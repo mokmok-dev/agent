@@ -138,14 +138,16 @@ inside the sandbox with the token file in `deny_read` (see
 [sandbox](sandbox.md)); a sandboxed node holds only `read`, `publish`, and
 `infer`, so it can neither forge daemon-authority events nor reach the network.
 
-`agentd init [--dir <path>]` creates the runtime directory (mode `0700`) and a
-token file with three clients — `user` (`read`, `publish`), `agent` (`read`,
-`publish`, `infer`), and `admin` (`authority`) — plus a mode-`0600`
+`agentd init [--config-dir <path>]` creates the config directory (mode `0700`)
+and a token file with three clients — `user` (`read`, `publish`), `agent`
+(`read`, `publish`, `infer`), and `admin` (`authority`) — plus a mode-`0600`
 `<name>.token` file per client for tools like `agentd-agent` and
-`agentd-publish`. It refuses to overwrite an existing token file without
-`--force`, and prints the secrets once. `serve` creates the socket, its
-directory, and the log, but never generates a token file: it refuses to start
-without one and points at `init`.
+`agentd-publish`. It also writes a `providers.json` template naming a keyless
+local server, which `serve` loads automatically (see
+[inference](inference.md)); an existing provider config is never overwritten. It
+refuses to overwrite an existing token file without `--force`, and prints the
+secrets once. `serve` creates the socket, its directory, and the log, but never
+generates a token file: it refuses to start without one and points at `init`.
 
 ## Sequences
 

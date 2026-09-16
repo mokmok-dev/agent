@@ -147,7 +147,9 @@ unresolvable model is a `Delta::Error`. The agent asks for an alias
 The daemon loads `--providers-config <path>` if given, otherwise
 `$XDG_CONFIG_HOME/agentd/providers.json` (`~/.config/agentd/providers.json`) when
 it exists; with neither it serves the deterministic `FakeProvider` used by tests
-and offline development.
+and offline development. `agentd init` writes that file as a template naming a
+keyless local server (so it starts without a credential), which the operator
+edits to add a provider and model routes.
 
 ## Durability line
 

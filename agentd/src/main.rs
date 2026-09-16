@@ -257,6 +257,15 @@ async fn run() -> Result<(), RunError> {
 fn print_initialized(initialized: &agentd::init::Initialized) {
     println!("initialized {}", initialized.config_dir.display());
     println!("  tokens: {}", initialized.tokens_path.display());
+    println!(
+        "  providers: {} ({})",
+        initialized.providers_path.display(),
+        if initialized.providers_created {
+            "edit to add your provider and models"
+        } else {
+            "left as-is"
+        }
+    );
     println!("  clients (secrets are shown once):");
     for client in &initialized.clients {
         println!(
