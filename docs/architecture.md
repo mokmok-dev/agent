@@ -305,12 +305,11 @@ command runs, so a command never starts without its decision recorded. The
 boundary is the platform's native isolation (Seatbelt on macOS;
 bubblewrap-preferred with a Landlock fallback on Linux), and the sandbox has no
 network egress: inference is a daemon capability, reached over the daemon's Unix
-socket, which is the only endpoint a confined command may connect to. The
-current code lags this design — its layer-1 executor is macOS-only so far,
-`NetworkPolicy` is empty and the rendered profile still opens outbound, and the
-`Vfs` trait is not wired to the executor (it is layer-2 only) — and no component
-drives the sandbox yet, so the feature exists to validate the dependency graph
-under CI's `--all-features`.
+socket, which is the only endpoint a confined command may connect to. Its
+layer-1 executor is macOS-only so far (the Linux backend is the follow-up), the
+macOS profile renders the policy's path entries with protected metadata and
+opens no network, and no component drives the sandbox yet, so the feature exists
+to validate the dependency graph under CI's `--all-features`.
 
 Further structural steps keep explicit triggers and are not taken early:
 

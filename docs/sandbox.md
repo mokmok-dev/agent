@@ -75,8 +75,8 @@ Non-goals (stated honestly, per the Sheena precedent):
    whole filesystem policy. There is no separate "mount", "refuse", and
    "hide" machinery to reconcile.
 4. **Swappable executors.** The shell execution strategy sits behind an
-   `Executor` trait. Layer 1 maps the policy onto the OS. A future layer 2 may
-   add an in-process interpreter without changing the policy or event contract.
+   `Executor` trait. Layer 1 maps the policy onto the OS. The policy is the
+   interface: a new OS backend (Linux) renders the same entries differently.
 5. **Every decision is an event.** Each permission check produces a CloudEvent
    (`requested` → `granted`/`denied`) and each policy violation produces a
    `sandbox.violation.*` event, durably appended to the log, so the audit log is
@@ -87,34 +87,33 @@ Non-goals (stated honestly, per the Sheena precedent):
 
 ## Policy model
 
-`Policy` has four domains; its default is deny-everything:
+`Policy` has three domains; its default is deny-everything:
 
-| Domain    | What it controls                                                                 |
-| --------- | -------------------------------------------------------------------------------- |
-| `fs`      | Path entries (`read`/`write`/`deny`), protected metadata, byte caps               |
-| `shell`   | Allowed command prefixes (a UX guard, not a boundary), environment, working directory |
-| `network` | Nothing configurable; **egress and ingress are denied**                           |
-| `limits`  | Wall-clock timeout, command count, output bytes, best-effort memory cap          |
+| Domain   | What it controls                                                            |
+| -------- | --------------------------------------------------------------------------- |
+| `fs`     | Path entries (`read`/`write`/`deny`) and protected metadata names            |
+| `shell`  | Environment and working directory                                           |
+| `limits` | Wall-clock timeout and output cap                                           |
+
+Network is not a domain: it has no configurable surface because egress and
+ingress are denied. There is no command allowlist and no memory or byte cap —
+each was deleted because it did not hold (an allowlist is a bypassable UX guard;
+macOS cannot enforce a memory cap). See "What was deleted" below.
 
 ```rust
 pub struct Policy {
     pub fs: FsPolicy,
     pub shell: ShellPolicy,
-    pub network: NetworkPolicy,
     pub limits: Limits,
 }
 
 pub struct FsPolicy {
     /// Path entries, evaluated with `deny > write > read`.
     pub entries: Vec<FsEntry>,
-    /// Names fixed read-only inside any writable root. Defaults to `.git` and
+    /// Names fixed read-only inside any write root. Defaults to `.git` and
     /// `.agents`, so a command cannot rewrite its own instructions or the repo
     /// history it is diffed against.
     pub protected: Vec<String>,
-    /// Host paths whose read access the OS profile withholds (absolute).
-    pub deny_read: Vec<PathBuf>,
-    pub max_total_bytes: Option<u64>,
-    pub max_file_bytes: Option<u64>,
 }
 
 pub struct FsEntry {
@@ -123,16 +122,13 @@ pub struct FsEntry {
 }
 
 pub struct ShellPolicy {
-    pub allow: Vec<CommandPrefix>, // deny-by-default; empty means no command runs
-    pub env: EnvAllowlist,         // the host environ is never inherited
-    pub workdir: PathBuf,
+    pub env: EnvAllowlist, // the host environ is never inherited
+    pub workdir: PathBuf,  // must be covered by a `write` entry
 }
 
 pub struct Limits {
     pub timeout: Duration,
-    pub max_command_count: u32,   // fork-bomb / runaway loop guard
     pub max_output_bytes: u64,
-    pub max_memory_bytes: Option<u64>,
 }
 ```
 
@@ -143,59 +139,68 @@ pub struct Limits {
   root holds.
 - **Read is granted broadly, then narrowed.** On macOS 26 a filtered read grant
   makes platform binaries abort inside `dyld4::CacheFinder` (`SIGABRT` before the
-  shell starts), so reads are granted at `/` and the `deny_read` entries are
-  emitted as denials after the broad grant. Seatbelt evaluates a deny ahead of a
-  matching allow, so this holds for a spawned host binary.
+  shell starts), so reads are granted at `/` and `deny` entries are emitted as
+  denials after the broad grant. Seatbelt evaluates a deny ahead of a matching
+  allow, so this holds for a spawned host binary.
 - **Entries are validated.** An entry must be an absolute host path that
-  resolves. A `deny` must not cover the workdir, an executable directory, or the
-  sandbox scratch directory — every command needs those — and a failure there is
-  an `InvalidPolicy` error at construction, not a silently-ignored entry.
-  `~` is a shell expansion and is *not* performed on a path.
+  resolves. A `deny` must not cover the workdir, an executable directory, a write
+  root, or the sandbox scratch directory — every command needs those — and a
+  failure there is an `InvalidPolicy` error at construction, not a
+  silently-ignored entry. `~` is a shell expansion and is *not* performed on a
+  path.
 - **Canonicalisation is required.** The profile matches resolved paths, so
   `/tmp` is `/private/tmp`; both the entries and the protected paths are resolved
   before comparison.
+- **The workdir must be inside a `write` entry**, so a workspace a command
+  cannot write is rejected rather than silently run read-only.
 
 ### Protected metadata
 
-Inside a writable root, `protected` names are forced read-only with a profile
-rule of the shape `^<root>/<name>(/.*)?$`, so the protection holds even before
-the directory exists (a fresh `.git` cannot be created). The default protects
-`.git` and `.agents`. This is a *carveout* on top of the write grant, expressed
-as both `require-not (literal ...)` and `require-not (subpath ...)` so the
-protected directory itself and everything under it are withheld.
+Inside a write root, `protected` names are forced read-only with a
+`(deny file-write* (regex #"^<root>/<name>(/.*)?$"))` rule, so the protection
+holds even before the directory exists (a fresh `.git` cannot be created). The
+default protects `.git` and `.agents`. The root path and the name are
+regex-escaped, so a path arriving as event data cannot inject a clause.
 
 ### Writable roots and renames
 
 A writable root receives a `(deny file-write-unlink (require-all (literal
 <root>) (vnode-type DIRECTORY)))` rule, so a command cannot rename or unlink the
 root itself. Without it, a command could replace the directory the *next*
-sandbox profile will treat as a boundary. User-controlled symlinks inside a
-writable root are rejected at construction (`SeatbeltPreparationError`); the
-top-level macOS alias `/tmp` → `/private/tmp` is the only symlink allowed.
+sandbox profile will treat as a boundary.
 
 ### Network
 
-Network has no allow surface. Egress and ingress are denied at the OS level, with
-exactly one exception: the daemon's Unix domain socket path, so a sandboxed node
-or agent can speak to the daemon. `AF_UNIX` is the only socket family a confined
-command may use; `AF_INET`/`AF_INET6` are denied, and on Linux a seccomp filter
-enforces it in addition to the network namespace.
+Network has no allow surface. Egress and ingress are denied at the OS level by
+`deny default` (macOS) / `--unshare-net` plus a seccomp filter (Linux). Inference
+— the reason an earlier design left egress open — is a daemon capability: the
+agent asks the daemon over its Unix socket, and the daemon holds the provider
+credentials and reaches the network. The sandbox thus has no exfiltration
+channel, so per-host rules and an SSRF guard are unnecessary. The daemon-socket
+exception arrives with the session manager; until then the profile denies all
+network access, and a future remote service reached directly would reintroduce
+the managed-proxy model as a separate opt-in.
 
-Inference — the reason an earlier design left egress open — is instead a daemon
-capability: the agent asks the daemon over the socket, and the daemon holds the
-provider credentials and reaches the network. The sandbox thus has no
-exfiltration channel, so per-host rules and an SSRF guard are unnecessary while
-the only reachable endpoint is a local socket. A future remote service that must
-be reached directly would reintroduce the managed-proxy model as a separate
-opt-in.
+## What was deleted
 
-### Shell allowlist
+A first-principles pass removed concepts that did not hold:
 
-`allow` is deny-by-default, but it is a **convenience guard, not a security
-boundary**: layer 1 spawns real host binaries and the OS profile, not the prefix
-list, decides what they can reach. A prefix is a token-wise prefix of a command
-clause; an empty or whitespace-only prefix is rejected at construction, because
-an empty token list would otherwise match every command.
+- **The virtual filesystem.** The `Vfs` trait and its `Mem`/`ReadOnly`/
+  `ReadWrite`/`Overlay` backends plus `VPath` were described as a shared resource
+  plane, but the executor never used them, so they never constrained a spawned
+  command; the OS profile was always the boundary. They were speculative
+  infrastructure for an interpreter that does not exist.
+- **The shell allowlist.** Continue-prefix matching was a convenience guard, not
+  a boundary: a spawned interpreter bypasses a prefix list. The OS profile
+  decides what a command can reach, so the list (and its `CommandPrefix` type,
+  the clause splitter, and the `DenyReasons` it produced) is gone.
+- **Resource caps that nothing enforced.** `max_memory_bytes`, `max_total_bytes`,
+  and `max_file_bytes` were configuration-only on macOS; a field with no
+  enforcement is a false promise.
+- **`NetworkPolicy`.** With egress denied there is no surface to configure.
+- **Glob-based `refuse`/`hide`.** They only made sense at the deleted VFS layer.
+- **The command-count guard.** It counted `exec` calls, not processes, so it did
+  not bound a fork bomb.
 
 ## Architecture
 
@@ -237,20 +242,22 @@ pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
-    pub denied_by: Option<DenialReason>, // set when the policy refused the command
 }
 ```
 
+There is no `denied_by`: the sandbox no longer refuses a command before running
+it, because there is no allowlist. A refusal is an OS denial, visible as a
+non-zero exit code and (once the classifier lands) a `sandbox.violation.*` event.
+
 ### Layer 1 backends
 
-| Concern                | Linux                                                       | macOS                                       |
-| ---------------------- | ----------------------------------------------------------- | ------------------------------------------- |
-| Filesystem confinement | bubblewrap bind mounts (preferred); Landlock ABI V5 fallback | Seatbelt profile `(deny default)`            |
-| Syscall narrowing      | seccomp filter (block `ptrace`, `io_uring_*`, network)       | not available; profile covers most          |
-| Process isolation      | `--unshare-user/pid/ipc`, `--unshare-net`                    | not available                               |
-| Network                | `--unshare-net` + seccomp; UDS allowed by bind mount         | outbound denied; the daemon UDS path allowed |
-| Memory / rlimits       | `prlimit` + optional cgroups v2                              | `setrlimit` (best-effort)                   |
-| Host binary control    | confined `PATH` built from the shell allowlist               | same                                        |
+| Concern                | Linux                                                        | macOS                                 |
+| ---------------------- | ------------------------------------------------------------ | ------------------------------------- |
+| Filesystem confinement | bubblewrap bind mounts (preferred); Landlock ABI V5 fallback  | Seatbelt profile `(deny default)`      |
+| Syscall narrowing      | seccomp filter (block `ptrace`, `io_uring_*`, network)        | not available; profile covers most    |
+| Process isolation      | `--unshare-user/pid/ipc`, `--unshare-net`                     | not available                         |
+| Network                | `--unshare-net` + seccomp                                     | denied by `deny default` (no grant)   |
+| Host binary control    | a fixed system `PATH`; the profile, not the path, confines    | same                                  |
 
 **bubblewrap is preferred over Landlock** because it gives read-only root binds,
 a private `/dev`, namespaces, and `--cap-drop ALL` in one mechanism, whereas
@@ -264,16 +271,6 @@ boundary. When the system bwrap lacks `--ro-bind-fd`, it is rewritten to
 directory, prepends that directory to `PATH`, and dispatches on `argv[0]`
 (`codex-linux-sandbox`'s arg0 trick). This keeps the helper on a trusted path and
 avoids shipping and locating a separate executable.
-
-## Layer 2 (planned): the in-process VFS
-
-The `Vfs` trait (`Mem`, `ReadOnlyMount`, `ReadWriteMount`, `Overlay`) is **not**
-part of layer 1's boundary and does **not** constrain spawned commands. It exists
-for a future in-process interpreter executor that re-implements commands and
-therefore has no kernel boundary. Only there do the `Overlay` copy-on-write and
-glob-based `refuse`/`hide` semantics apply. Keeping the trait is worthwhile
-because it is the only confinement available to such an executor; treating it as
-the layer-1 boundary was the earlier design's error.
 
 ## Permission and violation events
 
@@ -313,30 +310,27 @@ Prevented:
   rules).
 - Host environment leakage (env is an allowlist; the host environ is never
   inherited).
-- Fork bombs and runaway loops (command count + timeout).
+- Runaway loops (wall-clock timeout).
 - Silent host contamination by default (writes require an explicit `write`
   entry).
-- **Network egress.** A confined command cannot open an IP connection; the
-  daemon's Unix socket is the only reachable endpoint.
-- Reads of the paths named in `FsPolicy::deny_read`, held against a spawned host
+- **Network egress.** A confined command cannot open an IP connection.
+- Reads of the paths named in `deny` entries, held against a spawned host
   binary and verified end to end.
 
 Stated gaps:
 
-- **No hard memory ceiling for spawned commands on macOS.** `setrlimit` is
-  best-effort; a truly hard cap requires cgroups, which are Linux-only.
-- **Layer 1 runs real host binaries.** A command inside the allowlist prefix can
-  still do surprising-but-confined things. Prefix allowlisting is convenience,
-  not proof of intent — the confinement boundary is the OS profile.
+- **No hard memory ceiling for spawned commands.** There is no memory cap at all:
+  macOS has no enforcement mechanism, so a field would be a false promise.
+- **Layer 1 runs real host binaries.** A command can still do
+  surprising-but-confined things; the confinement boundary is the OS profile.
 - **macOS Seatbelt is officially unsupported by Apple.** It is functional and
   widely used, but profiles are best-effort and behavior can shift between OS
   releases.
-- **Reads are unconfined unless `deny_read` names them.** With an empty
-  `deny_read`, a spawned host binary can read any file the user can. With egress
-  denied outright the exfiltration channel is closed, but a secret read still
-  reaches the model context, so operators should name credentials in
-  `deny_read`.
-- **A hard link inside a writable root aliases a file outside it.** The write
+- **Reads are unconfined unless a `deny` entry names them.** With no denial, a
+  spawned host binary can read any file the user can. With egress denied outright
+  the exfiltration channel is closed, but a secret read still reaches the model
+  context, so operators should name credentials in `deny` entries.
+- **A hard link inside a write root aliases a file outside it.** The write
   allow-list matches paths, so a pre-existing hard link under the root can be
   written through. Creating the link requires access outside the sandbox, so it
   is a precondition, not something a confined command can set up.
@@ -349,15 +343,14 @@ Stated gaps:
 Modeled on Sheena's methodology and codex's, adapted to Rust:
 
 - **Category-organized security tests**: sandbox escape (`../`, symlink out of a
-  root, `/proc`, `/etc`), writable-root rename, limits (DoS, output flood,
-  command count, timeout), **egress denied and the daemon UDS reachable**, env
-  leakage, and `deny_read` withholding a secret from a real spawned process.
+  root), writable-root rename, output flood, timeout, env leakage, and a `deny`
+  entry withholding a secret from a real spawned process.
 - **Path precedence tests**: `deny` inside `write` holds; protected metadata
   cannot be created or modified; canonicalisation collapses `/tmp`.
-- **Permission and violation flow tests**: end-to-end through the log —
-  `requested` → `granted`/`denied` correlation, deny-wins semantics,
-  pending-timeout behavior, and a structured `sandbox.violation.*` for a real
-  OS denial.
+- **Permission flow tests**: end-to-end through the log — `requested` →
+  `granted` → `exec.completed`.
+- **Violation flow tests** (follow-up): a structured `sandbox.violation.*` for a
+  real OS denial.
 - **Differential tests**: golden files recorded from real bash + coreutils for
   layer 1 behavior, replayed in CI without the recorded host.
 - **Benchmarks**: sandbox construction, trivial `exec` overhead, parallel
@@ -367,28 +360,26 @@ Modeled on Sheena's methodology and codex's, adapted to Rust:
 
 Triggers, not dates — none of these steps are taken early:
 
-1. Render `FsPolicy` path entries into the macOS Seatbelt profile (writable
-   roots, `deny_read`, protected metadata, root-unlink denial), replacing the
-   `mounts`/`refuse`/`hide` shape.
-2. Deny network egress at the OS level and allow only the daemon UDS.
+1. `sandbox.violation.*` classification for an OS denial (exit code + output).
+2. Deny network egress in the rendered profile (done for macOS: no grant) and
+   allow the daemon UDS when the session manager needs it.
 3. Linux backend: bubblewrap preferred, Landlock fallback, seccomp for network
    and syscall narrowing, with the arg0 self-exec helper.
 4. Human-in-the-loop approval flow over the WS event API, using the `authority`
    claim from `docs/architecture.md`.
 5. A long-lived session spawn API: today `Sandbox::exec` is a one-shot bounded
    by a timeout that waits for the child to exit. A session needs a supervised
-   process that outlives one command, with a writable session mount for its
+   process that outlives one command, with a writable session entry for its
    SQLite projection (`docs/node.md`).
 6. A session manager in `agentd` that launches a sandboxed node and reports
    lifecycle through `session.*` events.
-7. Optional layer 2: the in-process interpreter backend and its VFS.
 
 ## Implementation status
 
-This document is the target. The code currently implements an earlier shape:
-`FsPolicy` still carries `mounts`/`refuse`/`hide`/`deny_read`, `NetworkPolicy`
-is empty with egress open in the rendered profile, the `Vfs` trait is not wired
-to the executor, and the Linux backend is a fail-closed stub. The migration is
-tracked by the roadmap above; the crate's code comments record the same
-deviations next to the code, so a reader never has to reconcile two sources of
-truth from memory.
+The crate matches this design except for the follow-ups above: `Policy` is the
+three-domain path-entry model with no allowlist or caps, the macOS profile
+renders the entries with protected metadata and root-unlink denial and opens no
+network, and the deleted concepts (VFS, allowlist, caps) are gone from the code.
+What remains unimplemented is the Linux backend, the violation classifier, the
+approval flow, and sessions. A crate doc comment records the same status next to
+the code.
