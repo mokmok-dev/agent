@@ -1,20 +1,22 @@
 //! The sandbox policy model.
 //!
 //! A [`Policy`] is deny-by-default in every domain: the zero value mounts
-//! nothing, allows no command, and imposes safe resource limits. Outbound
-//! network is the one deliberate exception — it stays open so a command can
-//! reach a remote service — and reads are narrowed from the broad OS grant only
-//! by [`FsPolicy::deny_read`]. Policies serialize into JSON so they can arrive
-//! as event data; every field defaults to its inert value when absent.
+//! nothing, allows no command, and imposes safe resource limits. Reads are
+//! narrowed from the broad OS grant only by [`FsPolicy::deny_read`], and network
+//! egress is the *intended* default-deny; the current implementation predates
+//! that and its rendered profile still opens outbound (see `docs/sandbox.md` and
+//! [`NetworkPolicy`]). Policies serialize into JSON so they can arrive as event
+//! data; every field defaults to its inert value when absent.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error as ThisError;
 
 /// The four-domain deny-by-default configuration a sandbox runs under.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Policy {
     /// Filesystem policy: mounts, refused and hidden path globs, byte caps.
     pub fs: FsPolicy,
@@ -26,9 +28,54 @@ pub struct Policy {
     pub limits: Limits,
 }
 
+impl Policy {
+    /// Validates invariants that would otherwise silently weaken deny-by-default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError`] for a command prefix that tokenizes to nothing
+    /// (which would match every command), a zero timeout, or a per-file byte cap
+    /// above the total byte cap.
+    pub fn validate(&self) -> Result<(), PolicyError> {
+        for prefix in &self.shell.allow {
+            if !prefix.is_usable() {
+                return Err(PolicyError::EmptyCommandPrefix(prefix.as_str().to_string()));
+            }
+        }
+        if self.limits.timeout.is_zero() {
+            return Err(PolicyError::ZeroTimeout);
+        }
+        if let (Some(file), Some(total)) = (self.fs.max_file_bytes, self.fs.max_total_bytes)
+            && file > total
+        {
+            return Err(PolicyError::FileCapExceedsTotal { file, total });
+        }
+        Ok(())
+    }
+}
+
+/// A policy input that fails closed.
+#[derive(Debug, Clone, PartialEq, Eq, ThisError)]
+pub enum PolicyError {
+    /// A command prefix tokenizes to nothing, so it would match every command.
+    #[error("command prefix {0:?} tokenizes to nothing and would match every command")]
+    EmptyCommandPrefix(String),
+    /// A zero wall-clock timeout would kill every command before it runs.
+    #[error("the wall-clock timeout must be greater than zero")]
+    ZeroTimeout,
+    /// A per-file cap above the total cap makes the total cap unreachable.
+    #[error("max_file_bytes ({file}) exceeds max_total_bytes ({total})")]
+    FileCapExceedsTotal {
+        /// The per-file cap.
+        file: u64,
+        /// The total cap it exceeds.
+        total: u64,
+    },
+}
+
 /// Filesystem policy for the virtual filesystem.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FsPolicy {
     /// The mounts that make up the virtual filesystem; unmounted paths are
     /// absent.
@@ -64,7 +111,7 @@ pub struct FsPolicy {
 
 /// A mount binds a virtual location to a backing source.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct Mount {
     /// The virtual mount point, sandbox-absolute (e.g. `/work`). Mounting at
     /// `/` backs the whole virtual root.
@@ -75,7 +122,7 @@ pub struct Mount {
 
 /// What backs a [`Mount`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum MountSource {
     /// Fully in-memory and byte-accounted; the default and the safest backing.
     Mem,
@@ -137,7 +184,7 @@ impl From<String> for Pattern {
 
 /// Shell policy for commands executed through the sandbox.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ShellPolicy {
     /// Allowed command prefixes. Deny-by-default: an empty list means no
     /// command runs.
@@ -167,6 +214,17 @@ impl CommandPrefix {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Whether the prefix tokenizes to at least one token.
+    ///
+    /// A prefix that tokenizes to nothing — empty, whitespace-only, or with
+    /// unbalanced quotes — must never be treated as matching, because an empty
+    /// token list would match every command. [`Policy::validate`] rejects one at
+    /// construction.
+    #[must_use]
+    pub fn is_usable(&self) -> bool {
+        shlex::split(self.as_str()).is_some_and(|tokens| !tokens.is_empty())
+    }
 }
 
 impl From<&str> for CommandPrefix {
@@ -187,6 +245,7 @@ pub type EnvAllowlist = Vec<EnvVar>;
 
 /// One literal environment variable.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnvVar {
     /// Variable name, e.g. `CARGO_HOME`.
     pub name: String,
@@ -196,20 +255,20 @@ pub struct EnvVar {
 
 /// Network policy.
 ///
-/// This version has no configurable surface. The confinement profile is
-/// deny-by-default for network operations but opens *outbound* connections, so
-/// a spawned command can reach an inference provider or other remote service;
-/// *inbound* connections (a listening socket) stay denied. Per-host rules and
-/// an SSRF guard are not implemented — network reachability is deliberately not
-/// confined, because a sandboxed node must reach the daemon's Unix socket and
-/// an agent must reach its model provider. See `docs/sandbox.md`, including the
-/// file-read denials that bound what such a connection could exfiltrate.
+/// This version has no configurable surface. The target design is **deny by
+/// default**: egress and ingress are denied, and the only reachable endpoint is
+/// the daemon's Unix socket, so inference is a daemon capability the sandbox
+/// asks for over that socket. The current code predates this: the rendered
+/// macOS profile still opens *outbound* IP connections (`allow network-outbound`)
+/// while denying inbound. Per-host rules and an SSRF guard are not implemented
+/// and are unnecessary once egress is denied. See `docs/sandbox.md`, including
+/// the file-read denials that bound what a compromised command could read.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NetworkPolicy {}
 
 /// Resource limits guarding against runaway commands.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Limits {
     /// Wall-clock timeout per command.
     #[serde(with = "duration_seconds")]
@@ -256,7 +315,7 @@ mod duration_seconds {
 mod tests {
     use super::{
         CommandPrefix, EnvVar, Limits, Mount, MountSource, NetworkPolicy, Pattern, Policy,
-        ShellPolicy,
+        PolicyError, ShellPolicy,
     };
     use serde_json::{Value, from_value, json, to_value};
     use std::path::PathBuf;
@@ -364,5 +423,61 @@ mod tests {
             panic!("limits serialize to a JSON object");
         };
         assert_eq!(fields.get("timeout"), Some(&json!(30)));
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_command_prefix() {
+        for entry in ["", "   ", "'unterminated"] {
+            let policy = Policy {
+                shell: ShellPolicy {
+                    allow: vec![CommandPrefix::new(entry)],
+                    ..ShellPolicy::default()
+                },
+                ..Policy::default()
+            };
+
+            assert!(
+                matches!(policy.validate(), Err(PolicyError::EmptyCommandPrefix(_))),
+                "{entry:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_degenerate_limits() {
+        let zero = Policy {
+            limits: Limits {
+                timeout: Duration::ZERO,
+                ..Limits::default()
+            },
+            ..Policy::default()
+        };
+        assert_eq!(zero.validate(), Err(PolicyError::ZeroTimeout));
+
+        let inverted = Policy {
+            fs: super::FsPolicy {
+                max_total_bytes: Some(1),
+                max_file_bytes: Some(2),
+                ..super::FsPolicy::default()
+            },
+            ..Policy::default()
+        };
+        assert_eq!(
+            inverted.validate(),
+            Err(PolicyError::FileCapExceedsTotal { file: 2, total: 1 })
+        );
+    }
+
+    #[test]
+    fn a_sound_default_policy_validates() {
+        assert_eq!(Policy::default().validate(), Ok(()));
+    }
+
+    #[test]
+    fn unknown_policy_fields_are_rejected() {
+        assert!(from_value::<Policy>(json!({ "shells": {} })).is_err());
+        assert!(from_value::<ShellPolicy>(json!({ "allowed": [] })).is_err());
+        assert!(from_value::<Limits>(json!({ "timeouts": 30 })).is_err());
+        assert!(from_value::<EnvVar>(json!({ "name": "A", "value": "b", "extra": 1 })).is_err());
     }
 }

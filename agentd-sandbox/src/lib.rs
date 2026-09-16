@@ -1,15 +1,16 @@
 //! The sandbox: the confinement layer through which an agent drives shell
-//! commands. Every command runs against a virtual filesystem and a policy —
-//! never directly against the host — and every permission decision is durably
+//! commands. Every command runs under an OS-enforced policy — never directly
+//! against the host — and every permission decision and OS denial is durably
 //! appended to the event log as a `CloudEvent`.
 //!
 //! The crate is deny-by-default for what a command can *do*: the [`Policy`]
-//! zero value mounts nothing, allows no command, and opens no listener. Outbound
-//! network is the deliberate exception — it stays open so a command can reach a
-//! remote service — and reads are narrowed only by
-//! [`FsPolicy::deny_read`](policy::FsPolicy::deny_read); see [`NetworkPolicy`].
-//! The VFS implementations confine every path operation to their mounts, and
-//! the executor translates what remains into an OS confinement profile.
+//! zero value mounts nothing, allows no command, and opens no listener. Reads
+//! are narrowed only by [`FsPolicy::deny_read`](policy::FsPolicy::deny_read);
+//! network egress is target-default-deny (the current macOS profile still opens
+//! outbound — see [`NetworkPolicy`] and `docs/sandbox.md`). The VFS is a
+//! layer-2 construct for a future in-process executor and does not confine
+//! spawned commands; the executor renders the policy into an OS profile, which
+//! is the boundary.
 //!
 //! # Example
 //!
@@ -77,7 +78,7 @@ pub use events::{
 pub use executor::{ConfinedProcessExecutor, DenialReason, ExecResult, Executor};
 pub use policy::{
     CommandPrefix, EnvAllowlist, EnvVar, FsPolicy, Limits, Mount, MountSource, NetworkPolicy,
-    Pattern, Policy, ShellPolicy,
+    Pattern, Policy, PolicyError, ShellPolicy,
 };
 pub use sandbox::Sandbox;
 pub use vfs::{DirEntry, Metadata, MountedVfs, Vfs};

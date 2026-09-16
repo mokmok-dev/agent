@@ -54,14 +54,18 @@ impl Sandbox {
     ///
     /// # Errors
     ///
-    /// Fails closed with [`SandboxError::InvalidPolicy`] when the policy's
-    /// filesystem domain cannot be assembled into a virtual filesystem.
+    /// Fails closed with [`SandboxError::InvalidPolicy`] when the policy is
+    /// invalid or its filesystem domain cannot be assembled into a virtual
+    /// filesystem.
     pub fn with_executor(
         policy: Policy,
         log: EventLog,
         agent_id: impl Into<String>,
         executor: Arc<dyn Executor>,
     ) -> Result<Self, SandboxError> {
+        policy
+            .validate()
+            .map_err(|error| SandboxError::InvalidPolicy(error.to_string()))?;
         let vfs = MountedVfs::from_policy(&policy.fs)?;
         Ok(Self {
             id: Uuid::now_v7(),
@@ -419,6 +423,21 @@ mod tests {
         assert!(matches!(
             Sandbox::with_executor(
                 bad,
+                open_log(dir.path()),
+                "coder-1",
+                RecordingExecutor::new()
+            ),
+            Err(SandboxError::InvalidPolicy(_))
+        ));
+    }
+
+    #[test]
+    fn an_empty_command_prefix_fails_construction() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+
+        assert!(matches!(
+            Sandbox::with_executor(
+                policy(&[""], 10),
                 open_log(dir.path()),
                 "coder-1",
                 RecordingExecutor::new()

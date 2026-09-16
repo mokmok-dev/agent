@@ -97,7 +97,11 @@ fn clause_matches(
         let Some(prefix_tokens) = shlex::split(prefix.as_str()) else {
             return false;
         };
-        prefix_tokens.len() <= tokens.len()
+        // An empty prefix tokenizes to no tokens; treating it as matching would
+        // make it an allow-everything entry, so it never matches. `Policy::validate`
+        // rejects such a prefix at construction as well.
+        !prefix_tokens.is_empty()
+            && prefix_tokens.len() <= tokens.len()
             && prefix_tokens
                 .iter()
                 .zip(&tokens)
@@ -182,5 +186,14 @@ mod tests {
         assert!(!is_allowed("   ", &allow));
         assert!(!is_allowed(";", &allow));
         assert!(is_allowed("cargo test;", &allow));
+    }
+
+    #[test]
+    fn empty_or_whitespace_prefixes_match_nothing() {
+        let allow = allow(&["", "   "]);
+
+        assert!(!is_allowed("curl example.com", &allow));
+        assert!(!is_allowed("rm -rf /", &allow));
+        assert!(!is_allowed("cargo test", &allow));
     }
 }
