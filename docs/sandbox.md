@@ -189,18 +189,45 @@ pub struct ExecResult {
 
 Layer 1 (`ConfinedProcessExecutor`) maps policy to OS mechanisms:
 
-| Concern                  | Linux                                                     | macOS                              |
-| ------------------------ | --------------------------------------------------------- | ---------------------------------- |
-| Filesystem confinement   | Landlock ruleset (per-mount read/write rights)            | Seatbelt profile `(deny default)`  |
-| Syscall narrowing        | seccomp filter (block ptrace, mount, namespace ops, ...)  | not available; profile covers most |
-| Process/network isolation| Landlock network + optional namespace                     | Seatbelt `(deny network*)` rules   |
-| Memory / rlimits         | `prlimit` + optional cgroups v2                           | `setrlimit` (best-effort)          |
-| Host binary control      | confined `PATH` built from the shell allowlist            | same                               |
+| Concern                   | Linux                                                     | macOS                                       |
+| ------------------------- | --------------------------------------------------------- | ------------------------------------------- |
+| Filesystem confinement    | Landlock ruleset (per-mount read/write rights)            | Seatbelt profile `(deny default)`           |
+| Syscall narrowing         | seccomp filter (block ptrace, mount, namespace ops, ...)  | not available; profile covers most          |
+| Process/network isolation | Landlock network + optional namespace                     | no network clause emitted (deny by default) |
+| Memory / rlimits          | `prlimit` + optional cgroups v2                           | `setrlimit` (best-effort)                   |
+| Host binary control       | confined `PATH` built from the shell allowlist            | same                                        |
 
 Because layer 1 spawns real binaries from the host, command-prefix
 allowlisting is policy-enforced in-process *and* the confinement profile
 denies everything outside the intended mounts — the command may be real, but
 its reach is not.
+
+### Reaching a Unix-domain socket from inside the profile
+
+A sandboxed node must connect to the daemon's UDS. The exact Seatbelt rule was
+verified against a real daemon on macOS 26.6: a socket connection is a *network*
+operation, so it needs a network grant and cannot be enabled by filesystem
+permissions alone.
+
+```scheme
+(allow network-outbound (literal "/private/tmp/mokmokd.sock"))
+```
+
+Measured behaviour:
+
+- **Path filters use the resolved path.** `/tmp` is a symlink to `/private/tmp`,
+  so `(literal "/tmp/mokmokd.sock")` is *denied* while
+  `(literal "/private/tmp/mokmokd.sock")` connects. The profile must be rendered
+  from a canonicalised socket path.
+- **The filter is enforced, not advisory.** A clause naming a different socket in
+  the same directory is denied, and `(allow network-outbound)` without a filter
+  admits TCP as well. `literal` is the narrow form; `subpath` deliberately widens
+  to a directory.
+- **Relocating the socket into a session mount does not work.** Granting
+  read-write access to the socket's directory does not permit the connection; the
+  filesystem and network permissions are orthogonal. Only the network clause
+  above connects. The earlier "move the socket into a session mount" alternative
+  is dropped.
 
 ## Permission events
 
@@ -293,6 +320,12 @@ Stated gaps:
 - **macOS Seatbelt is officially unsupported by Apple.** It is functional and
   widely used, but profiles are best-effort and behavior can shift between OS
   releases.
+- **`NetworkPolicy` is an empty struct.** Per-host allow/deny rules, port and
+  method restrictions, the SSRF guard, and the body cap described above are not
+  implemented, and nothing consults the field. Network denial today rests
+  entirely on the OS profile's deny-default. The one exception a sandboxed node
+  needs — its connection to the daemon's UDS — is a profile clause, not a policy
+  field (see above).
 
 ## Testing strategy
 
@@ -330,8 +363,8 @@ Triggers, not dates — none of these steps are taken early:
    lifecycle through `session.*` events. The whole node process is confined by
    one profile and child processes inherit it, so per-command
    `sandbox.permission.*` events are not emitted for a sandboxed node.
-7. Unix-socket reachability research: a sandboxed node must connect to the
-   daemon's UDS, which the current deny-default profile blocks (`NetworkPolicy`
-   is an empty struct). Verify the exact Seatbelt rule for a Unix-domain-socket
-   connection before choosing between an explicit socket allow in the profile
-   and relocating the socket into a session mount.
+7. Unix-socket reachability: a sandboxed node must connect to the daemon's UDS,
+   which the current deny-default profile blocks (`NetworkPolicy` is an empty
+   struct). The Seatbelt rule is settled (see "Reaching a Unix-domain socket
+   from inside the profile"); the remaining work is threading the resolved
+   socket path from policy into `render_profile`.

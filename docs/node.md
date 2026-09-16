@@ -139,9 +139,11 @@ The remaining work is on the daemon side and is tracked in `docs/sandbox.md`:
    with a timeout that waits for exit).
 3. The whole node process is confined by one profile; child processes inherit
    it, so per-command `sandbox.permission.*` events are not emitted.
-4. Reaching the daemon's Unix socket from inside the sandbox requires a profile
-   rule whose exact Seatbelt syntax must be verified before choosing between an
-   explicit socket allow and relocating the socket into a session mount.
+4. Reaching the daemon's Unix socket from inside the sandbox needs a network
+   grant in the profile, not a filesystem one: the rule is
+   `(allow network-outbound (literal "<resolved socket path>"))`, and the path
+   must be canonical (`/private/tmp`, not `/tmp`). Verified against a real
+   daemon; see `docs/sandbox.md`.
 
 ## Stated gaps
 
