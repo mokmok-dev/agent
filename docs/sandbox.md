@@ -307,7 +307,7 @@ session. The daemon binary starts the manager when `--session-command` (with
 | Concern                | Linux                                                        | macOS                                 |
 | ---------------------- | ------------------------------------------------------------ | ------------------------------------- |
 | Filesystem confinement | bubblewrap: read-only host root, read-write write entries; Landlock allowlist fallback | Seatbelt profile `(deny default)`      |
-| Denials                | bubblewrap masks after the binds; Landlock omits the path    | `deny` read rules after the broad read grant |
+| Denials                | bubblewrap masks after the binds; Landlock rejects a deny it cannot subtract | `deny` read rules after the broad read grant |
 | Syscall narrowing      | seccomp deny-list in the fallback (`ptrace`, `io_uring_*`, `bpf`, `userfaultfd`, ...) | not available; profile covers most    |
 | Process isolation      | `--unshare-all`, `--die-with-parent`                          | not available                         |
 | Network                | `--unshare-all` drops the network namespace; the fallback denies TCP with Landlock net rules | `deny default`; only `network.unix_sockets` granted |
@@ -329,12 +329,14 @@ them — stated gaps.
 **When bubblewrap is absent**, the [`agentd-sandbox-helper`](#the-landlock-helper)
 binary applies a Landlock allowlist and a seccomp deny-list before `exec`. The
 executor renders the policy into the path allowlist (system roots read-execute,
-read entries read-only, write roots read-write, `deny` entries omitted because
-Landlock cannot subtract), writes it to the scratch directory, and invokes the
-helper. The helper also handles Landlock network access without allowing it, so
-TCP bind and connect are denied; `AF_UNIX` is unaffected. Network handling needs
-Landlock ABI v4 (Linux 6.7) and is best-effort, so on an older kernel the
-fallback leaves egress unconfined — a stated gap.
+read entries read-only, write roots read-write), writes it to the scratch
+directory, and invokes the helper. A `deny` the allowlist cannot express — one
+nested inside an allowed tree, since Landlock can only grant — makes
+construction fail closed rather than leave the path silently unprotected. The
+helper also handles Landlock network access without allowing it, so TCP bind and
+connect are denied; `AF_UNIX` is unaffected. Network handling needs Landlock ABI
+v4 (Linux 6.7) and is best-effort, so on an older kernel the fallback leaves
+egress unconfined — a stated gap.
 
 ### The Landlock helper
 
@@ -436,10 +438,11 @@ Stated gaps:
 - **Linux denials are coarser than macOS.** With bubblewrap a `deny` nested in a
   write root is masked (hidden) rather than carved out read-only, and a fresh
   protected name can still be created inside a write root. With the Landlock
-  fallback a nested `deny` is not enforced at all (Landlock cannot subtract), and
-  TCP denial needs Landlock ABI v4 (Linux 6.7) — on an older kernel the fallback
-  leaves egress unconfined. `AF_UNIX` sockets are not path-scoped on either
-  backend.
+  fallback a nested `deny` cannot be expressed at all (Landlock can only grant),
+  so construction fails closed and the operator must use bubblewrap or
+  restructure the policy; TCP denial needs Landlock ABI v4 (Linux 6.7), so on an
+  older kernel the fallback leaves egress unconfined. `AF_UNIX` sockets are not
+  path-scoped on either backend.
 
 ## Testing strategy
 
@@ -468,7 +471,8 @@ Modeled on Sheena's methodology and codex's, adapted to Rust:
   outside write failing, environment scrubbing, session streaming, and a
   timeout killing the process group; the Landlock spec, and a real Landlock
   session that confines the filesystem, refuses a denied read, denies TCP, and
-  reports seccomp active through `/proc/self/status`. The Nix build sandbox
+  reports seccomp active through `/proc/self/status`; and that a nested `deny`
+  rejects the Landlock fallback. The Nix build sandbox
   cannot nest bubblewrap, so those spawn tests skip there as on macOS.
 - **Differential tests**: golden files recorded from real bash + coreutils for
   layer 1 behavior, replayed in CI without the recorded host.

@@ -371,6 +371,7 @@ fn landlock_backend(
     resolved: &Resolved,
     scratch: &Path,
 ) -> Result<Backend, SandboxError> {
+    ensure_denies_enforceable(resolved, scratch)?;
     let spec = build_spec(resolved, scratch);
     let spec_path = scratch.join("spec.json");
     fs::write(
@@ -383,6 +384,55 @@ fn landlock_backend(
         helper: helper.to_path_buf(),
         spec_path,
     })
+}
+
+/// Rejects a `deny` the Landlock allowlist cannot express.
+///
+/// Landlock rules can only grant; they cannot subtract. A `deny` nested inside
+/// an allowed tree would therefore be silently unenforced, which violates
+/// deny-by-default, so the fallback fails closed instead: the operator must
+/// use a host with bubblewrap or restructure the policy.
+fn ensure_denies_enforceable(
+    resolved: &Resolved,
+    scratch: &Path,
+) -> Result<(), SandboxError> {
+    let granted = granted_paths(resolved, scratch);
+    for deny in &resolved.denies {
+        if let Some(root) = granted.iter().find(|root| deny.path.starts_with(root)) {
+            return Err(SandboxError::InvalidPolicy(format!(
+                "deny path {:?} is inside allowed {:?}, which the Landlock fallback cannot narrow",
+                deny.path.display().to_string(),
+                root.display().to_string()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The canonical paths the Landlock allowlist grants, for deny comparison.
+fn granted_paths(
+    resolved: &Resolved,
+    scratch: &Path,
+) -> Vec<PathBuf> {
+    let mut granted: Vec<PathBuf> = Vec::new();
+    for path in SYSTEM_ROOTS
+        .iter()
+        .copied()
+        .chain(DEVICES.iter().copied())
+        .chain(["/proc"])
+    {
+        if let Ok(canonical) = PathBuf::from(path).canonicalize() {
+            granted.push(canonical);
+        }
+    }
+    granted.extend(resolved.reads.iter().cloned());
+    granted.extend(resolved.writes.iter().cloned());
+    if let Ok(canonical) = scratch.canonicalize() {
+        granted.push(canonical);
+    }
+    granted.sort();
+    granted.dedup();
+    granted
 }
 
 /// Renders the resolved policy into a Landlock spec.
@@ -820,6 +870,41 @@ mod tests {
 
         assert!(matches!(
             ConfinedProcessExecutor::new(&policy),
+            Err(crate::error::SandboxError::InvalidPolicy(_))
+        ));
+    }
+
+    #[test]
+    fn landlock_rejects_a_nested_deny_it_cannot_enforce() {
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        std::fs::write(host.join(".env"), "secret").expect("env file");
+        // A deny nested in the write root is enforced by bubblewrap (masked)
+        // but cannot be expressed by Landlock, so the fallback fails closed
+        // rather than silently leaving `.env` readable and writable.
+        let policy = Policy {
+            fs: FsPolicy {
+                entries: vec![
+                    FsEntry {
+                        path: host.clone(),
+                        access: Access::Write,
+                    },
+                    FsEntry {
+                        path: host.join(".env"),
+                        access: Access::Deny,
+                    },
+                ],
+                ..FsPolicy::default()
+            },
+            shell: ShellPolicy {
+                workdir: host,
+                ..ShellPolicy::default()
+            },
+            ..Policy::default()
+        };
+
+        assert!(matches!(
+            ConfinedProcessExecutor::with_landlock(&policy, PathBuf::from("helper")),
             Err(crate::error::SandboxError::InvalidPolicy(_))
         ));
     }
