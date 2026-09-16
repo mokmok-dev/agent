@@ -66,7 +66,7 @@ pub use executor::{ConfinedProcessExecutor, ExecResult, Executor};
 pub use policy::{
     Access, EnvAllowlist, EnvVar, FsEntry, FsPolicy, Limits, Policy, PolicyError, ShellPolicy,
 };
-pub use sandbox::Sandbox;
+pub use sandbox::{Approval, Sandbox};
 pub use violation::{
     VIOLATION_FILESYSTEM, VIOLATION_NETWORK, Violation, ViolationKind, ViolationReason,
     classify_violation, violation_event,

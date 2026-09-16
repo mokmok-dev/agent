@@ -22,6 +22,27 @@ pub struct ExecResult {
     /// field says which), and `128 + signal` marks a killed process (a
     /// timeout or output-cap kill lands on `137`).
     pub exit_code: i32,
+    /// Set when an approver denied the command before it ran.
+    pub denied: bool,
+}
+
+impl ExecResult {
+    /// A denial result: the approver refused the command, so nothing ran.
+    #[must_use]
+    pub fn denied(message: &str) -> Self {
+        Self {
+            stdout: String::new(),
+            stderr: format!("[agentd-sandbox] {message}"),
+            exit_code: 126,
+            denied: true,
+        }
+    }
+
+    /// Whether an approver denied the command.
+    #[must_use]
+    pub const fn is_denied(&self) -> bool {
+        self.denied
+    }
 }
 
 /// Runs a command string under the policy bound at construction.
@@ -72,6 +93,7 @@ impl Executor for ConfinedProcessExecutor {
             stdout: String::new(),
             stderr: String::from("[agentd-sandbox] no confinement layer on this platform"),
             exit_code: 126,
+            denied: false,
         }
     }
 }

@@ -30,6 +30,7 @@ impl Executor for RecordingExecutor {
             stdout: String::from("done\n"),
             stderr: String::new(),
             exit_code: 0,
+            denied: false,
         }
     }
 }

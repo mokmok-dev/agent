@@ -1,36 +1,50 @@
-//! The sandbox instance: policy, executor, and the permission event flow bound
-//! together.
+//! The sandbox instance: policy, executor, approval, and the permission event
+//! flow bound together.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use agentd_events::EventLog;
+use agentd_events::{EventLog, LogEntry};
+use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;
 
 use crate::error::SandboxError;
-use crate::events;
+use crate::events::{self, DECISION_AUTO, DECISION_PENDING, PERMISSION_DENIED, PERMISSION_GRANTED};
 use crate::executor::{ConfinedProcessExecutor, ExecResult, Executor};
 use crate::policy::Policy;
 use crate::violation;
 
+/// How a sandbox decides whether a command may run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Approval {
+    /// A static rule grants immediately; no approver is awaited.
+    Auto,
+    /// The request is held `pending` until an approver publishes a matching
+    /// `sandbox.permission.granted`/`denied` (correlated by `request_id`), or
+    /// `timeout` expires, which denies.
+    Required {
+        /// How long to wait for a decision before denying.
+        timeout: Duration,
+    },
+}
+
 /// A running sandbox: an agent's confinement layer for shell commands.
 ///
-/// Every [`Sandbox::exec`] durably appends `requested`, `granted`, and the
-/// terminal `exec.completed` to the log, so audit trails and approval UIs are
-/// ordinary subscribers, and no decision can be lost. The confinement itself is
-/// the OS profile the executor was built with; a command that the OS refuses
-/// returns a non-zero exit code and a `sandbox.violation.*` classifier is the
-/// follow-up.
+/// Every [`Sandbox::exec`] durably appends the decision trail to the log —
+/// `requested`, then `granted` or `denied`, then `exec.completed` — so audit
+/// trails and approval UIs are ordinary subscribers, and no decision can be
+/// lost. The confinement itself is the OS profile the executor was built with.
 pub struct Sandbox {
     id: Uuid,
     agent_id: String,
     executor: Arc<dyn Executor>,
     log: EventLog,
+    approval: Approval,
 }
 
 impl Sandbox {
-    /// Creates a sandbox with the platform's layer-1 confined-process
-    /// executor.
+    /// Creates a sandbox with the platform's layer-1 confined-process executor
+    /// and automatic (static) approval.
     ///
     /// # Errors
     ///
@@ -52,10 +66,12 @@ impl Sandbox {
             agent_id: agent_id.into(),
             executor: Arc::new(executor),
             log,
+            approval: Approval::Auto,
         })
     }
 
-    /// Creates a sandbox that delegates execution to `executor`.
+    /// Creates a sandbox that delegates execution to `executor` with automatic
+    /// approval.
     ///
     /// # Errors
     ///
@@ -75,7 +91,18 @@ impl Sandbox {
             agent_id: agent_id.into(),
             executor,
             log,
+            approval: Approval::Auto,
         })
+    }
+
+    /// Sets the approval mode, e.g. to require a human approver.
+    #[must_use]
+    pub const fn with_approval(
+        mut self,
+        approval: Approval,
+    ) -> Self {
+        self.approval = approval;
+        self
     }
 
     /// The sandbox id, correlating its events in the log.
@@ -90,10 +117,12 @@ impl Sandbox {
         &self.log
     }
 
-    /// Records the decision and runs the command through the executor.
+    /// Records the decision and, when granted, runs the command.
     ///
-    /// The `requested` and `granted` events are appended before the command
-    /// runs, so a command never starts without its decision recorded.
+    /// With [`Approval::Auto`] a static rule grants immediately. With
+    /// [`Approval::Required`] the request is published `pending` and this
+    /// awaits an approver's decision, correlated by `request_id`; a denial or
+    /// timeout returns a denied [`ExecResult`] without spawning anything.
     ///
     /// # Errors
     ///
@@ -104,50 +133,150 @@ impl Sandbox {
         command: &str,
     ) -> Result<ExecResult, SandboxError> {
         let sandbox_id = self.id.to_string();
-        self.log
-            .publish(events::permission_requested(
-                &sandbox_id,
-                &self.agent_id,
-                command,
-            ))
-            .await?;
-        self.log
-            .publish(events::permission_granted(
-                &sandbox_id,
-                &self.agent_id,
-                command,
-            ))
-            .await?;
+        let request_id = Uuid::now_v7().to_string();
+
+        match self.approval {
+            Approval::Auto => {
+                self.publish(events::permission_requested(
+                    &sandbox_id,
+                    &request_id,
+                    &self.agent_id,
+                    command,
+                    DECISION_AUTO,
+                ))
+                .await?;
+                self.publish(events::permission_granted(
+                    &sandbox_id,
+                    &request_id,
+                    &self.agent_id,
+                    command,
+                ))
+                .await?;
+            },
+            Approval::Required { timeout } => {
+                // Subscribe before publishing, so the approver's decision
+                // cannot be missed between the request and the wait.
+                let mut decisions = self.log.subscribe();
+                self.publish(events::permission_requested(
+                    &sandbox_id,
+                    &request_id,
+                    &self.agent_id,
+                    command,
+                    DECISION_PENDING,
+                ))
+                .await?;
+                match await_decision(&mut decisions, &request_id, timeout).await {
+                    // The approver's `granted` is already the durable record.
+                    Decision::Granted => {},
+                    // The approver's `denied` is already the durable record.
+                    Decision::Denied => {
+                        return Ok(ExecResult::denied("the command was not approved"));
+                    },
+                    // No approver answered, so the sandbox records the denial.
+                    Decision::TimedOut => {
+                        self.publish(events::permission_denied(
+                            &sandbox_id,
+                            &request_id,
+                            &self.agent_id,
+                            command,
+                        ))
+                        .await?;
+                        return Ok(ExecResult::denied("the approval request timed out"));
+                    },
+                }
+            },
+        }
+
         let started = Instant::now();
         let result = self.executor.exec(command).await;
         if let Some(violation) = violation::classify_violation(&result) {
-            self.log
-                .publish(violation::violation_event(
-                    &sandbox_id,
-                    &self.agent_id,
-                    command,
-                    &violation,
-                ))
-                .await?;
-        }
-        self.log
-            .publish(events::exec_completed(
+            self.publish(violation::violation_event(
                 &sandbox_id,
+                &request_id,
                 &self.agent_id,
                 command,
-                result.exit_code,
-                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                result.stdout.len() as u64,
-                result.stderr.len() as u64,
+                &violation,
             ))
             .await?;
+        }
+        self.publish(events::exec_completed(
+            &sandbox_id,
+            &request_id,
+            &self.agent_id,
+            command,
+            result.exit_code,
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            result.stdout.len() as u64,
+            result.stderr.len() as u64,
+        ))
+        .await?;
         Ok(result)
+    }
+
+    /// Durably appends `event`, surfacing a failure as [`SandboxError::Publish`].
+    async fn publish(
+        &self,
+        event: agentd_events::Event,
+    ) -> Result<(), SandboxError> {
+        self.log.publish(event).await?;
+        Ok(())
+    }
+}
+
+/// The outcome of waiting for an approver's decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Decision {
+    /// An approver granted the request.
+    Granted,
+    /// An approver denied the request.
+    Denied,
+    /// No decision arrived within the timeout.
+    TimedOut,
+}
+
+/// Waits for a decision on `request_id`.
+///
+/// An unrelated event is ignored; a lagged subscriber keeps waiting; the bus
+/// closing or the timeout is a denial. A decision is trusted only when it
+/// carries the exact `request_id`, so a grant for another request cannot
+/// release this one.
+async fn await_decision(
+    receiver: &mut tokio::sync::broadcast::Receiver<LogEntry>,
+    request_id: &str,
+    timeout: Duration,
+) -> Decision {
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            () = &mut deadline => return Decision::TimedOut,
+            incoming = receiver.recv() => match incoming {
+                Ok(recorded) => {
+                    let event = recorded.event;
+                    let matches = event
+                        .data
+                        .get("request_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(request_id);
+                    if !matches {
+                        continue;
+                    }
+                    match event.r#type.as_str() {
+                        PERMISSION_GRANTED => return Decision::Granted,
+                        PERMISSION_DENIED => return Decision::Denied,
+                        _ => {},
+                    }
+                },
+                Err(RecvError::Lagged(_)) => {},
+                Err(RecvError::Closed) => return Decision::Denied,
+            },
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Sandbox;
+    use super::{Approval, Sandbox};
     use crate::error::SandboxError;
     use crate::executor::{ExecResult, Executor};
     use crate::policy::{Access, FsEntry, FsPolicy, Limits, Policy};
@@ -187,6 +316,7 @@ mod tests {
                 stdout: String::from("ok\n"),
                 stderr: String::new(),
                 exit_code: 0,
+                denied: false,
             }
         }
     }
@@ -249,12 +379,125 @@ mod tests {
                 crate::events::EXEC_COMPLETED,
             ]
         );
+        let request_id = events[0].data["request_id"]
+            .as_str()
+            .expect("a request id")
+            .to_string();
         for event in &events {
             assert_eq!(event.data["sandbox_id"], sandbox.id().to_string());
+            assert_eq!(event.data["request_id"], request_id);
             assert_eq!(event.data["subject"], "cargo test --workspace");
         }
         assert_eq!(events[2].data["exit_code"], 0);
-        assert!(events[2].data["duration_ms"].as_u64().is_some());
+    }
+
+    /// Spawns an approver that grants or denies the first request it sees.
+    fn spawn_approver(
+        log: &EventLog,
+        decision: &'static str,
+    ) -> tokio::task::JoinHandle<()> {
+        let mut receiver = log.subscribe();
+        let publisher = log.clone();
+        tokio::spawn(async move {
+            while let Ok(recorded) = receiver.recv().await {
+                let event = recorded.event;
+                let matches = event
+                    .data
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str);
+                if event.r#type == crate::events::PERMISSION_REQUESTED
+                    && let Some(request_id) = matches
+                {
+                    let sandbox_id = event.data["sandbox_id"].as_str().unwrap_or_default();
+                    let agent_id = event.data["agent_id"].as_str().unwrap_or_default();
+                    let subject = event.data["subject"].as_str().unwrap_or_default();
+                    let reply = if decision == "grant" {
+                        crate::events::permission_granted(sandbox_id, request_id, agent_id, subject)
+                    } else {
+                        crate::events::permission_denied(sandbox_id, request_id, agent_id, subject)
+                    };
+                    let _ = publisher.publish(reply).await;
+                    return;
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn required_approval_runs_when_an_approver_grants() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let log = open_log(dir.path());
+        let executor = RecordingExecutor::new();
+        let sandbox = Sandbox::with_executor(&policy(), log.clone(), "coder-1", executor.clone())
+            .expect("valid policy")
+            .with_approval(Approval::Required {
+                timeout: Duration::from_secs(5),
+            });
+        let mut subscriber = sandbox.log().subscribe();
+        let approver = spawn_approver(&log, "grant");
+
+        let result = sandbox.exec("ls").await.expect("exec should succeed");
+
+        assert_eq!(executor.count(), 1);
+        assert!(!result.is_denied());
+        let events = drain(&mut subscriber);
+        let types: Vec<&str> = events.iter().map(|event| event.r#type.as_str()).collect();
+        assert_eq!(
+            types,
+            [
+                crate::events::PERMISSION_REQUESTED,
+                crate::events::PERMISSION_GRANTED,
+                crate::events::EXEC_COMPLETED,
+            ]
+        );
+        assert_eq!(events[0].data["decision"], crate::events::DECISION_PENDING);
+        approver.await.expect("approver should finish");
+    }
+
+    #[tokio::test]
+    async fn required_approval_denies_and_spawns_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let log = open_log(dir.path());
+        let executor = RecordingExecutor::new();
+        let sandbox = Sandbox::with_executor(&policy(), log.clone(), "coder-1", executor.clone())
+            .expect("valid policy")
+            .with_approval(Approval::Required {
+                timeout: Duration::from_secs(5),
+            });
+        let mut subscriber = sandbox.log().subscribe();
+        let approver = spawn_approver(&log, "deny");
+
+        let result = sandbox.exec("ls").await.expect("exec should succeed");
+
+        assert!(result.is_denied());
+        assert_eq!(executor.count(), 0);
+        let events = drain(&mut subscriber);
+        let types: Vec<&str> = events.iter().map(|event| event.r#type.as_str()).collect();
+        assert_eq!(
+            types,
+            [
+                crate::events::PERMISSION_REQUESTED,
+                crate::events::PERMISSION_DENIED,
+            ]
+        );
+        approver.await.expect("approver should finish");
+    }
+
+    #[tokio::test]
+    async fn required_approval_times_out_and_denies() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let executor = RecordingExecutor::new();
+        let sandbox =
+            Sandbox::with_executor(&policy(), open_log(dir.path()), "coder-1", executor.clone())
+                .expect("valid policy")
+                .with_approval(Approval::Required {
+                    timeout: Duration::from_millis(50),
+                });
+
+        let result = sandbox.exec("ls").await.expect("exec should succeed");
+
+        assert!(result.is_denied());
+        assert_eq!(executor.count(), 0);
     }
 
     /// An executor that always reports an OS denial.
@@ -270,6 +513,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::from("touch: /etc/blocked: Operation not permitted"),
                 exit_code: 1,
+                denied: false,
             }
         }
     }

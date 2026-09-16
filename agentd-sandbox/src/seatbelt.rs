@@ -151,6 +151,7 @@ impl ConfinedProcessExecutor {
             stdout: String::new(),
             stderr: format!("[agentd-sandbox] {message}"),
             exit_code: EXIT_CANNOT_EXECUTE,
+            denied: false,
         }
     }
 
@@ -260,6 +261,7 @@ impl ConfinedProcessExecutor {
             stdout,
             stderr,
             exit_code,
+            denied: false,
         }
     }
 }

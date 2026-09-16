@@ -27,12 +27,14 @@ pub const ACTION_EXEC: &str = "exec";
 
 fn permission_data(
     sandbox_id: &str,
+    request_id: &str,
     agent_id: &str,
     subject: &str,
     decision: &str,
 ) -> serde_json::Value {
     json!({
         "sandbox_id": sandbox_id,
+        "request_id": request_id,
         "agent_id": agent_id,
         "resource": RESOURCE_SHELL,
         "action": ACTION_EXEC,
@@ -45,12 +47,14 @@ fn permission_data(
 #[must_use]
 pub fn permission_requested(
     sandbox_id: &str,
+    request_id: &str,
     agent_id: &str,
     subject: &str,
+    decision: &str,
 ) -> Event {
     Event::new(
         PERMISSION_REQUESTED,
-        permission_data(sandbox_id, agent_id, subject, DECISION_AUTO),
+        permission_data(sandbox_id, request_id, agent_id, subject, decision),
     )
 }
 
@@ -58,12 +62,13 @@ pub fn permission_requested(
 #[must_use]
 pub fn permission_granted(
     sandbox_id: &str,
+    request_id: &str,
     agent_id: &str,
     subject: &str,
 ) -> Event {
     Event::new(
         PERMISSION_GRANTED,
-        permission_data(sandbox_id, agent_id, subject, "granted"),
+        permission_data(sandbox_id, request_id, agent_id, subject, "granted"),
     )
 }
 
@@ -71,12 +76,13 @@ pub fn permission_granted(
 #[must_use]
 pub fn permission_denied(
     sandbox_id: &str,
+    request_id: &str,
     agent_id: &str,
     subject: &str,
 ) -> Event {
     Event::new(
         PERMISSION_DENIED,
-        permission_data(sandbox_id, agent_id, subject, "denied"),
+        permission_data(sandbox_id, request_id, agent_id, subject, "denied"),
     )
 }
 
@@ -87,6 +93,7 @@ pub fn permission_denied(
 #[must_use]
 pub fn exec_completed(
     sandbox_id: &str,
+    request_id: &str,
     agent_id: &str,
     subject: &str,
     exit_code: i32,
@@ -96,6 +103,7 @@ pub fn exec_completed(
 ) -> Event {
     let data = json!({
         "sandbox_id": sandbox_id,
+        "request_id": request_id,
         "agent_id": agent_id,
         "resource": RESOURCE_SHELL,
         "action": ACTION_EXEC,
@@ -120,7 +128,7 @@ mod tests {
 
     #[test]
     fn requested_event_carries_the_contract_fields() {
-        let event = permission_requested("sbx-1", "coder-1", "cargo test");
+        let event = permission_requested("sbx-1", "req-1", "coder-1", "cargo test", DECISION_AUTO);
 
         assert_eq!(event.r#type, PERMISSION_REQUESTED);
         assert_eq!(event.source, DAEMON_SOURCE);
@@ -129,6 +137,7 @@ mod tests {
             event.data,
             json!({
                 "sandbox_id": "sbx-1",
+                "request_id": "req-1",
                 "agent_id": "coder-1",
                 "resource": RESOURCE_SHELL,
                 "action": ACTION_EXEC,
@@ -140,8 +149,8 @@ mod tests {
 
     #[test]
     fn decision_events_flip_the_type_and_decision() {
-        let granted = permission_granted("sbx-1", "coder-1", "ls");
-        let denied = permission_denied("sbx-1", "coder-1", "ls");
+        let granted = permission_granted("sbx-1", "req-1", "coder-1", "ls");
+        let denied = permission_denied("sbx-1", "req-1", "coder-1", "ls");
 
         assert_eq!(granted.r#type, PERMISSION_GRANTED);
         assert_eq!(granted.data["decision"], json!("granted"));
@@ -151,13 +160,14 @@ mod tests {
 
     #[test]
     fn completed_event_reports_the_terminal_state() {
-        let event = exec_completed("sbx-1", "coder-1", "ls", 0, 12, 32, 0);
+        let event = exec_completed("sbx-1", "req-1", "coder-1", "ls", 0, 12, 32, 0);
 
         assert_eq!(event.r#type, EXEC_COMPLETED);
         assert_eq!(
             event.data,
             json!({
                 "sandbox_id": "sbx-1",
+                "request_id": "req-1",
                 "agent_id": "coder-1",
                 "resource": RESOURCE_SHELL,
                 "action": ACTION_EXEC,

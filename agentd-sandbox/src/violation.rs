@@ -142,6 +142,7 @@ pub fn classify_violation(result: &ExecResult) -> Option<Violation> {
 #[must_use]
 pub fn violation_event(
     sandbox_id: &str,
+    request_id: &str,
     agent_id: &str,
     subject: &str,
     violation: &Violation,
@@ -152,6 +153,7 @@ pub fn violation_event(
     };
     let mut data = json!({
         "sandbox_id": sandbox_id,
+        "request_id": request_id,
         "agent_id": agent_id,
         "resource": RESOURCE_SHELL,
         "action": ACTION_EXEC,
@@ -266,6 +268,7 @@ mod tests {
             stdout: String::from(stdout),
             stderr: String::from(stderr),
             exit_code,
+            denied: false,
         }
     }
 
@@ -353,7 +356,7 @@ mod tests {
             "touch: /etc/agentd: Operation not permitted",
         ))
         .expect("a denial");
-        let event = violation_event("sbx-1", "coder-1", "touch /etc/agentd", &violation);
+        let event = violation_event("sbx-1", "req-1", "coder-1", "touch /etc/agentd", &violation);
 
         assert_eq!(event.r#type, VIOLATION_FILESYSTEM);
         assert_eq!(event.data["sandbox_id"], "sbx-1");
@@ -367,7 +370,7 @@ mod tests {
     fn a_network_event_uses_the_network_type() {
         let violation = classify_violation(&result(7, "", "connect: Operation not permitted"))
             .expect("a denial");
-        let event = violation_event("sbx-1", "coder-1", "curl example.com", &violation);
+        let event = violation_event("sbx-1", "req-1", "coder-1", "curl example.com", &violation);
 
         assert_eq!(event.r#type, VIOLATION_NETWORK);
         assert_eq!(event.data["kind"], "network");
