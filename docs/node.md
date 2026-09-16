@@ -139,15 +139,11 @@ The remaining work is on the daemon side and is tracked in `docs/sandbox.md`:
    with a timeout that waits for exit).
 3. The whole node process is confined by one profile; child processes inherit
    it, so per-command `sandbox.permission.*` events are not emitted.
-4. Reaching the daemon's Unix socket from inside the sandbox is
-   platform-specific and the two mechanisms are opposites. On macOS a UDS
-   connection is a network operation, so the profile needs
-   `(allow network-outbound (literal "<resolved socket path>"))` and a
-   filesystem grant does nothing; the path must be canonical (`/private/tmp`,
-   not `/tmp`). On Linux it is a file lookup that Landlock cannot restrict
-   before ABI 9, so the socket is reached through the filesystem and no
-   confinement is claimed. The connection is deliberately not confined: see
-   `docs/sandbox.md`.
+4. The node's connection to the daemon needs no new mechanism: the profile
+   opens outbound connections, so a sandboxed node reaches the socket without a
+   per-socket grant, and nothing about the connection is confined. The node also
+   needs no read of host files, and the database lives in its own session mount,
+   so the file-effect policy is unchanged.
 
 ## Stated gaps
 

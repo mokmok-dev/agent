@@ -31,8 +31,8 @@ architecture.
 
 Goals:
 
-- An agent can run bash commands with filesystem, network, and resource access
-  confined by a `Policy`.
+- An agent can run bash commands with filesystem and resource access confined by
+  a `Policy`, and can reach remote services (its model provider above all).
 - VFS and shell permissions are configurable per sandbox instance.
 - Permission grants and denials are durable events in the log, enabling
   human-in-the-loop approval by any WS client.
@@ -44,19 +44,25 @@ Non-goals (stated honestly, per the Sheena precedent):
   caps are best-effort there.
 - The sandbox is not a boundary for hostile native code. It confines the tool
   calls an agent *requests* against a configured policy.
-- **No confinement of the sandboxed node's own connection to the daemon.** A
-  node that runs inside the sandbox reaches the daemon's UDS because the socket
-  path is mounted in, not because the profile grants it; the connection is
-  unconfined and unauthenticated, and that is by design (see "Reaching a
-  Unix-domain socket from inside the profile").
+- **No confinement of network reachability.** A confined command may open any
+  outbound connection. A coding agent must reach its inference provider, and a
+  sandboxed node must reach the daemon over a Unix socket; confining
+  reachability would break both, and the daemon has no client authentication, so
+  reachability is not a boundary to begin with. Inbound connections (a listening
+  socket) stay denied. What bounds an outbound connection is therefore the
+  *read* side: see "Read confinement" below.
+- **Cedar is not adopted.** A policy language was considered for the file-effect
+  rules and dropped: the rules are a pair of path lists, and the layer-1 profile
+  is rendered from them directly. Revisit only if policies must be authored
+  outside the Rust code.
 
 ## Design principles
 
-1. **Deny-by-default.** Nothing runs, no file is touched, no socket is opened
+1. **Deny-by-default.** Nothing runs, no file is written, no listener is opened
    until the policy opts in. The zero value of a `Policy` is fully inert.
 2. **Single virtual resource plane.** Shell commands, non-shell tools, and any
-   future in-process execution all see the *same* VFS, the *same* network
-   policy, and the *same* limits. There is exactly one path to the filesystem.
+   future in-process execution all see the *same* VFS, the *same* limits, and
+   the *same* file-effect policy. There is exactly one path to the filesystem.
 3. **Swappable executors.** The shell execution strategy sits behind an
    `Executor` trait. Layer 1 maps the policy onto OS-level confinement
    (Landlock/seccomp on Linux, Seatbelt on macOS). A future layer 2 may add an
@@ -75,9 +81,9 @@ Non-goals (stated honestly, per the Sheena precedent):
 
 | Domain    | What it controls                                                                 |
 | --------- | -------------------------------------------------------------------------------- |
-| `fs`      | VFS mounts: read-only, read-write, overlay; path deny/hide globs; byte caps      |
+| `fs`      | VFS mounts: read-only, read-write, overlay; path deny/hide globs; layer-1 read denials; byte caps |
 | `shell`   | Allowed command prefixes, environment allowlist, working directory, login shells |
-| `network` | Per-host allow/deny rules, port/method restrictions, SSRF guard, body cap        |
+| `network` | Nothing configurable; outbound is open, inbound denied                           |
 | `limits`  | Wall-clock timeout, command count, output bytes, best-effort memory cap          |
 
 ```rust
@@ -92,6 +98,7 @@ pub struct FsPolicy {
     pub mounts: Vec<Mount>,        // ReadOnly / ReadWrite / Overlay over a host dir, or Mem
     pub refuse: Vec<Pattern>,      // access denied (e.g. ".env", "*.pem", ".git/**")
     pub hide: Vec<Pattern>,        // paths appear absent, including in listings
+    pub deny_read: Vec<PathBuf>,   // host paths the OS profile withholds (absolute; not globs)
     pub max_total_bytes: Option<u64>,
     pub max_file_bytes: Option<u64>,
 }
@@ -110,10 +117,46 @@ pub struct Limits {
 }
 ```
 
-Network follows Sheena's rule set: deny rules win over allow rules, unmatched
-destinations are denied, allow rules can restrict port/method, and the SSRF
-guard rejects loopback/link-local/private resolved addresses (inspected at
-connect time, defeating DNS rebinding).
+`refuse`/`hide` and `deny_read` are different mechanisms and both are needed.
+The globs screen *virtual* paths at the VFS layer, so they shape what the agent's
+tool calls see. Layer 1 spawns real host binaries, which never touch the VFS, so
+a glob cannot withhold anything from them — `deny_read` is rendered into the OS
+profile instead. A path that must not leak to a spawned command belongs in
+`deny_read`; a path the agent should not even see belongs in `refuse`/`hide`.
+
+Network has no configurable surface. Outbound connections are allowed and
+inbound ones are denied at the OS level; per-host rules and an SSRF guard are
+not implemented, and are not planned while reachability stays a non-goal.
+
+### Read confinement
+
+Reads are granted broadly on purpose and then narrowed:
+
+- **Broad grant.** On macOS 26 a filtered read grant makes platform binaries
+  abort inside `dyld4::CacheFinder`, measured as a `SIGABRT` before the shell
+  even starts. Narrowing the grant to system directories does not work, so the
+  profile grants reads at `/`.
+- **Explicit denial.** Seatbelt evaluates a deny ahead of any matching allow, so
+  `FsPolicy::deny_read` entries are emitted as denials after the broad grants.
+  Data, metadata, and extended attributes are all denied, because withholding
+  the contents alone would still expose names and sizes through `stat`. This
+  *does* hold against a spawned host binary, and is verified by tests that read
+  and stat a secret file through a real process.
+- **Entries are validated.** An entry must be an absolute host path that
+  resolves, and must not cover the workdir, an executable directory, or the
+  sandbox scratch directory. A failure at any of these is an
+  `InvalidPolicy` error at construction, not a silently-ignored entry: dropping
+  a denial would leave a weaker sandbox than the operator configured, which is
+  the opposite of dropping a write *grant* (where the sandbox merely narrows).
+  `~` is a shell expansion and is *not* performed on a path, so entries must be
+  written out absolutely.
+- **Canonicalisation is required.** The profile matches resolved paths, so
+  `/tmp` is `/private/tmp`. Both the denials and the protected paths they are
+  checked against are resolved before comparison.
+
+With no `deny_read` entries, reads stay entirely unconfined at the OS level and
+only the VFS screens them — the stated gap below. The default is empty because
+only the operator knows what their host considers secret.
 
 ## Architecture
 
@@ -199,7 +242,7 @@ Layer 1 (`ConfinedProcessExecutor`) maps policy to OS mechanisms:
 | Filesystem confinement | Landlock ruleset (per-mount read/write rights)           | Seatbelt profile `(deny default)`           |
 | Syscall narrowing      | seccomp filter (block ptrace, mount, namespace ops, ...) | not available; profile covers most          |
 | Process isolation      | optional namespace                                       | not available                               |
-| Network isolation      | Landlock TCP rules (ABI 4+); UDS only from ABI 9         | no network clause emitted (deny by default) |
+| Network isolation      | not handled (outbound open)                              | outbound open; inbound denied               |
 | Memory / rlimits       | `prlimit` + optional cgroups v2                          | `setrlimit` (best-effort)                   |
 | Host binary control    | confined `PATH` built from the shell allowlist           | same                                        |
 
@@ -207,73 +250,6 @@ Because layer 1 spawns real binaries from the host, command-prefix
 allowlisting is policy-enforced in-process *and* the confinement profile
 denies everything outside the intended mounts — the command may be real, but
 its reach is not.
-
-### Reaching a Unix-domain socket from inside the profile
-
-A sandboxed node must connect to the daemon's UDS. The mechanism differs by
-platform, and in opposite ways — a UDS connection is a *network* operation to
-Seatbelt but a *filesystem lookup* to Landlock, and Landlock cannot yet police
-it.
-
-#### macOS: a network grant is the only way
-
-Verified against a real daemon on macOS 26.6:
-
-```scheme
-(allow network-outbound (literal "/private/tmp/mokmokd.sock"))
-```
-
-- **Path filters use the resolved path.** `/tmp` is a symlink to `/private/tmp`,
-  so `(literal "/tmp/mokmokd.sock")` is *denied* while
-  `(literal "/private/tmp/mokmokd.sock")` connects. The profile must be rendered
-  from a canonicalised socket path.
-- **The filter is enforced, not advisory.** A clause naming a different socket in
-  the same directory is denied, and `(allow network-outbound)` without a filter
-  admits TCP as well. `literal` is the narrow form; `subpath` deliberately widens
-  to a directory.
-- **A filesystem grant does not help.** Granting read-write access to the
-  socket's directory does not permit the connection — the filesystem and network
-  permissions are orthogonal, so the socket stays unreachable until the network
-  clause above is present.
-
-#### Linux: Landlock does not cover it (ABI < 9)
-
-`connect(2)` on a pathname UNIX socket is governed by
-`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, which **only exists from Landlock ABI 9**.
-On an older ABI the kernel cannot express the restriction at all, so a
-deny-by-default ruleset does not stop the connection.
-
-Measured on kernel 6.8 (ABI 4) with a ruleset that denies all filesystem access
-except `/usr`, `/lib`, `/etc`, `/bin`, `/sbin`:
-
-| Operation on the ungranted socket directory | Result |
-| ------------------------------------------- | ------ |
-| `listdir`                                   | `EACCES` (denied, as intended) |
-| `connect(2)` to the socket                  | **succeeds** |
-
-The lesson is the opposite of macOS: on Linux the socket is reached through the
-filesystem like any other file, and the file API is the only lever an older ABI
-gives.
-
-#### Decision: the node's socket connection is not confined
-
-Neither mechanism is used to confine the connection, and no attempt is made to
-narrow it to one socket path on Linux. The reasoning:
-
-- On Linux a deny-by-default Landlock ruleset cannot stop the connection before
-  ABI 9, and the tested Ubuntu 24.04 kernel (6.8, ABI 4) is one of them.
-  Requiring ABI 9 would exclude current LTS kernels to protect a channel the
-  threat model does not treat as hostile.
-- The daemon has no client authentication, so "which socket may the sandbox
-  reach" is not a security boundary to begin with — anything that can connect
-  can already subscribe to and publish events.
-- The sandbox confines the tool calls an agent *requests*, not the node's own
-  transport. A node reaching its daemon is legitimate traffic.
-
-So the socket path is an explicit, platform-neutral policy input, and each
-backend maps it as its platform allows: on macOS to the narrowest available
-network clause, on Linux to mount reachability with no confinement claimed. The
-shared contract is the path, not the mechanism.
 
 ## Permission events
 
@@ -350,10 +326,11 @@ Prevented:
   trait-level enforcement everywhere else).
 - Host environment leakage (env is an allowlist; the host environ is never
   inherited).
-- SSRF to private/loopback/link-local addresses; cross-host redirect leakage.
 - Fork bombs and runaway loops (command count + timeout).
 - Silent host contamination by default (Mem/Overlay mounts; explicit
   ReadWriteMount is the only write path to the host).
+- Reads of the paths named in `FsPolicy::deny_read`, held against a spawned host
+  binary (verified end to end; see "Read confinement").
 
 Stated gaps:
 
@@ -366,14 +343,19 @@ Stated gaps:
 - **macOS Seatbelt is officially unsupported by Apple.** It is functional and
   widely used, but profiles are best-effort and behavior can shift between OS
   releases.
-- **`NetworkPolicy` is an empty struct.** Per-host allow/deny rules, port and
-  method restrictions, the SSRF guard, and the body cap described above are not
-  implemented, and nothing consults the field. Network denial today rests
-  entirely on the OS profile's deny-default.
-- **The sandboxed node's socket connection is unconfined and unauthenticated**
-  (see "Decision: the node's socket connection is not confined"). This is a
-  conscious non-goal, not an oversight: the daemon has no client authentication,
-  and Landlock cannot restrict a pathname socket connection before ABI 9.
+- **`NetworkPolicy` is an empty struct.** Nothing is configurable and nothing
+  consults the field: reachability is a stated non-goal. Outbound is open, so a
+  confined command may send data anywhere.
+- **Reads are unconfined unless `deny_read` names them.** With an empty
+  `deny_read`, a spawned host binary can read any file the user can, including
+  credentials; combined with open outbound that is an exfiltration path. The
+  mechanism to close it exists and is verified; supplying the paths is the
+  operator's responsibility.
+- **A hard link inside a writable mount aliases a file outside it.** The
+  write allow-list matches paths, so a pre-existing hard link under the mount
+  can be written through and the outside file changes. Symlinks are refused
+  (verified); hard links are not. Creating the link requires access outside the
+  sandbox, so it is a precondition, not something a confined command can set up.
 
 ## Testing strategy
 
@@ -381,7 +363,8 @@ Modeled on Sheena's methodology, adapted to Rust:
 
 - **Category-organized security tests**: sandbox escape (`../`, symlink out of
   mount, `/proc`, `/etc`), limits (DoS, output flood, command count, timeout),
-  network (SSRF probes, default-deny), env leakage.
+  network reachability, env leakage, and `deny_read` withholding a secret from a
+  real spawned process.
 - **Differential tests**: golden files recorded from real bash + coreutils for
   layer 1 behavior, replayed in CI without needing the recorded host.
 - **Permission flow tests**: end-to-end through the log — `requested` →
@@ -410,9 +393,6 @@ Triggers, not dates — none of these steps are taken early:
 6. A session manager in `agentd` that launches a sandboxed node and reports
    lifecycle through `session.*` events. The whole node process is confined by
    one profile and child processes inherit it, so per-command
-   `sandbox.permission.*` events are not emitted for a sandboxed node.
-7. Unix-socket reachability: a sandboxed node must connect to the daemon's UDS.
-   The mechanism is settled per platform and the connection is deliberately not
-   confined (see "Reaching a Unix-domain socket from inside the profile"). The
-   remaining work is expressing the socket path as a policy input and letting
-   each backend map it — a network clause on macOS, mount reachability on Linux.
+   `sandbox.permission.*` events are not emitted for a sandboxed node. The node's
+   connection to the daemon needs no separate work: outbound is open, so the
+   connection is not confined on either platform.

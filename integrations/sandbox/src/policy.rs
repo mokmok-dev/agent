@@ -1,9 +1,11 @@
 //! The sandbox policy model.
 //!
 //! A [`Policy`] is deny-by-default in every domain: the zero value mounts
-//! nothing, allows no command, allows no network access, and imposes safe
-//! resource limits. Policies serialize into JSON so they can arrive as event
-//! data; every field defaults to its inert value when absent.
+//! nothing, allows no command, and imposes safe resource limits. Outbound
+//! network is the one deliberate exception — it stays open so a command can
+//! reach a remote service — and reads are narrowed from the broad OS grant only
+//! by [`FsPolicy::deny_read`]. Policies serialize into JSON so they can arrive
+//! as event data; every field defaults to its inert value when absent.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -36,6 +38,24 @@ pub struct FsPolicy {
     pub refuse: Vec<Pattern>,
     /// Paths that appear absent, including in directory listings.
     pub hide: Vec<Pattern>,
+    /// Host paths the OS confinement layer must not let a spawned command read,
+    /// e.g. `/home/dev/.ssh`.
+    ///
+    /// [`refuse`](Self::refuse) and [`hide`](Self::hide) screen *virtual* paths
+    /// at the [`Vfs`](crate::vfs::Vfs) layer, which a spawned host binary
+    /// bypasses; this list is rendered into the OS profile, so it holds for real
+    /// processes. Honoured by the macOS layer-1 executor (the
+    /// [`ConfinedProcessExecutor`](crate::ConfinedProcessExecutor)) only: a
+    /// custom [`Executor`](crate::executor::Executor) may ignore it, and it
+    /// never affects [`Vfs`](crate::vfs::Vfs) reads.
+    ///
+    /// Entries are absolute host paths, not globs and not `~`-prefixed: `~` is a
+    /// shell expansion that a path type does not perform. Each must resolve at
+    /// construction, or the sandbox fails closed rather than withholding
+    /// nothing. A path covering the workdir, an executable directory, or the
+    /// sandbox scratch directory is rejected, since every command needs those.
+    /// Empty by default — the operator names what their host considers secret.
+    pub deny_read: Vec<PathBuf>,
     /// Cap on the total bytes written through the sandbox.
     pub max_total_bytes: Option<u64>,
     /// Cap on the bytes of a single file written through the sandbox.
@@ -176,11 +196,14 @@ pub struct EnvVar {
 
 /// Network policy.
 ///
-/// This version has no configurable surface: spawned commands are denied
-/// network access at the OS level as part of the deny-default confinement
-/// profile, and no in-process consumer performs network access yet.
-/// Per-host rules and the SSRF guard arrive with the first consumer; see
-/// `docs/sandbox.md`.
+/// This version has no configurable surface. The confinement profile is
+/// deny-by-default for network operations but opens *outbound* connections, so
+/// a spawned command can reach an inference provider or other remote service;
+/// *inbound* connections (a listening socket) stay denied. Per-host rules and
+/// an SSRF guard are not implemented — network reachability is deliberately not
+/// confined, because a sandboxed node must reach the daemon's Unix socket and
+/// an agent must reach its model provider. See `docs/sandbox.md`, including the
+/// file-read denials that bound what such a connection could exfiltrate.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NetworkPolicy {}
 
@@ -284,6 +307,7 @@ mod tests {
                 }],
                 refuse: vec![Pattern::new(".env"), Pattern::new("*.pem")],
                 hide: vec![Pattern::new(".git/**")],
+                deny_read: vec![PathBuf::from("/home/dev/.ssh")],
                 max_total_bytes: Some(1 << 30),
                 max_file_bytes: Some(1 << 20),
             },

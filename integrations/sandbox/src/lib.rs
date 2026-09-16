@@ -3,10 +3,13 @@
 //! never directly against the host — and every permission decision is durably
 //! appended to the event log as a `CloudEvent`.
 //!
-//! The crate is deny-by-default in all three planes: the [`Policy`] zero value
-//! mounts nothing, allows no command, and allows no network access; the VFS
-//! implementations confine every path operation to their mounts; and the
-//! executor translates what remains into an OS confinement profile.
+//! The crate is deny-by-default for what a command can *do*: the [`Policy`]
+//! zero value mounts nothing, allows no command, and opens no listener. Outbound
+//! network is the deliberate exception — it stays open so a command can reach a
+//! remote service — and reads are narrowed only by
+//! [`FsPolicy::deny_read`](policy::FsPolicy::deny_read); see [`NetworkPolicy`].
+//! The VFS implementations confine every path operation to their mounts, and
+//! the executor translates what remains into an OS confinement profile.
 //!
 //! # Example
 //!
