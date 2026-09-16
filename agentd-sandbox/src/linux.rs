@@ -156,12 +156,26 @@ impl ConfinedProcessExecutor {
         policy: &Policy,
         helper: PathBuf,
     ) -> Result<Self, SandboxError> {
-        Self::build(policy, Some(helper))
+        Self::build(policy, Some(ForcedBackend::Landlock(helper)))
+    }
+
+    /// Builds the executor around a specific bubblewrap path, bypassing the
+    /// availability probe. Tests use this to render without `bwrap` installed.
+    ///
+    /// # Errors
+    ///
+    /// As [`new`](Self::new).
+    #[cfg(test)]
+    fn with_bwrap(
+        policy: &Policy,
+        bwrap: PathBuf,
+    ) -> Result<Self, SandboxError> {
+        Self::build(policy, Some(ForcedBackend::Bubblewrap(bwrap)))
     }
 
     fn build(
         policy: &Policy,
-        forced_helper: Option<PathBuf>,
+        forced: Option<ForcedBackend>,
     ) -> Result<Self, SandboxError> {
         policy
             .validate()
@@ -177,7 +191,7 @@ impl ConfinedProcessExecutor {
                 return Err(error);
             },
         };
-        let backend = match select_backend(policy, forced_helper, &resolved, &scratch) {
+        let backend = match select_backend(policy, forced, &resolved, &scratch) {
             Ok(backend) => backend,
             Err(error) => {
                 let _ = fs::remove_dir_all(&scratch);
@@ -321,21 +335,34 @@ impl crate::executor::Executor for ConfinedProcessExecutor {
     }
 }
 
-/// Chooses the backend: a forced helper, else `bwrap`, else the Landlock helper.
+/// A backend chosen by a test instead of by availability.
+///
+/// Only the test-only constructors build these variants, so they look dead in a
+/// normal build.
+#[cfg_attr(not(test), allow(dead_code))]
+enum ForcedBackend {
+    Bubblewrap(PathBuf),
+    Landlock(PathBuf),
+}
+
+/// Chooses the backend: a forced one, else `bwrap`, else the Landlock helper.
 fn select_backend(
     policy: &Policy,
-    forced_helper: Option<PathBuf>,
+    forced: Option<ForcedBackend>,
     resolved: &Resolved,
     scratch: &Path,
 ) -> Result<Backend, SandboxError> {
-    if let Some(helper) = forced_helper {
-        return landlock_backend(&helper, resolved, scratch);
+    match forced {
+        Some(ForcedBackend::Bubblewrap(bwrap)) => Ok(Backend::Bubblewrap(bwrap)),
+        Some(ForcedBackend::Landlock(helper)) => landlock_backend(&helper, resolved, scratch),
+        None => {
+            if let Some(bwrap) = find_on_path(BWRAP, Some(&policy.fs)) {
+                return Ok(Backend::Bubblewrap(bwrap));
+            }
+            let helper = find_helper(&policy.fs)?;
+            landlock_backend(&helper, resolved, scratch)
+        },
     }
-    if let Some(bwrap) = find_on_path(BWRAP, Some(&policy.fs)) {
-        return Ok(Backend::Bubblewrap(bwrap));
-    }
-    let helper = find_helper(&policy.fs)?;
-    landlock_backend(&helper, resolved, scratch)
 }
 
 /// Writes the Landlock spec and returns the helper backend.
@@ -724,7 +751,9 @@ mod tests {
             },
             ..Policy::default()
         };
-        let executor = executor(&policy);
+        let executor =
+            ConfinedProcessExecutor::with_bwrap(&policy, PathBuf::from("/usr/bin/bwrap"))
+                .expect("the policy renders");
 
         let args = args(&executor.std_command("true"));
         // Reads are broad: the host root is bound read-only.
@@ -750,7 +779,9 @@ mod tests {
         let host = dir.path().canonicalize().expect("canonical tempdir");
         std::fs::create_dir_all(host.join(".git/hooks")).expect("git dir");
         let policy = workdir_policy(&host);
-        let executor = executor(&policy);
+        let executor =
+            ConfinedProcessExecutor::with_bwrap(&policy, PathBuf::from("/usr/bin/bwrap"))
+                .expect("the policy renders");
 
         let args = args(&executor.std_command("true"));
         let git = host.join(".git").display().to_string();
@@ -814,9 +845,13 @@ mod tests {
                 .any(|rule| rule.path == host && matches!(rule.access, PathAccess::Write)),
             "the write root must be granted: {spec:?}"
         );
+        // The exact system roots depend on the host layout (e.g. `/usr` may be
+        // absent on a minimal image), so assert the read-execute class is
+        // present rather than a specific directory.
         assert!(
-            spec.paths.iter().any(|rule| rule.path == Path::new("/usr")
-                && matches!(rule.access, PathAccess::ReadExecute)),
+            spec.paths
+                .iter()
+                .any(|rule| matches!(rule.access, PathAccess::ReadExecute)),
             "the system roots must be granted read-execute: {spec:?}"
         );
     }
