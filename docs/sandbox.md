@@ -236,18 +236,34 @@ pub trait Executor: Send + Sync {
     /// The policy is bound at executor construction, not per call, so a
     /// running executor cannot widen its own permissions.
     async fn exec(&self, command: &str) -> ExecResult;
+    /// Spawns a long-lived process with piped stdio.
+    async fn spawn(&self, command: &str) -> Result<Child, SpawnError>;
 }
 
 pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    pub denied: bool, // set when an approver denied the command
 }
 ```
 
-There is no `denied_by`: the sandbox no longer refuses a command before running
-it, because there is no allowlist. A refusal is an OS denial, visible as a
-non-zero exit code and classified into a `sandbox.violation.*` event.
+`spawn` defaults to an error, so an executor that only supports one-shot
+commands cannot back a session; the layer-1 executor overrides it.
+
+### Sessions
+
+`Sandbox::spawn(command)` runs a long-lived process with piped stdio for the
+node model in `docs/node.md`. It goes through the same approval as `exec` once,
+at spawn, and appends `sandbox.session.started`; `Session::wait` appends
+`sandbox.session.exited` with the exit code and duration. The caller takes the
+pipes (`take_stdin`/`take_stdout`/`take_stderr`) and owns the I/O; the output is
+not captured, so a session is not bounded by the one-shot output cap. The
+session holds the executor alive, so the profile and scratch it was spawned
+under outlive the `Sandbox` handle, and it is killed on drop if it is still
+running. Because the whole process is confined by one profile and its children
+inherit it, per-command `sandbox.permission.*` events are not emitted for a
+session — its lifecycle events are the audit trail.
 
 ### Layer 1 backends
 
@@ -285,6 +301,8 @@ existing dotted-type convention and `source: urn:mokmokd`:
 | `sandbox.violation.filesystem` | The OS refused a filesystem operation: reason, denied path, output snippet |
 | `sandbox.violation.network`   | The OS refused a network operation                                 |
 | `sandbox.exec.completed`      | Terminal state of an execution: exit code, duration, output sizes |
+| `sandbox.session.started`     | A long-lived session was spawned                                  |
+| `sandbox.session.exited`      | Terminal state of a session: exit code and duration               |
 
 Every permission event carries a `request_id` (a UUID) alongside `sandbox_id`, so
 a decision is correlated to one request even when execs run concurrently.
@@ -364,6 +382,9 @@ Modeled on Sheena's methodology and codex's, adapted to Rust:
   timing out over the log with `request_id` correlation.
 - **Violation flow tests**: a structured `sandbox.violation.*` for a recognised
   OS denial, and no violation for an unrelated failure.
+- **Session tests**: `sandbox.session.started`/`exited` over the log, piped
+  stdin/stdout streaming, approval denial, and a real confined session that
+  streams I/O under the Seatbelt profile.
 - **Differential tests**: golden files recorded from real bash + coreutils for
   layer 1 behavior, replayed in CI without the recorded host.
 - **Benchmarks**: sandbox construction, trivial `exec` overhead, parallel
@@ -377,11 +398,7 @@ Triggers, not dates — none of these steps are taken early:
    it (egress is otherwise denied already).
 2. Linux backend: bubblewrap preferred, Landlock fallback, seccomp for network
    and syscall narrowing, with the arg0 self-exec helper.
-3. A long-lived session spawn API: today `Sandbox::exec` is a one-shot bounded
-   by a timeout that waits for the child to exit. A session needs a supervised
-   process that outlives one command, with a writable session entry for its
-   SQLite projection (`docs/node.md`).
-4. A session manager in `agentd` that launches a sandboxed node and reports
+3. A session manager in `agentd` that launches a sandboxed node and reports
    lifecycle through `session.*` events.
 
 ## Implementation status
@@ -391,6 +408,7 @@ three-domain path-entry model with no allowlist or caps, the macOS profile
 renders the entries with protected metadata and root-unlink denial and opens no
 network, a denial is classified into a `sandbox.violation.*` event, the
 human-in-the-loop approval flow runs over the log with `request_id`
-correlation, and the deleted concepts (VFS, allowlist, caps) are gone from the
-code. What remains unimplemented is the Linux backend and sessions. A crate doc
-comment records the same status next to the code.
+correlation, the long-lived session spawn API is in place, and the deleted
+concepts (VFS, allowlist, caps) are gone from the code. What remains
+unimplemented is the Linux backend and the daemon-side session manager. A crate
+doc comment records the same status next to the code.
