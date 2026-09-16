@@ -8,9 +8,9 @@
 //! [`Conversation`] is the [`SqliteReducer`] that stores those messages. It is a
 //! projection over the log, so it can be rebuilt with `--rebuild`.
 
-use agentd_events::LogEntry;
+use agentd_events::{LogEntry, Seq};
 use agentd_inference::{Message, ToolCall};
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde_json::Value;
 
 use crate::error::AgentError;
@@ -126,6 +126,41 @@ impl Conversation {
             messages.push(decode_message(&role, content, tool_calls, tool_call_id)?);
         }
         Ok(messages)
+    }
+
+    /// Reads the conversation's last message and its log position.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::Sqlite`] if the query fails and
+    /// [`AgentError::Json`] if the stored message cannot be decoded.
+    pub fn tail(
+        conn: &Connection,
+        conversation_id: &str,
+    ) -> Result<Option<(Seq, Message)>, AgentError> {
+        let row = conn
+            .query_row(
+                "SELECT seq, role, content, tool_calls, tool_call_id FROM agent_messages \
+                 WHERE conversation_id = ?1 ORDER BY seq DESC LIMIT 1",
+                [conversation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((seq, role, content, tool_calls, tool_call_id)) = row else {
+            return Ok(None);
+        };
+        let seq = u64::try_from(seq)
+            .map_err(|_| AgentError::History(format!("the stored position {seq} is negative")))?;
+        let message = decode_message(&role, content, tool_calls, tool_call_id)?;
+        Ok(Some((seq, message)))
     }
 }
 

@@ -237,7 +237,10 @@ resumed consumer never silently skips a position. A position outside
 `error.resume_out_of_range` notice and the connection is closed; a replay
 failure likewise closes after an `error.replay_failed` notice, because
 continuing would leave a permanent gap. Without `from`, a consumer is live-only
-and a lag is reported as `error.lagged`, as before.
+and a lag is reported as `error.lagged`, as before. A resuming consumer then
+receives a transient `daemon.caught_up` notice once the replay is applied, so a
+client that reacts to the log (the agent) can finish an interrupted turn from
+the replayed state.
 
 ### Startup and recovery
 

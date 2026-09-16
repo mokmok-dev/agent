@@ -23,6 +23,10 @@ use crate::auth::{Claim, TokenStore};
 /// replaying to a client. Bounds the memory one replay step can hold.
 const REPLAY_CHUNK: usize = 256;
 
+/// The transient notice sent once a resume replay has caught up, so a client
+/// can finish an interrupted turn from the replayed state.
+const DAEMON_CAUGHT_UP: &str = "daemon.caught_up";
+
 /// Errors returned by [`run`].
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -412,6 +416,13 @@ async fn handle_events_socket(
         return;
     }
 
+    if can_read && from.is_some() {
+        let notice = Event::new(DAEMON_CAUGHT_UP, json!({ "tail": log.tail_seq() }));
+        if send_notice(&mut sink, notice).await.is_err() {
+            return;
+        }
+    }
+
     loop {
         tokio::select! {
             recorded = events.recv(), if can_read => {
@@ -783,6 +794,16 @@ mod tests {
         decode_wire(received)
     }
 
+    /// Receives the next positioned event, skipping transient notices.
+    async fn recv_event(client: &mut WebSocketStream<UnixStream>) -> (Seq, Event) {
+        loop {
+            let (seq, event) = recv_wire(client).await;
+            if let Some(seq) = seq {
+                return (seq, event);
+            }
+        }
+    }
+
     /// Sends `event` as an inbound `CloudEvents` message.
     async fn send_event(
         client: &mut WebSocketStream<UnixStream>,
@@ -936,17 +957,17 @@ mod tests {
 
         let mut client = connect_from(&socket, 2).await;
 
-        let (seq, event) = recv_wire(&mut client).await;
-        assert_eq!((seq, event.data["index"].as_u64()), (Some(2), Some(1)));
-        let (seq, event) = recv_wire(&mut client).await;
-        assert_eq!((seq, event.data["index"].as_u64()), (Some(3), Some(2)));
+        let (seq, event) = recv_event(&mut client).await;
+        assert_eq!((seq, event.data["index"].as_u64()), (2, Some(1)));
+        let (seq, event) = recv_event(&mut client).await;
+        assert_eq!((seq, event.data["index"].as_u64()), (3, Some(2)));
 
         // The live stream continues after the replayed history.
         log.publish(numbered_event(3))
             .await
             .expect("publish should succeed");
-        let (seq, event) = recv_wire(&mut client).await;
-        assert_eq!((seq, event.data["index"].as_u64()), (Some(4), Some(3)));
+        let (seq, event) = recv_event(&mut client).await;
+        assert_eq!((seq, event.data["index"].as_u64()), (4, Some(3)));
 
         server.abort();
     }
@@ -968,8 +989,8 @@ mod tests {
         let mut client = connect_from_writer(&socket, 3).await;
         send_event(&mut client, &numbered_event(2)).await;
 
-        let (seq, event) = recv_wire(&mut client).await;
-        assert_eq!(seq, Some(3));
+        let (seq, event) = recv_event(&mut client).await;
+        assert_eq!(seq, 3);
         assert_eq!(event.data["index"], 2);
 
         server.abort();
@@ -1039,8 +1060,8 @@ mod tests {
 
         let mut positions = Vec::new();
         for _ in 0..50 {
-            let (seq, _) = recv_wire(&mut client).await;
-            positions.push(seq.expect("event should be positioned"));
+            let (seq, _) = recv_event(&mut client).await;
+            positions.push(seq);
         }
         assert_eq!(positions, (1..=50).collect::<Vec<Seq>>());
 

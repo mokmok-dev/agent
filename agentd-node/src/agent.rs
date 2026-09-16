@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use agentd_events::Event;
+use agentd_events::{Event, LogEntry, Seq, WireMessage};
 use agentd_inference::{Delta, InferenceClient, InferenceRequest, Message, ToolCall, ToolSpec};
 use serde::Deserialize;
 use serde_json::json;
@@ -51,6 +51,10 @@ const MAX_TOOL_ROUNDS: u32 = 64;
 
 /// The only `CloudEvents` `type` prefix the agent applies to its projection.
 const AGENT_PREFIX: &str = "agent.";
+
+/// The transient notice the daemon sends once a resume replay has caught up, so
+/// the agent can finish an interrupted turn.
+const DAEMON_CAUGHT_UP: &str = "daemon.caught_up";
 
 /// The instructions the model sees before the conversation.
 const SYSTEM_PROMPT: &str = "\
@@ -91,6 +95,9 @@ pub struct Agent {
     inference_timeout: Duration,
     model: Option<String>,
     projection: SqliteProjection<Conversation>,
+    /// The position of the last unanswered turn already run, so recovery does
+    /// not re-run the same tail twice.
+    last_answered: Seq,
 }
 
 impl Agent {
@@ -114,6 +121,7 @@ impl Agent {
             inference_timeout: DEFAULT_INFERENCE_TIMEOUT,
             model: None,
             projection,
+            last_answered: 0,
         }
     }
 
@@ -213,7 +221,7 @@ impl Agent {
                     match message {
                         Ok(Some(wire)) => {
                             received = true;
-                            if self.handle(wire)? {
+                            if self.handle(wire)?.is_some() {
                                 let mut history = Conversation::history(
                                     self.projection.connection(),
                                     &self.conversation_id,
@@ -244,34 +252,67 @@ impl Agent {
         }
     }
 
-    /// Applies or skips one message, returning whether it should start a turn.
+    /// Applies or skips one message, returning the tail position when a turn
+    /// should start.
     ///
-    /// A turn starts only for an [`AGENT_INBOX`] that belongs to this agent's
-    /// conversation; every other event still advances the checkpoint.
+    /// A turn starts when the conversation's last message is unanswered — a user
+    /// prompt, a tool result, or an assistant turn still awaiting its tool
+    /// results — and it has not already been run. That makes a turn interrupted
+    /// by a restart resume: the daemon's `daemon.caught_up` notice triggers the
+    /// check once the replay has been applied, and a live inbox triggers it when
+    /// it arrives. An inbox for another conversation is applied but not answered.
     fn handle(
         &mut self,
-        wire: agentd_events::WireMessage,
-    ) -> Result<bool, AgentError> {
+        wire: WireMessage,
+    ) -> Result<Option<Seq>, AgentError> {
         let Some(seq) = wire.seq else {
-            return Ok(false);
+            if wire.event.r#type == DAEMON_CAUGHT_UP {
+                return self.pending_turn();
+            }
+            return Ok(None);
         };
         if seq <= self.projection.applied_seq() {
-            return Ok(false);
+            return Ok(None);
         }
-        let trigger = wire.event.r#type == AGENT_INBOX
-            && wire
+        if wire.event.r#type == AGENT_INBOX
+            && let Some(conversation) = wire
                 .event
                 .data
                 .get("conversation_id")
                 .and_then(serde_json::Value::as_str)
-                == Some(self.conversation_id.as_str());
+            && conversation != self.conversation_id
+        {
+            tracing::info!(
+                conversation,
+                served = %self.conversation_id,
+                "an inbox for another conversation was applied but not answered",
+            );
+        }
         if wire.event.r#type.starts_with(AGENT_PREFIX) {
-            self.projection
-                .apply(agentd_events::LogEntry::new(seq, wire.event))?;
+            self.projection.apply(LogEntry::new(seq, wire.event))?;
         } else {
             self.projection.skip(seq)?;
         }
-        Ok(trigger)
+        self.pending_turn()
+    }
+
+    /// Returns the tail position when the conversation has an unanswered turn.
+    fn pending_turn(&mut self) -> Result<Option<Seq>, AgentError> {
+        let Some((seq, message)) =
+            Conversation::tail(self.projection.connection(), &self.conversation_id)?
+        else {
+            return Ok(None);
+        };
+        let pending = match message.role {
+            agentd_inference::Role::User | agentd_inference::Role::Tool => true,
+            agentd_inference::Role::Assistant => !message.tool_calls.is_empty(),
+            agentd_inference::Role::System => false,
+        };
+        if pending && seq > self.last_answered {
+            self.last_answered = seq;
+            return Ok(Some(seq));
+        }
+        Ok(None)
     }
 }
 
@@ -349,10 +390,16 @@ impl Turn<'_> {
                 tools: tools.clone(),
                 model: self.model.map(String::from),
             };
+            tracing::debug!(
+                round = rounds,
+                messages = request.messages.len(),
+                "requesting inference"
+            );
             let deltas = match timeout(self.inference_timeout, inference.complete(&request)).await {
                 Ok(result) => result?,
                 Err(_) => return Err(AgentError::InferenceTimeout(self.inference_timeout)),
             };
+            tracing::debug!(round = rounds, "inference responded");
             let (text, calls) = fold_deltas(deltas)?;
 
             if text.is_empty() && calls.is_empty() {
@@ -375,7 +422,9 @@ impl Turn<'_> {
                 return Ok(());
             }
             for call in calls {
+                tracing::debug!(tool = %call.name, "running a tool");
                 let outcome = run_tool(&call, self.workdir, self.limits).await;
+                tracing::debug!(tool = %call.name, timed_out = outcome.timed_out, "the tool finished");
                 publish(
                     client,
                     AGENT_TOOL_RESULT,
@@ -490,7 +539,9 @@ async fn publish(
     r#type: &str,
     data: serde_json::Value,
 ) -> Result<(), AgentError> {
+    tracing::debug!(r#type, "publishing an event");
     client.send(&Event::new(r#type, data)).await?;
+    tracing::debug!(r#type, "the event was sent");
     Ok(())
 }
 
@@ -740,9 +791,10 @@ mod tests {
         };
 
         assert!(
-            !agent.handle(wire).expect("handle should succeed"),
+            agent.handle(wire).expect("handle should succeed").is_none(),
             "an inbox for another conversation must not start a turn"
         );
+        assert_eq!(agent.projection().applied_seq(), 1);
     }
 
     #[test]
@@ -756,7 +808,7 @@ mod tests {
             ),
         };
 
-        assert!(agent.handle(wire).expect("handle should succeed"));
+        assert_eq!(agent.handle(wire).expect("handle should succeed"), Some(1));
         assert_eq!(agent.projection().applied_seq(), 1);
     }
 
@@ -768,8 +820,65 @@ mod tests {
             event: Event::new("task.submitted", json!({})),
         };
 
-        assert!(!agent.handle(wire).expect("handle should succeed"));
+        assert!(agent.handle(wire).expect("handle should succeed").is_none());
         assert_eq!(agent.projection().applied_seq(), 7);
+    }
+
+    #[test]
+    fn a_caught_up_notice_triggers_a_pending_turn_after_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let db = dir.path().join("node.db");
+        // One agent applies an inbox but never runs its turn.
+        {
+            let projection =
+                SqliteProjection::<Conversation>::open(&db).expect("projection should open");
+            let mut first =
+                Agent::new("/tmp/a.sock", projection, "c1", dir.path(), "urn:test", "t");
+            let _ = first
+                .handle(agentd_events::WireMessage {
+                    seq: Some(1),
+                    event: Event::new(
+                        crate::conversation::AGENT_INBOX,
+                        json!({ "conversation_id": "c1", "content": "unanswered" }),
+                    ),
+                })
+                .expect("handle should succeed");
+        }
+        // A restarted agent recovers it on the caught-up notice.
+        let projection =
+            SqliteProjection::<Conversation>::open(&db).expect("projection should reopen");
+        let mut agent = Agent::new("/tmp/a.sock", projection, "c1", dir.path(), "urn:test", "t");
+        let trigger = agent
+            .handle(agentd_events::WireMessage {
+                seq: None,
+                event: Event::new(super::DAEMON_CAUGHT_UP, json!({})),
+            })
+            .expect("handle should succeed");
+
+        assert_eq!(trigger, Some(1));
+    }
+
+    #[test]
+    fn an_already_run_tail_is_not_triggered_again() {
+        let (_dir, mut agent) = agent();
+        let _ = agent
+            .handle(agentd_events::WireMessage {
+                seq: Some(1),
+                event: Event::new(
+                    crate::conversation::AGENT_INBOX,
+                    json!({ "conversation_id": "c1", "content": "hi" }),
+                ),
+            })
+            .expect("handle should succeed");
+
+        let trigger = agent
+            .handle(agentd_events::WireMessage {
+                seq: None,
+                event: Event::new(super::DAEMON_CAUGHT_UP, json!({})),
+            })
+            .expect("handle should succeed");
+
+        assert_eq!(trigger, None);
     }
 
     #[test]

@@ -108,6 +108,16 @@ async fn recv_wire(client: &mut WebSocketStream<UnixStream>) -> (Option<Seq>, Ev
     (wire.seq, wire.event)
 }
 
+/// Receives the next positioned event, skipping transient notices.
+async fn recv_event(client: &mut WebSocketStream<UnixStream>) -> (Seq, Event) {
+    loop {
+        let (seq, event) = recv_wire(client).await;
+        if let Some(seq) = seq {
+            return (seq, event);
+        }
+    }
+}
+
 /// Sends `event` as an inbound `CloudEvents` message.
 async fn send_event(
     client: &mut WebSocketStream<UnixStream>,
@@ -206,16 +216,16 @@ async fn a_reconnecting_consumer_resumes_from_its_cursor() {
     // The consumer reconnects from the position after the first event and sees
     // the second from history, then the third live.
     let mut consumer = connect_from(&socket, 2).await;
-    let (seq, received) = recv_wire(&mut consumer).await;
-    assert_eq!(seq, Some(2));
+    let (seq, received) = recv_event(&mut consumer).await;
+    assert_eq!(seq, 2);
     assert_attributed(&received, &second);
 
     let third = Event::new("task.completed", json!({ "task": "demo" }));
     log.publish(third.clone())
         .await
         .expect("publish should succeed");
-    let (seq, received) = recv_wire(&mut consumer).await;
-    assert_eq!(seq, Some(3));
+    let (seq, received) = recv_event(&mut consumer).await;
+    assert_eq!(seq, 3);
     assert_eq!(received.id, third.id);
     assert_eq!(received.source, agentd_events::DAEMON_SOURCE);
 

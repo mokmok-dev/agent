@@ -190,9 +190,16 @@ publishable events, not daemon-authority ones, because the agent is the author:
 | `agent.turn.completed` | A turn completed without a provider error         |
 | `agent.turn.failed`    | A turn failed (for example a provider error)      |
 
-`agent.inbox` is the only trigger: an agent runs a turn when an inbox for its
-conversation is applied. Every `agent.*` event is projected into the
-conversation read model; other events advance the checkpoint unapplied.
+`agent.inbox` starts a turn, but a turn is driven by the conversation's tail,
+not by the event alone: after applying an event the agent runs a turn when the
+last message is unanswered — a user prompt, a tool result, or an assistant turn
+still awaiting tool results — and it has not already run. That makes a turn
+interrupted by a restart resume: the daemon sends a transient `daemon.caught_up`
+notice once a resume replay is applied, and the agent recovers the unanswered
+tail from the replayed state. An inbox for a conversation the agent does not
+serve is applied to the projection but not answered, and it is logged so the
+mismatch is visible. Every `agent.*` event is projected into the conversation
+read model; other events advance the checkpoint unapplied.
 
 ## Stated gaps
 
@@ -216,6 +223,8 @@ conversation read model; other events advance the checkpoint unapplied.
   direct child (`bash`) but not the process group, so a backgrounded grandchild
   can outlive the command. It stays confined by the session sandbox; the
   session manager reaps the session's group only when the session ends.
-- **A turn is not resumable.** If the agent dies mid-turn, the messages
-  finalized before the crash survive in the log, but the in-flight turn is lost.
-  The conversation is not corrupted, and a new inbox starts a fresh turn.
+- **A turn resumes, not its in-flight inference.** If the agent dies mid-turn,
+  the finalized messages survive in the log; on restart the `daemon.caught_up`
+  notice makes the agent run the conversation's unanswered tail, so the turn
+  continues from the replayed state. The inference call that was in flight is
+  not retried.
