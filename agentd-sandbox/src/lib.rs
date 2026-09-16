@@ -59,14 +59,15 @@ mod violation;
 pub use error::SandboxError;
 pub use events::{
     ACTION_EXEC, DECISION_AUTO, DECISION_PENDING, EXEC_COMPLETED, PERMISSION_DENIED,
-    PERMISSION_GRANTED, PERMISSION_REQUESTED, RESOURCE_SHELL, exec_completed, permission_denied,
-    permission_granted, permission_requested,
+    PERMISSION_GRANTED, PERMISSION_REQUESTED, RESOURCE_SHELL, SESSION_EXITED, SESSION_STARTED,
+    exec_completed, permission_denied, permission_granted, permission_requested, session_exited,
+    session_started,
 };
-pub use executor::{ConfinedProcessExecutor, ExecResult, Executor};
+pub use executor::{ConfinedProcessExecutor, ExecResult, Executor, SpawnError};
 pub use policy::{
     Access, EnvAllowlist, EnvVar, FsEntry, FsPolicy, Limits, Policy, PolicyError, ShellPolicy,
 };
-pub use sandbox::{Approval, Sandbox};
+pub use sandbox::{Approval, Sandbox, Session};
 pub use violation::{
     VIOLATION_FILESYSTEM, VIOLATION_NETWORK, Violation, ViolationKind, ViolationReason,
     classify_violation, violation_event,

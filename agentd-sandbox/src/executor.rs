@@ -7,6 +7,18 @@
 //! executor cannot widen its own permissions.
 
 use async_trait::async_trait;
+use thiserror::Error as ThisError;
+
+/// Errors returned while spawning a long-lived session.
+#[derive(Debug, ThisError)]
+pub enum SpawnError {
+    /// The process could not be started.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// The executor cannot run a long-lived session.
+    #[error("the executor does not support long-lived sessions: {0}")]
+    Unsupported(&'static str),
+}
 
 /// The outcome of running a command under the policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,6 +65,24 @@ pub trait Executor: Send + Sync {
         &self,
         command: &str,
     ) -> ExecResult;
+
+    /// Spawns `command` as a long-lived process with piped stdio, without
+    /// waiting for it to exit.
+    ///
+    /// The default fails: an executor that only supports one-shot commands
+    /// cannot back a session. The layer-1 confined-process executor overrides
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError::Unsupported`] by default, or
+    /// [`SpawnError::Io`] when the process cannot be started.
+    async fn spawn(
+        &self,
+        _command: &str,
+    ) -> Result<tokio::process::Child, SpawnError> {
+        Err(SpawnError::Unsupported("this executor is one-shot only"))
+    }
 }
 
 /// The layer-1 confined-process executor.

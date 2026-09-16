@@ -40,7 +40,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::error::SandboxError;
-use crate::executor::ExecResult;
+use crate::executor::{ExecResult, SpawnError};
 use crate::policy::{Access, FsPolicy, Policy};
 
 /// The system directories the confined `PATH` is built from.
@@ -155,10 +155,13 @@ impl ConfinedProcessExecutor {
         }
     }
 
-    async fn run(
+    /// Builds the confined `sandbox-exec` command for `command`, with the
+    /// policy profile, the allowlisted environment, and the scratch
+    /// `HOME`/`TMPDIR`.
+    fn std_command(
         &self,
         command: &str,
-    ) -> ExecResult {
+    ) -> std::process::Command {
         let mut std_command = std::process::Command::new(SANDBOX_EXEC);
         std_command
             .arg("-f")
@@ -166,10 +169,6 @@ impl ConfinedProcessExecutor {
             .arg(BASH)
             .arg("-c")
             .arg(command);
-        std_command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
         std_command.env_clear();
         for (name, value) in &self.env {
             std_command.env(name, value);
@@ -178,9 +177,21 @@ impl ConfinedProcessExecutor {
         std_command.env("HOME", &self.scratch);
         std_command.env("TMPDIR", &self.scratch);
         std_command.current_dir(&self.workdir);
-        // The child leads its own process group so a timeout or output-cap
-        // kill takes the whole tree down, not just the shell.
+        // The child leads its own process group so a timeout, output-cap, or
+        // session kill takes the whole tree down, not just the shell.
         std_command.process_group(0);
+        std_command
+    }
+
+    async fn run(
+        &self,
+        command: &str,
+    ) -> ExecResult {
+        let mut std_command = self.std_command(command);
+        std_command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         let mut child = match Command::from(std_command).spawn() {
             Ok(child) => child,
@@ -626,6 +637,19 @@ impl crate::executor::Executor for ConfinedProcessExecutor {
         command: &str,
     ) -> ExecResult {
         Box::pin(self.run(command)).await
+    }
+
+    async fn spawn(
+        &self,
+        command: &str,
+    ) -> Result<tokio::process::Child, SpawnError> {
+        let mut std_command = self.std_command(command);
+        std_command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = Command::from(std_command).spawn()?;
+        Ok(child)
     }
 }
 
@@ -1152,6 +1176,31 @@ mod tests {
 
         assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
         assert_eq!(result.stdout, "hello\n");
+    }
+
+    #[tokio::test]
+    async fn a_spawned_session_is_confined_and_streams_io() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        if !spawn_tests_supported() {
+            return;
+        }
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        let executor = executor(&workdir_policy(&host));
+
+        let mut child = executor.spawn("cat").await.expect("session should spawn");
+        let mut stdin = child.stdin.take().expect("stdin");
+        let mut stdout = child.stdout.take().expect("stdout");
+
+        stdin.write_all(b"hello\n").await.expect("write stdin");
+        drop(stdin);
+        let mut line = String::new();
+        stdout.read_to_string(&mut line).await.expect("read stdout");
+
+        assert_eq!(line, "hello\n");
+        let status = child.wait().await.expect("wait");
+        assert!(status.success(), "session should exit cleanly");
     }
 
     #[test]

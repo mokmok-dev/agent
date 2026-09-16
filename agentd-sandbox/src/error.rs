@@ -21,6 +21,12 @@ pub enum SandboxError {
     /// for the command would have a hole.
     #[error(transparent)]
     Publish(#[from] LogError),
+    /// An approver denied the request, so no process was started.
+    #[error("the command was denied by the approver")]
+    Denied,
+    /// A long-lived session could not be spawned.
+    #[error(transparent)]
+    Spawn(#[from] crate::executor::SpawnError),
     /// An underlying I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),

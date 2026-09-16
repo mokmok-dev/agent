@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agentd_events::{EventLog, LogEntry};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;
 
@@ -117,12 +118,10 @@ impl Sandbox {
         &self.log
     }
 
-    /// Records the decision and, when granted, runs the command.
+    /// Records the decision and, when granted, runs the command to completion.
     ///
-    /// With [`Approval::Auto`] a static rule grants immediately. With
-    /// [`Approval::Required`] the request is published `pending` and this
-    /// awaits an approver's decision, correlated by `request_id`; a denial or
-    /// timeout returns a denied [`ExecResult`] without spawning anything.
+    /// A denial or timeout returns a denied [`ExecResult`] without running
+    /// anything.
     ///
     /// # Errors
     ///
@@ -135,56 +134,8 @@ impl Sandbox {
         let sandbox_id = self.id.to_string();
         let request_id = Uuid::now_v7().to_string();
 
-        match self.approval {
-            Approval::Auto => {
-                self.publish(events::permission_requested(
-                    &sandbox_id,
-                    &request_id,
-                    &self.agent_id,
-                    command,
-                    DECISION_AUTO,
-                ))
-                .await?;
-                self.publish(events::permission_granted(
-                    &sandbox_id,
-                    &request_id,
-                    &self.agent_id,
-                    command,
-                ))
-                .await?;
-            },
-            Approval::Required { timeout } => {
-                // Subscribe before publishing, so the approver's decision
-                // cannot be missed between the request and the wait.
-                let mut decisions = self.log.subscribe();
-                self.publish(events::permission_requested(
-                    &sandbox_id,
-                    &request_id,
-                    &self.agent_id,
-                    command,
-                    DECISION_PENDING,
-                ))
-                .await?;
-                match await_decision(&mut decisions, &request_id, timeout).await {
-                    // The approver's `granted` is already the durable record.
-                    Decision::Granted => {},
-                    // The approver's `denied` is already the durable record.
-                    Decision::Denied => {
-                        return Ok(ExecResult::denied("the command was not approved"));
-                    },
-                    // No approver answered, so the sandbox records the denial.
-                    Decision::TimedOut => {
-                        self.publish(events::permission_denied(
-                            &sandbox_id,
-                            &request_id,
-                            &self.agent_id,
-                            command,
-                        ))
-                        .await?;
-                        return Ok(ExecResult::denied("the approval request timed out"));
-                    },
-                }
-            },
+        if !self.authorize(&sandbox_id, &request_id, command).await? {
+            return Ok(ExecResult::denied("the command was not approved"));
         }
 
         let started = Instant::now();
@@ -213,6 +164,113 @@ impl Sandbox {
         Ok(result)
     }
 
+    /// Spawns `command` as a long-lived session with piped stdio.
+    ///
+    /// The session goes through the same approval as [`Sandbox::exec`] once, at
+    /// spawn: `sandbox.session.started` is appended after the process starts,
+    /// and [`Session::wait`] appends `sandbox.session.exited` with its terminal
+    /// state. Output is not captured, so the caller owns the pipes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::Denied`] when an approver denies the spawn,
+    /// [`SandboxError::Spawn`] when the process cannot be started (including an
+    /// executor that cannot run sessions), and [`SandboxError::Publish`] when a
+    /// lifecycle event cannot be durably appended.
+    pub async fn spawn(
+        &self,
+        command: &str,
+    ) -> Result<Session, SandboxError> {
+        let sandbox_id = self.id.to_string();
+        let request_id = Uuid::now_v7().to_string();
+
+        if !self.authorize(&sandbox_id, &request_id, command).await? {
+            return Err(SandboxError::Denied);
+        }
+
+        let child = self.executor.spawn(command).await?;
+        let session_id = Uuid::now_v7();
+        self.publish(events::session_started(
+            &sandbox_id,
+            &request_id,
+            &self.agent_id,
+            command,
+            &session_id.to_string(),
+        ))
+        .await?;
+        Ok(Session {
+            id: session_id,
+            pid: child.id(),
+            child,
+            log: self.log.clone(),
+            sandbox_id,
+            request_id,
+            agent_id: self.agent_id.clone(),
+            subject: command.to_string(),
+            started: Instant::now(),
+            // The executor owns the profile and scratch the child runs under;
+            // holding it keeps them alive for the session's lifetime.
+            keepalive: Arc::clone(&self.executor),
+        })
+    }
+
+    /// Runs the approval step, returning whether the command may run. A timeout
+    /// records a denial itself; an approver's decision is already in the log.
+    async fn authorize(
+        &self,
+        sandbox_id: &str,
+        request_id: &str,
+        command: &str,
+    ) -> Result<bool, SandboxError> {
+        match self.approval {
+            Approval::Auto => {
+                self.publish(events::permission_requested(
+                    sandbox_id,
+                    request_id,
+                    &self.agent_id,
+                    command,
+                    DECISION_AUTO,
+                ))
+                .await?;
+                self.publish(events::permission_granted(
+                    sandbox_id,
+                    request_id,
+                    &self.agent_id,
+                    command,
+                ))
+                .await?;
+                Ok(true)
+            },
+            Approval::Required { timeout } => {
+                // Subscribe before publishing, so the approver's decision
+                // cannot be missed between the request and the wait.
+                let mut decisions = self.log.subscribe();
+                self.publish(events::permission_requested(
+                    sandbox_id,
+                    request_id,
+                    &self.agent_id,
+                    command,
+                    DECISION_PENDING,
+                ))
+                .await?;
+                match await_decision(&mut decisions, request_id, timeout).await {
+                    Decision::Granted => Ok(true),
+                    Decision::Denied => Ok(false),
+                    Decision::TimedOut => {
+                        self.publish(events::permission_denied(
+                            sandbox_id,
+                            request_id,
+                            &self.agent_id,
+                            command,
+                        ))
+                        .await?;
+                        Ok(false)
+                    },
+                }
+            },
+        }
+    }
+
     /// Durably appends `event`, surfacing a failure as [`SandboxError::Publish`].
     async fn publish(
         &self,
@@ -220,6 +278,118 @@ impl Sandbox {
     ) -> Result<(), SandboxError> {
         self.log.publish(event).await?;
         Ok(())
+    }
+}
+
+/// A long-lived confined process with piped stdio.
+///
+/// Take the pipes with [`take_stdin`](Session::take_stdin),
+/// [`take_stdout`](Session::take_stdout), and [`take_stderr`](Session::take_stderr);
+/// the output is not captured for you. The session is killed on drop if it is
+/// still running.
+pub struct Session {
+    id: Uuid,
+    pid: Option<u32>,
+    child: Child,
+    log: EventLog,
+    sandbox_id: String,
+    request_id: String,
+    agent_id: String,
+    subject: String,
+    started: Instant,
+    /// Keeps the executor (and its profile and scratch) alive for the child.
+    #[allow(dead_code)]
+    keepalive: Arc<dyn Executor>,
+}
+
+impl Session {
+    /// The session id, correlating its lifecycle events.
+    #[must_use]
+    pub const fn id(&self) -> Uuid {
+        self.id
+    }
+
+    /// Takes the child's standard input.
+    pub const fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.child.stdin.take()
+    }
+
+    /// Takes the child's standard output.
+    pub const fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    /// Takes the child's standard error.
+    pub const fn take_stderr(&mut self) -> Option<ChildStderr> {
+        self.child.stderr.take()
+    }
+
+    /// Kills the process group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the child cannot be signalled.
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        #[cfg(target_os = "macos")]
+        if let Some(pid) = self.pid
+            && let Ok(raw) = i32::try_from(pid)
+        {
+            // The child leads its own process group (set at spawn), so the
+            // whole tree dies, not just the shell.
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(raw),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        self.child.start_kill()
+    }
+
+    /// Waits for the session to exit, appends `sandbox.session.exited`, and
+    /// returns its exit code.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::Io`] when waiting fails and
+    /// [`SandboxError::Publish`] when the exit event cannot be appended.
+    pub async fn wait(&mut self) -> Result<i32, SandboxError> {
+        let status = self.child.wait().await?;
+        let exit_code = status.code().unwrap_or_else(|| {
+            use std::os::unix::process::ExitStatusExt as _;
+            status.signal().map_or(126, |signal| 128 + signal)
+        });
+        self.log
+            .publish(events::session_exited(
+                &self.sandbox_id,
+                &self.request_id,
+                &self.agent_id,
+                &self.subject,
+                &self.id.to_string(),
+                exit_code,
+                u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            ))
+            .await?;
+        Ok(exit_code)
+    }
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(
+        &self,
+        formatter: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        formatter
+            .debug_struct("Session")
+            .field("id", &self.id)
+            .field("subject", &self.subject)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Best-effort: a session dropped without `wait` must not leak a
+        // running process.
+        let _ = self.child.start_kill();
     }
 }
 
@@ -276,16 +446,18 @@ async fn await_decision(
 
 #[cfg(test)]
 mod tests {
-    use super::{Approval, Sandbox};
+    use super::{Approval, Sandbox, Session};
     use crate::error::SandboxError;
-    use crate::executor::{ExecResult, Executor};
+    use crate::executor::{ExecResult, Executor, SpawnError};
     use crate::policy::{Access, FsEntry, FsPolicy, Limits, Policy};
     use agentd_events::{Event, EventLog, LogEntry};
     use async_trait::async_trait;
     use std::path::{Path, PathBuf};
+    use std::process::Stdio;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// An executor that records how often it was invoked and returns canned
     /// output.
@@ -321,6 +493,44 @@ mod tests {
         }
     }
 
+    /// An executor that runs commands unconfined through `/bin/sh`, so the
+    /// session API and its event flow can be tested without Seatbelt.
+    struct PlainExecutor;
+
+    #[async_trait]
+    impl Executor for PlainExecutor {
+        async fn exec(
+            &self,
+            command: &str,
+        ) -> ExecResult {
+            let output = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(command)
+                .output()
+                .expect("sh should run");
+            ExecResult {
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                exit_code: output.status.code().unwrap_or(1),
+                denied: false,
+            }
+        }
+
+        async fn spawn(
+            &self,
+            command: &str,
+        ) -> Result<tokio::process::Child, SpawnError> {
+            let child = tokio::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(command)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?;
+            Ok(child)
+        }
+    }
+
     fn policy() -> Policy {
         Policy {
             fs: FsPolicy {
@@ -345,6 +555,18 @@ mod tests {
             Sandbox::with_executor(policy, open_log(dir.path()), "coder-1", executor.clone())
                 .expect("valid policy");
         (sandbox, executor, dir)
+    }
+
+    fn plain_sandbox() -> (Sandbox, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let sandbox = Sandbox::with_executor(
+            &policy(),
+            open_log(dir.path()),
+            "coder-1",
+            Arc::new(PlainExecutor),
+        )
+        .expect("valid policy");
+        (sandbox, dir)
     }
 
     fn drain(receiver: &mut tokio::sync::broadcast::Receiver<LogEntry>) -> Vec<Event> {
@@ -498,6 +720,94 @@ mod tests {
 
         assert!(result.is_denied());
         assert_eq!(executor.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn spawn_publishes_session_started_and_exited() {
+        let (sandbox, _dir) = plain_sandbox();
+        let mut subscriber = sandbox.log().subscribe();
+
+        let mut session: Session = sandbox.spawn("exit 3").await.expect("spawn should succeed");
+        let session_id = session.id().to_string();
+        let exit_code = session.wait().await.expect("wait should succeed");
+
+        assert_eq!(exit_code, 3);
+        let events = drain(&mut subscriber);
+        let types: Vec<&str> = events.iter().map(|event| event.r#type.as_str()).collect();
+        assert_eq!(
+            types,
+            [
+                crate::events::PERMISSION_REQUESTED,
+                crate::events::PERMISSION_GRANTED,
+                crate::events::SESSION_STARTED,
+                crate::events::SESSION_EXITED,
+            ]
+        );
+        assert_eq!(events[2].data["session_id"], session_id);
+        assert_eq!(events[3].data["exit_code"], 3);
+        assert_eq!(events[3].data["session_id"], session_id);
+    }
+
+    #[tokio::test]
+    async fn a_session_streams_stdin_to_stdout() {
+        let (sandbox, _dir) = plain_sandbox();
+
+        let mut session = sandbox.spawn("cat").await.expect("spawn should succeed");
+        let mut stdin = session.take_stdin().expect("stdin");
+        let mut stdout = session.take_stdout().expect("stdout");
+
+        stdin.write_all(b"hello\n").await.expect("write stdin");
+        drop(stdin);
+
+        let mut line = String::new();
+        stdout.read_to_string(&mut line).await.expect("read stdout");
+        assert_eq!(line, "hello\n");
+
+        let exit_code = session.wait().await.expect("wait should succeed");
+        assert_eq!(exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn spawn_is_denied_by_an_approver() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let log = open_log(dir.path());
+        let sandbox =
+            Sandbox::with_executor(&policy(), log.clone(), "coder-1", Arc::new(PlainExecutor))
+                .expect("valid policy")
+                .with_approval(Approval::Required {
+                    timeout: Duration::from_secs(5),
+                });
+        let mut subscriber = sandbox.log().subscribe();
+        let approver = spawn_approver(&log, "deny");
+
+        let error = sandbox
+            .spawn("cat")
+            .await
+            .expect_err("a denied spawn must fail");
+
+        assert!(matches!(error, SandboxError::Denied));
+        let events = drain(&mut subscriber);
+        let types: Vec<&str> = events.iter().map(|event| event.r#type.as_str()).collect();
+        assert_eq!(
+            types,
+            [
+                crate::events::PERMISSION_REQUESTED,
+                crate::events::PERMISSION_DENIED,
+            ]
+        );
+        approver.await.expect("approver should finish");
+    }
+
+    #[tokio::test]
+    async fn an_executor_without_sessions_fails_to_spawn() {
+        let (sandbox, _executor, _dir) = sandbox(&policy());
+
+        let error = sandbox
+            .spawn("cat")
+            .await
+            .expect_err("a one-shot executor must refuse a session");
+
+        assert!(matches!(error, SandboxError::Spawn(_)));
     }
 
     /// An executor that always reports an OS denial.

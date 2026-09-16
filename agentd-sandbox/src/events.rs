@@ -12,6 +12,10 @@ pub const PERMISSION_GRANTED: &str = "sandbox.permission.granted";
 pub const PERMISSION_DENIED: &str = "sandbox.permission.denied";
 /// Terminal state of an execution: exit code, duration, output sizes.
 pub const EXEC_COMPLETED: &str = "sandbox.exec.completed";
+/// A long-lived session was spawned.
+pub const SESSION_STARTED: &str = "sandbox.session.started";
+/// Terminal state of a long-lived session: exit code and duration.
+pub const SESSION_EXITED: &str = "sandbox.session.exited";
 
 /// The decision value on `requested` events decided immediately by a static
 /// rule. Human approval arrives in a later iteration; the correlation id is
@@ -114,6 +118,52 @@ pub fn exec_completed(
         "stderr_bytes": stderr_bytes,
     });
     Event::new(EXEC_COMPLETED, data)
+}
+
+/// Builds a `sandbox.session.started` event.
+#[must_use]
+pub fn session_started(
+    sandbox_id: &str,
+    request_id: &str,
+    agent_id: &str,
+    subject: &str,
+    session_id: &str,
+) -> Event {
+    let data = json!({
+        "sandbox_id": sandbox_id,
+        "request_id": request_id,
+        "session_id": session_id,
+        "agent_id": agent_id,
+        "resource": RESOURCE_SHELL,
+        "action": ACTION_EXEC,
+        "subject": subject,
+    });
+    Event::new(SESSION_STARTED, data)
+}
+
+/// Builds a `sandbox.session.exited` event.
+#[must_use]
+pub fn session_exited(
+    sandbox_id: &str,
+    request_id: &str,
+    agent_id: &str,
+    subject: &str,
+    session_id: &str,
+    exit_code: i32,
+    duration_ms: u64,
+) -> Event {
+    let data = json!({
+        "sandbox_id": sandbox_id,
+        "request_id": request_id,
+        "session_id": session_id,
+        "agent_id": agent_id,
+        "resource": RESOURCE_SHELL,
+        "action": ACTION_EXEC,
+        "subject": subject,
+        "exit_code": exit_code,
+        "duration_ms": duration_ms,
+    });
+    Event::new(SESSION_EXITED, data)
 }
 
 #[cfg(test)]
