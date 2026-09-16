@@ -22,7 +22,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[command(name = "agentd-agent", version = env!("CARGO_PKG_VERSION"))]
 struct Args {
     /// The daemon's Unix socket, serving both `/events` and `/inference`.
-    #[arg(long, default_value_os_t = default_socket())]
+    #[arg(long, default_value_os_t = agentd_events::paths::default_socket())]
     socket: PathBuf,
     /// The SQLite conversation projection file. Its directory must be writable.
     #[arg(long)]
@@ -53,17 +53,6 @@ struct Args {
     /// Delete the projection before starting, rebuilding it from the log.
     #[arg(long)]
     rebuild: bool,
-}
-
-/// The daemon's default socket path, matching `agentd`'s `~/.agentd` runtime
-/// directory.
-fn default_socket() -> PathBuf {
-    std::env::var_os("HOME")
-        .map_or_else(
-            || std::env::temp_dir().join("agentd"),
-            |home| PathBuf::from(home).join(".agentd"),
-        )
-        .join("agentd.sock")
 }
 
 /// The default workspace: the process's current directory.

@@ -107,7 +107,7 @@ projection with `--rebuild`.
 
 ```sh
 agentd-node \
-  --socket ~/.agentd/agentd.sock \
+  --socket "$XDG_RUNTIME_DIR/agentd/agentd.sock" \
   --db /path/to/session/node.db \
   --token-file /path/to/node.token \
   --source urn:mokmokd:session:1 \
@@ -169,7 +169,8 @@ The node's connection to the daemon is the one allowed network path: egress is
 denied outright, and the daemon grants its own Unix socket to the session policy
 (`network.unix_sockets`), rendered as a path-scoped Seatbelt grant. Because the
 sandbox overrides `HOME` to its scratch directory, the node's default
-`~/.agentd/agentd.sock` resolves to the scratch path, so `--session-command`
+socket (under `$XDG_RUNTIME_DIR`, or `$TMPDIR`) resolves to the scratch path,
+so `--session-command`
 must pass the daemon's absolute `--socket`, `--token-file`, and `--db`. SQLite
 writes its journal sidecar next to the database, so the whole **directory** must
 be writable: place the database in one session `write` entry.

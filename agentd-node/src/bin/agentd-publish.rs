@@ -21,7 +21,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 #[command(name = "agentd-publish", version = env!("CARGO_PKG_VERSION"))]
 struct Args {
     /// The daemon's event WebSocket Unix socket.
-    #[arg(long, default_value_os_t = default_socket())]
+    #[arg(long, default_value_os_t = agentd_events::paths::default_socket())]
     socket: PathBuf,
     /// A file whose entire contents is the bearer token the daemon expects. The
     /// token needs the publish claim (and read, to observe the commit).
@@ -37,17 +37,6 @@ struct Args {
     /// authenticated principal's.
     #[arg(long, default_value = "urn:mokmokd:user")]
     source: String,
-}
-
-/// The daemon's default socket path, matching `agentd`'s `~/.agentd` runtime
-/// directory.
-fn default_socket() -> PathBuf {
-    std::env::var_os("HOME")
-        .map_or_else(
-            || std::env::temp_dir().join("agentd"),
-            |home| PathBuf::from(home).join(".agentd"),
-        )
-        .join("agentd.sock")
 }
 
 /// Errors returned by the binary.

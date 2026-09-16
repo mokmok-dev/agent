@@ -26,6 +26,7 @@ use tokio::sync::broadcast;
 
 pub mod chain;
 pub mod log;
+pub mod paths;
 pub mod projection;
 
 pub use log::{EventLog, LogError, LogReader, Seq, verify_chain};

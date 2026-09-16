@@ -144,8 +144,10 @@ name unchanged; and, when the request names none, `default_model`. An
 unresolvable model is a `Delta::Error`. The agent asks for an alias
 (`agentd-agent --model smart`) and never learns a provider id or a credential.
 
-The daemon is started with `--providers-config <path>`; without it, it serves
-the deterministic `FakeProvider` used by tests and offline development.
+The daemon loads `--providers-config <path>` if given, otherwise
+`$XDG_CONFIG_HOME/agentd/providers.json` (`~/.config/agentd/providers.json`) when
+it exists; with neither it serves the deterministic `FakeProvider` used by tests
+and offline development.
 
 ## Durability line
 

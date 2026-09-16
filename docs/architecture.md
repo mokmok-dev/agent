@@ -125,14 +125,27 @@ and hijack the approval flow, nor forge `session.*` lifecycle. A token without
 validates `specversion`, `type`, and `id`, so an event's provenance in the log
 is daemon-owned.
 
-Tokens live in a JSON file (`--token-file`, default `~/.agentd/tokens.json`)
-that must not be readable or writable by group or other users; the daemon
-refuses to start otherwise. The socket directory and protocol files default to
-`~/.agentd` and are created mode `0700`/`0600`. The token is a **capability**:
+Tokens live in a JSON file (`--token-file`) that must not be readable or
+writable by group or other users; the daemon refuses to start otherwise. The
+defaults follow the XDG Base Directory specification: the token file (and a
+`providers.json`) default to `$XDG_CONFIG_HOME/agentd` (`~/.config/agentd`), the
+durable log to `$XDG_DATA_HOME/agentd` (`~/.local/share/agentd`), and the socket
+to `$XDG_RUNTIME_DIR/agentd` (falling back to `$TMPDIR/agentd`, since macOS does
+not set `XDG_RUNTIME_DIR`). The socket's directory and the token file are
+created mode `0700`/`0600`. The token is a **capability**:
 strong isolation from a compromised same-uid agent depends on the agent running
 inside the sandbox with the token file in `deny_read` (see
 [sandbox](sandbox.md)); a sandboxed node holds only `read`, `publish`, and
 `infer`, so it can neither forge daemon-authority events nor reach the network.
+
+`agentd init [--dir <path>]` creates the runtime directory (mode `0700`) and a
+token file with three clients — `user` (`read`, `publish`), `agent` (`read`,
+`publish`, `infer`), and `admin` (`authority`) — plus a mode-`0600`
+`<name>.token` file per client for tools like `agentd-agent` and
+`agentd-publish`. It refuses to overwrite an existing token file without
+`--force`, and prints the secrets once. `serve` creates the socket, its
+directory, and the log, but never generates a token file: it refuses to start
+without one and points at `init`.
 
 ## Sequences
 

@@ -62,6 +62,17 @@ enum Command {
         #[arg(long)]
         log_path: Option<PathBuf>,
     },
+    /// Create the private runtime directory and capability tokens for a first
+    /// run.
+    Init {
+        /// The config directory holding the token files. Defaults to
+        /// `$XDG_CONFIG_HOME/agentd` (or `~/.config/agentd`).
+        #[arg(long)]
+        config_dir: Option<PathBuf>,
+        /// Overwrite an existing token file.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -86,17 +97,10 @@ enum RunError {
     Session(#[from] agentd::session::SessionError),
     #[error("failed to load the provider config: {0}")]
     Providers(#[from] agentd_inference::ConfigError),
-}
-
-/// The directory holding the daemon's socket, log, and token file.
-///
-/// It is private to the daemon user, so a local user outside the daemon's
-/// account cannot reach the socket or read the capability tokens.
-fn runtime_dir() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(
-        || std::env::temp_dir().join("agentd"),
-        |home| PathBuf::from(home).join(".agentd"),
-    )
+    #[error("failed to initialize the runtime directory: {0}")]
+    Init(#[from] agentd::init::InitError),
+    #[error("the token file {0} does not exist; run `agentd init` to create it")]
+    MissingTokens(PathBuf),
 }
 
 /// Options for the session manager, parsed from the `serve` arguments.
@@ -170,11 +174,13 @@ async fn run() -> Result<(), RunError> {
             session_lifetime_secs,
             providers_config,
         } => {
-            let runtime = runtime_dir();
-            let socket = socket.unwrap_or_else(|| runtime.join("agentd.sock"));
-            let log_path = log_path.unwrap_or_else(|| runtime.join("events.jsonl"));
-            let token_file = token_file.unwrap_or_else(|| runtime.join("tokens.json"));
+            let socket = socket.unwrap_or_else(agentd_events::paths::default_socket);
+            let log_path = log_path.unwrap_or_else(agentd_events::paths::default_log);
+            let token_file = token_file.unwrap_or_else(agentd_events::paths::default_tokens);
 
+            if !token_file.exists() {
+                return Err(RunError::MissingTokens(token_file));
+            }
             let tokens = TokenStore::load(&token_file).map_err(RunError::Auth)?;
             let log = EventLog::open(&log_path).map_err(RunError::Log)?;
 
@@ -211,6 +217,10 @@ async fn run() -> Result<(), RunError> {
                 session_lifetime_secs,
             );
 
+            let providers_config = providers_config.or_else(|| {
+                let default = agentd_events::paths::default_providers();
+                default.exists().then_some(default)
+            });
             let provider: Arc<dyn Provider> = match providers_config {
                 Some(path) => {
                     let config = ProvidersConfig::load(&path)?;
@@ -224,7 +234,7 @@ async fn run() -> Result<(), RunError> {
             Ok(())
         },
         Command::VerifyLog { log_path } => {
-            let path = log_path.unwrap_or_else(|| runtime_dir().join("events.jsonl"));
+            let path = log_path.unwrap_or_else(agentd_events::paths::default_log);
             match agentd_events::verify_chain(&path) {
                 Ok(count) => {
                     tracing::info!(count, path = %path.display(), "hash chain verified");
@@ -233,13 +243,42 @@ async fn run() -> Result<(), RunError> {
                 Err(error) => Err(RunError::Log(error)),
             }
         },
+        Command::Init { config_dir, force } => {
+            let config_dir = config_dir.unwrap_or_else(agentd_events::paths::config_dir);
+            let initialized = agentd::init::init(&config_dir, force).map_err(RunError::Init)?;
+            print_initialized(&initialized);
+            Ok(())
+        },
     }
+}
+
+/// Prints the paths that [`agentd::init::init`] created, showing the secrets
+/// once so they can be copied into client commands.
+fn print_initialized(initialized: &agentd::init::Initialized) {
+    println!("initialized {}", initialized.config_dir.display());
+    println!("  tokens: {}", initialized.tokens_path.display());
+    println!("  clients (secrets are shown once):");
+    for client in &initialized.clients {
+        println!(
+            "    {}: {}  ({})",
+            client.name,
+            client.secret,
+            client.path.display()
+        );
+    }
+    println!("start the daemon with:");
+    println!(
+        "  agentd serve --socket {} --log-path {} --token-file {}",
+        agentd_events::paths::default_socket().display(),
+        agentd_events::paths::default_log().display(),
+        initialized.tokens_path.display(),
+    );
 }
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("mokmokd=info,tower_http=debug"));
+        .unwrap_or_else(|_| EnvFilter::new("agentd=info,tower_http=debug"));
     let json_layer = tracing_subscriber::fmt::layer().json();
     tracing_subscriber::registry()
         .with(env_filter)
@@ -248,8 +287,8 @@ async fn main() -> std::process::ExitCode {
 
     match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(e) => {
-            tracing::error!("{e}");
+        Err(error) => {
+            eprintln!("{error}");
             std::process::ExitCode::FAILURE
         },
     }
