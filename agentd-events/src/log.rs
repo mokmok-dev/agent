@@ -53,6 +53,10 @@ pub enum LogError {
     /// The writer thread has stopped, so durability can no longer be promised.
     #[error("the event log writer has stopped")]
     WriterStopped,
+    /// The log path is a symbolic link. Following it would let another user
+    /// redirect the append (and the recovery truncation) to a file they control.
+    #[error("the event log path {0} is a symbolic link")]
+    Symlink(PathBuf),
 }
 
 /// An append-only JSONL log with a live fanout.
@@ -86,19 +90,30 @@ impl EventLog {
     /// by a crash is truncated; complete lines are kept and the sequence number
     /// resumes after them.
     ///
+    /// The log contains command strings and outputs, so on Unix it is created
+    /// with mode `0600` and a symbolic link at `path` is refused.
+    ///
     /// Only one `EventLog` may own a given `path` at a time; concurrent writers
     /// would interleave their appends.
     ///
     /// # Errors
     ///
     /// Returns [`LogError::Io`] if the file cannot be opened, recovered, or the
-    /// writer thread cannot be spawned.
+    /// writer thread cannot be spawned, and [`LogError::Symlink`] if `path` is a
+    /// symbolic link.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, LogError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        if path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(LogError::Symlink(path));
+        }
         let next_seq = recover(&path)?;
+        restrict_permissions(&path)?;
         let file = OpenOptions::new().append(true).open(&path)?;
 
         let bus = EventBus::new(DEFAULT_CAPACITY);
@@ -185,12 +200,7 @@ impl EventLog {
 /// truncated. The file is streamed, so recovery does not load the log into
 /// memory.
 fn recover(path: &Path) -> Result<Seq, LogError> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)?;
+    let file = recover_options().open(path)?;
 
     let (complete_end, lines) = {
         let mut reader = BufReader::new(&file);
@@ -214,6 +224,33 @@ fn recover(path: &Path) -> Result<Seq, LogError> {
         file.sync_all()?;
     }
     Ok(lines + 1)
+}
+
+/// Opens (creating if needed) the log for recovery, private to the owner on
+/// Unix so the file is never briefly readable by other users.
+fn recover_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options
+}
+
+/// Restricts an existing log file to mode `0600` on Unix.
+fn restrict_permissions(path: &Path) -> Result<(), LogError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 /// Drains pending publishes into batches, commits each batch, and fans it out.
