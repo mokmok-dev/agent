@@ -324,12 +324,16 @@ impl Session {
         self.child.stderr.take()
     }
 
-    /// Kills the process group.
+    /// Kills the process group and reaps the child.
+    ///
+    /// Reaping matters: a supervisor that cancels [`wait`](Session::wait) (for
+    /// example on a lifetime timeout) would otherwise leave a zombie per
+    /// session.
     ///
     /// # Errors
     ///
     /// Returns an I/O error when the child cannot be signalled.
-    pub fn kill(&mut self) -> std::io::Result<()> {
+    pub async fn kill(&mut self) -> std::io::Result<()> {
         #[cfg(target_os = "macos")]
         if let Some(pid) = self.pid
             && let Ok(raw) = i32::try_from(pid)
@@ -341,7 +345,9 @@ impl Session {
                 nix::sys::signal::Signal::SIGKILL,
             );
         }
-        self.child.start_kill()
+        let signalled = self.child.start_kill();
+        let _ = self.child.wait().await;
+        signalled
     }
 
     /// Waits for the session to exit, appends `sandbox.session.exited`, and

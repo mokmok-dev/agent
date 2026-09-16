@@ -280,17 +280,13 @@ impl SessionManager {
         let Some(lifetime) = self.supervision.lifetime else {
             return Outcome::Exited(session.wait().await);
         };
-        tokio::time::timeout(lifetime, session.wait())
-            .await
-            .map_or_else(
-                |_| {
-                    if let Err(error) = session.kill() {
-                        tracing::warn!(%error, "failed to kill an expired session");
-                    }
-                    Outcome::Lifetime
-                },
-                Outcome::Exited,
-            )
+        if let Ok(result) = tokio::time::timeout(lifetime, session.wait()).await {
+            return Outcome::Exited(result);
+        }
+        if let Err(error) = session.kill().await {
+            tracing::warn!(%error, "failed to kill an expired session");
+        }
+        Outcome::Lifetime
     }
 }
 
