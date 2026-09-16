@@ -75,7 +75,7 @@
             );
           };
 
-          devShells.default = pkgs.mkShellNoCC {
+          devShells.default = pkgs.mkShell {
             inputsFrom = [ config.pre-commit.devShell ];
 
             packages = with pkgs; [

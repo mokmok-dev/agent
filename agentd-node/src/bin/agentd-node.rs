@@ -1,0 +1,137 @@
+//! A minimal node process for validating the client-side foundation.
+//!
+//! It connects to the daemon, projects events into a SQLite file, and counts
+//! events per `CloudEvents` `type`. A real session would replace the reducer and
+//! the filter; the transport, checkpoint, and resume behaviour are the same.
+
+use agentd_events::LogEntry;
+use agentd_node::{Node, SqliteError, SqliteProjection, SqliteReducer, TypePrefixes};
+use clap::Parser;
+use rusqlite::{Connection, Transaction};
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+use tokio::sync::watch;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
+#[derive(Debug, Parser)]
+#[command(name = "agentd-node", version = env!("CARGO_PKG_VERSION"))]
+struct Args {
+    /// The daemon's event WebSocket Unix socket.
+    #[arg(long, default_value = "/tmp/mokmokd.sock")]
+    socket: PathBuf,
+    /// The SQLite projection file. Its directory must be writable.
+    #[arg(long)]
+    db: PathBuf,
+    /// The node's `CloudEvents` `source` identity.
+    #[arg(long, default_value = "urn:mokmokd:node")]
+    source: String,
+    /// `CloudEvents` `type` prefixes to apply; repeatable. Empty matches all.
+    #[arg(long = "type-prefix")]
+    type_prefixes: Vec<String>,
+    /// Delete the projection before starting, rebuilding it from the log.
+    #[arg(long)]
+    rebuild: bool,
+}
+
+/// Counts events per `type`.
+struct EventCounts;
+
+impl SqliteReducer for EventCounts {
+    type Error = SqliteError;
+
+    fn migrate(conn: &Connection) -> Result<(), Self::Error> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS event_counts (
+                type TEXT PRIMARY KEY,
+                count INTEGER NOT NULL
+            );",
+        )?;
+        Ok(())
+    }
+
+    fn reduce(
+        tx: &Transaction<'_>,
+        entry: &LogEntry,
+    ) -> Result<(), Self::Error> {
+        tx.execute(
+            "INSERT INTO event_counts (type, count) VALUES (?1, 1) \
+             ON CONFLICT(type) DO UPDATE SET count = count + 1",
+            [&entry.event.r#type],
+        )?;
+        Ok(())
+    }
+}
+
+/// Errors returned by the binary.
+#[derive(Debug, Error)]
+enum RunError {
+    /// Removing the old projection failed.
+    #[error("failed to remove the projection: {0}")]
+    Io(#[from] std::io::Error),
+    /// Opening the projection failed.
+    #[error("failed to open the projection: {0}")]
+    Projection(#[from] SqliteError),
+    /// The node run loop failed.
+    #[error("the node failed: {0}")]
+    Node(#[from] agentd_node::NodeError<SqliteError>),
+}
+
+async fn run() -> Result<(), RunError> {
+    let args = Args::parse();
+
+    if args.rebuild {
+        remove_projection(&args.db)?;
+    }
+
+    let projection = SqliteProjection::<EventCounts>::open(&args.db)?;
+    let interest = TypePrefixes::new(args.type_prefixes);
+    let mut node = Node::new(args.socket, projection, interest, args.source);
+
+    let (sender, shutdown) = watch::channel(false);
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = sender.send(true);
+        }
+    });
+
+    node.run(shutdown).await?;
+    Ok(())
+}
+
+/// Removes the projection file and the sidecars SQLite may leave behind.
+fn remove_projection(path: &Path) -> Result<(), std::io::Error> {
+    for candidate in [
+        path.to_path_buf(),
+        PathBuf::from(format!("{}-wal", path.display())),
+        PathBuf::from(format!("{}-shm", path.display())),
+        PathBuf::from(format!("{}-journal", path.display())),
+    ] {
+        match std::fs::remove_file(&candidate) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("agentd_node=info"));
+    let json_layer = tracing_subscriber::fmt::layer().json();
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(json_layer)
+        .init();
+
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            tracing::error!("{error}");
+            std::process::ExitCode::FAILURE
+        },
+    }
+}

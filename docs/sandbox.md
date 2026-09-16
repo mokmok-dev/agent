@@ -322,3 +322,16 @@ Triggers, not dates — none of these steps are taken early:
 4. Optional layer 2: an in-process interpreter backend for the `Executor`
    trait (Sheena's re-implemented command model) — only if layer 1's
    confinement proves insufficient for a real workload.
+5. A long-lived session spawn API: today `Sandbox::exec` is a one-shot bounded
+   by a timeout that waits for the child to exit. A session needs a supervised
+   process that outlives one command, with a writable session mount for its
+   SQLite projection (`docs/node.md`).
+6. A session manager in `agentd` that launches a sandboxed node and reports
+   lifecycle through `session.*` events. The whole node process is confined by
+   one profile and child processes inherit it, so per-command
+   `sandbox.permission.*` events are not emitted for a sandboxed node.
+7. Unix-socket reachability research: a sandboxed node must connect to the
+   daemon's UDS, which the current deny-default profile blocks (`NetworkPolicy`
+   is an empty struct). Verify the exact Seatbelt rule for a Unix-domain-socket
+   connection before choosing between an explicit socket allow in the profile
+   and relocating the socket into a session mount.

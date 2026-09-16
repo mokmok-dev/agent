@@ -48,6 +48,7 @@ flowchart LR
 | `EventLog`         | `agentd-events` | Durable write path: owns the writer thread, the log sequence number, the JSONL file, and the live fanout.           |
 | JSONL log          | `agentd-events` | Append-only source of truth; one CloudEvents envelope per line, position = one-based line number (`Seq`).          |
 | Projections        | `agentd-events` | Read models derived from the log, resuming from an `applied_seq` checkpoint (`agentd_events::projection`).          |
+| Node               | `agentd-node`   | Long-lived client that consumes `/events` and keeps a SQLite projection current (see [node](node.md)).               |
 
 ## Event model
 
@@ -227,6 +228,19 @@ migration list: attributes are read on demand.
   stateful read models replay it through `projection::catch_up`, which resumes
   from the projection's `applied_seq`.
 
+## Nodes
+
+A node is a long-lived client that consumes the log and keeps a SQLite
+projection current (see [node](node.md)). It connects to `/events` with
+`?from=<checkpoint + 1>`, selects the events it cares about, and writes the
+reducer's state change and the checkpoint in **one SQLite transaction**, so a
+restart resumes without gaps or duplicates. An event the node is not interested
+in still advances the checkpoint, so it is not re-read.
+
+The JSONL log is the permanent event store; the SQLite file is a projection that
+can always be rebuilt from it. The log is not a write-ahead log and is never
+truncated to a checkpoint, and the projection is not a second source of truth.
+
 ## Extension model
 
 There are two distinct ways to extend the daemon, and they have different
@@ -248,6 +262,9 @@ The current structure follows these rules:
 - Future optional integrations are compiled in behind bin features, e.g.
   `webhook = ["dep:agentd-integration-webhook"]`; the event log is excluded
   from gating by design.
+- `agentd-node` depends on `agentd-events` only and is neither the daemon binary
+  nor an integration: it is the client-side node library and binary, run out of
+  process (and eventually inside the sandbox; see [node](node.md)).
 - Integrations document their deviations from their design docs next to the
   code that embodies them, so a reader never has to reconcile two sources of
   truth from memory.
