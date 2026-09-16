@@ -15,12 +15,17 @@
 //! times when it exits non-zero, and may be given a maximum lifetime, after
 //! which it is killed. A client can ask for the active sessions with a
 //! `session.status.requested` event.
+//!
+//! The durable log is the source of truth for the active set across a daemon
+//! restart: on startup the manager folds the recorded lifecycle and fails every
+//! session the log left open, because a restarted daemon cannot re-adopt a
+//! process it did not spawn. See [`SessionManager::run`].
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agentd_events::{Event, EventLog};
+use agentd_events::{Event, EventLog, LogEntry, LogError, Seq};
 use agentd_sandbox::{Policy, Sandbox, SandboxError};
 use serde_json::{Value, json};
 use thiserror::Error as ThisError;
@@ -50,6 +55,9 @@ pub enum SessionError {
     /// The manager's sandbox could not be built from the policy.
     #[error("the session sandbox could not be built: {0}")]
     Sandbox(#[from] SandboxError),
+    /// The manager could not read the durable log to reconcile its state.
+    #[error("the session log could not be read: {0}")]
+    Log(#[from] LogError),
 }
 
 /// How the manager supervises a session's process.
@@ -144,19 +152,28 @@ impl SessionManager {
     /// Runs until `shutdown` becomes `true`, launching a session for each
     /// `session.requested` event and answering `session.status.requested`.
     ///
+    /// The in-memory active set is reconciled with the durable log first, so a
+    /// restarted daemon learns about the sessions its predecessor started. That
+    /// reconciliation reads the log once, synchronously, before the loop starts.
+    ///
     /// # Errors
     ///
-    /// Never fails today; the signature leaves room for a fatal supervision
-    /// error.
+    /// Returns [`SessionError::Log`] when the log cannot be read to reconcile.
     pub async fn run(
         &self,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), SessionError> {
+        // Subscribe before taking the snapshot so no event can slip between the
+        // replay and the live stream; entries at or below the snapshot are the
+        // ones reconciliation already folded and are skipped below.
         let mut events = self.log.subscribe();
+        let snapshot = self.log.tail_seq();
+        self.reconcile(snapshot).await?;
         loop {
             tokio::select! {
                 _ = shutdown.changed() => return Ok(()),
                 recorded = events.recv() => match recorded {
+                    Ok(entry) if entry.seq <= snapshot => {},
                     Ok(entry) => match entry.event.r#type.as_str() {
                         SESSION_REQUESTED => self.launch(&entry.event),
                         SESSION_STATUS_REQUESTED => self.report_status().await,
@@ -167,6 +184,34 @@ impl SessionManager {
                 },
             }
         }
+    }
+
+    /// Reconciles the active set with the durable log up to `through`.
+    ///
+    /// Every session the log shows as started but never terminated was running
+    /// under the previous daemon and cannot be re-adopted (no process handle
+    /// survives the restart), so each is recorded as failed with a reason. Any
+    /// other session is left untouched, and the log is not re-launched from:
+    /// folding `session.requested` never starts a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::Log`] when the log cannot be read.
+    async fn reconcile(
+        &self,
+        through: Seq,
+    ) -> Result<(), SessionError> {
+        for (session_id, _restarts) in active_after(self.log.read_from(1)?, through)? {
+            let event = session_failed(
+                &session_id,
+                &self.agent_id,
+                "the daemon restarted while the session was active",
+            );
+            if let Err(error) = self.log.publish(event).await {
+                tracing::error!(%error, "failed to record an interrupted session");
+            }
+        }
+        Ok(())
     }
 
     /// Starts one supervised session for `request`.
@@ -359,6 +404,49 @@ pub fn session_status(sessions: &[Value]) -> Event {
     Event::new(SESSION_STATUS, json!({ "sessions": sessions }))
 }
 
+/// Folds the session lifecycle events up to `through` into the set of sessions
+/// the log has not terminated: each surviving id with its recorded restart
+/// count.
+///
+/// Only `session.started`, `session.restarted`, `session.exited`, and
+/// `session.failed` affect the set; `session.requested` and the status events
+/// are ignored, so replaying history never launches anything.
+fn active_after(
+    entries: impl Iterator<Item = Result<LogEntry, LogError>>,
+    through: Seq,
+) -> Result<BTreeMap<String, u32>, LogError> {
+    let mut active: BTreeMap<String, u32> = BTreeMap::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.seq > through {
+            break;
+        }
+        let Some(session_id) = entry.event.data.get("session_id").and_then(Value::as_str) else {
+            continue;
+        };
+        match entry.event.r#type.as_str() {
+            SESSION_STARTED => {
+                active.insert(session_id.to_string(), 0);
+            },
+            SESSION_RESTARTED => {
+                let restarts = entry
+                    .event
+                    .data
+                    .get("restarts")
+                    .and_then(Value::as_u64)
+                    .and_then(|count| u32::try_from(count).ok())
+                    .unwrap_or(1);
+                active.insert(session_id.to_string(), restarts);
+            },
+            SESSION_EXITED | SESSION_FAILED => {
+                active.remove(session_id);
+            },
+            _ => {},
+        }
+    }
+    Ok(active)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -371,6 +459,7 @@ mod tests {
     };
     use async_trait::async_trait;
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::Duration;
@@ -602,6 +691,133 @@ mod tests {
         let sessions = status.data["sessions"].as_array().expect("an array");
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0]["session_id"], "s5");
+
+        sender.send(true).expect("shutdown");
+        handle
+            .await
+            .expect("join")
+            .expect("run should stop cleanly");
+    }
+
+    #[test]
+    fn active_after_folds_lifecycle_in_order() {
+        let entries = vec![
+            // A request is not a lifecycle event: replaying it must not start.
+            Ok(LogEntry::new(1, request("s1"))),
+            Ok(LogEntry::new(2, super::session_started("s1", "agent"))),
+            Ok(LogEntry::new(3, super::session_restarted("s1", "agent", 2))),
+            Ok(LogEntry::new(4, super::session_started("s2", "agent"))),
+            Ok(LogEntry::new(5, super::session_exited("s2", "agent", 0, 5))),
+            Ok(LogEntry::new(6, super::session_started("s3", "agent"))),
+            Ok(LogEntry::new(
+                7,
+                super::session_failed("s3", "agent", "boom"),
+            )),
+        ];
+
+        let active = super::active_after(entries.into_iter(), 7).expect("fold");
+
+        assert_eq!(active, BTreeMap::from([(String::from("s1"), 2)]));
+    }
+
+    #[test]
+    fn active_after_stops_at_the_snapshot() {
+        let entries = vec![
+            Ok(LogEntry::new(1, super::session_started("s1", "agent"))),
+            Ok(LogEntry::new(2, super::session_exited("s1", "agent", 0, 1))),
+        ];
+
+        // The exit at seq 2 is beyond the snapshot, so it is not yet folded and
+        // the session still looks active.
+        let active = super::active_after(entries.into_iter(), 1).expect("fold");
+
+        assert_eq!(active, BTreeMap::from([(String::from("s1"), 0)]));
+    }
+
+    #[tokio::test]
+    async fn run_fails_a_session_left_open_by_a_previous_daemon() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = open_log(dir.path());
+        log.publish(super::session_started("s6", "agent"))
+            .await
+            .expect("publish");
+        let manager = manager(
+            log.clone(),
+            Arc::new(PlainExecutor),
+            "exit 7",
+            Supervision::default(),
+        );
+        let mut subscriber = log.subscribe();
+        let (sender, receiver) = watch::channel(false);
+        let handle = tokio::spawn(async move { manager.run(receiver).await });
+
+        let failed = wait_for(&mut subscriber, SESSION_FAILED).await;
+        assert_eq!(failed.data["session_id"], "s6");
+        assert!(
+            failed.data["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("restarted")),
+            "the failure must explain the restart: {:?}",
+            failed.data["error"]
+        );
+
+        log.publish(Event::new(SESSION_STATUS_REQUESTED, json!({})))
+            .await
+            .expect("publish");
+        let status = wait_for(&mut subscriber, super::SESSION_STATUS).await;
+        assert!(
+            status.data["sessions"]
+                .as_array()
+                .expect("an array")
+                .is_empty(),
+            "an interrupted session must not stay active"
+        );
+
+        sender.send(true).expect("shutdown");
+        handle
+            .await
+            .expect("join")
+            .expect("run should stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn run_leaves_a_terminated_session_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = open_log(dir.path());
+        log.publish(super::session_started("s7", "agent"))
+            .await
+            .expect("publish");
+        log.publish(super::session_exited("s7", "agent", 0, 3))
+            .await
+            .expect("publish");
+        let manager = manager(
+            log.clone(),
+            Arc::new(PlainExecutor),
+            "exit 0",
+            Supervision::default(),
+        );
+        let mut subscriber = log.subscribe();
+        let (sender, receiver) = watch::channel(false);
+        let handle = tokio::spawn(async move { manager.run(receiver).await });
+
+        log.publish(Event::new(SESSION_STATUS_REQUESTED, json!({})))
+            .await
+            .expect("publish");
+        let status = wait_for(&mut subscriber, super::SESSION_STATUS).await;
+        assert!(
+            status.data["sessions"]
+                .as_array()
+                .expect("an array")
+                .is_empty()
+        );
+
+        // Reconciliation runs before the status is answered, so nothing more
+        // may be recorded for a session the log already terminated.
+        let quiet = tokio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
+        assert!(
+            quiet.is_err(),
+            "no event should follow the status: {quiet:?}"
+        );
 
         sender.send(true).expect("shutdown");
         handle
