@@ -82,14 +82,14 @@ mod tests {
     use std::collections::BTreeMap;
     use std::convert::Infallible;
 
-    /// A throwaway projection counting events per kind.
+    /// A throwaway projection counting events per type.
     #[derive(Default)]
-    struct KindCounts {
+    struct TypeCounts {
         counts: BTreeMap<String, u64>,
         applied: Seq,
     }
 
-    impl Projection for KindCounts {
+    impl Projection for TypeCounts {
         type Error = Infallible;
 
         fn applied_seq(&self) -> Seq {
@@ -100,7 +100,7 @@ mod tests {
             &mut self,
             recorded: LogEntry,
         ) -> Result<(), Self::Error> {
-            *self.counts.entry(recorded.event.kind).or_default() += 1;
+            *self.counts.entry(recorded.event.r#type).or_default() += 1;
             self.applied = recorded.seq;
             Ok(())
         }
@@ -120,7 +120,7 @@ mod tests {
             .await
             .expect("publish should succeed");
 
-        let mut projection = KindCounts::default();
+        let mut projection = TypeCounts::default();
         catch_up(&log, &mut projection).expect("catch up should succeed");
 
         assert_eq!(projection.applied, 3);
@@ -137,7 +137,7 @@ mod tests {
             .await
             .expect("publish should succeed");
 
-        let mut projection = KindCounts::default();
+        let mut projection = TypeCounts::default();
         catch_up(&log, &mut projection).expect("first catch up should succeed");
 
         log.publish(Event::new("test.a", json!({})))
@@ -160,7 +160,7 @@ mod tests {
                 .expect("publish should succeed");
         }
 
-        let mut projection = KindCounts::default();
+        let mut projection = TypeCounts::default();
         catch_up(&log, &mut projection).expect("rebuild should succeed");
 
         assert_eq!(projection.applied, 3);

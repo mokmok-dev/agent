@@ -129,7 +129,7 @@ mod tests {
     fn requested_event_carries_the_contract_fields() {
         let event = permission_requested("sbx-1", "coder-1", "cargo test");
 
-        assert_eq!(event.kind, PERMISSION_REQUESTED);
+        assert_eq!(event.r#type, PERMISSION_REQUESTED);
         assert_eq!(event.source, DAEMON_SOURCE);
         assert_eq!(event.specversion, SPEC_VERSION);
         assert_eq!(
@@ -146,13 +146,13 @@ mod tests {
     }
 
     #[test]
-    fn decision_events_flip_the_kind_and_decision() {
+    fn decision_events_flip_the_type_and_decision() {
         let granted = permission_granted("sbx-1", "coder-1", "ls");
         let denied = permission_denied("sbx-1", "coder-1", "ls");
 
-        assert_eq!(granted.kind, PERMISSION_GRANTED);
+        assert_eq!(granted.r#type, PERMISSION_GRANTED);
         assert_eq!(granted.data["decision"], json!("granted"));
-        assert_eq!(denied.kind, PERMISSION_DENIED);
+        assert_eq!(denied.r#type, PERMISSION_DENIED);
         assert_eq!(denied.data["decision"], json!("denied"));
     }
 
@@ -169,7 +169,7 @@ mod tests {
             Some(&DenialReason::CommandNotAllowed),
         );
 
-        assert_eq!(event.kind, EXEC_COMPLETED);
+        assert_eq!(event.r#type, EXEC_COMPLETED);
         assert_eq!(
             event.data,
             json!({

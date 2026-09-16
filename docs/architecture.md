@@ -58,7 +58,7 @@ Every event on the bus and in the log is a CloudEvents 1.0 envelope:
 | `id`                  | `id`          | UUID version 7, so IDs order by creation time                |
 | `source`              | `source`      | `urn:mokmokd` for daemon-produced events                     |
 | `specversion`         | `specversion` | `1.0`, validated on ingress                                  |
-| `type`                | `kind`        | dotted kind, e.g. `error.lagged`, `error.publish_failed`     |
+| `type`                | `r#type`      | dotted type, e.g. `error.lagged`, `error.publish_failed`    |
 | `time`                | `time`        | RFC 3339 UTC; optional per the specification                 |
 | `data`                | `data`        | Arbitrary JSON payload                                       |
 

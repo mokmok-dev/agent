@@ -59,12 +59,12 @@ fn executor() -> std::sync::Arc<RecordingExecutor> {
     })
 }
 
-fn collect_kinds(subscriber: &mut tokio::sync::broadcast::Receiver<LogEntry>) -> Vec<String> {
-    let mut kinds = Vec::new();
+fn collect_types(subscriber: &mut tokio::sync::broadcast::Receiver<LogEntry>) -> Vec<String> {
+    let mut types = Vec::new();
     while let Ok(recorded) = subscriber.try_recv() {
-        kinds.push(recorded.event.kind);
+        types.push(recorded.event.r#type);
     }
-    kinds
+    types
 }
 
 #[tokio::test]
@@ -82,7 +82,7 @@ async fn allowed_command_flows_requested_granted_completed() {
 
     assert!(!result.is_denied());
     assert_eq!(
-        collect_kinds(&mut subscriber),
+        collect_types(&mut subscriber),
         [
             agentd_integration_sandbox::PERMISSION_REQUESTED,
             agentd_integration_sandbox::PERMISSION_GRANTED,
@@ -114,7 +114,7 @@ async fn denied_command_flows_requested_denied_and_spawns_nothing() {
         0
     );
     assert_eq!(
-        collect_kinds(&mut subscriber),
+        collect_types(&mut subscriber),
         [
             agentd_integration_sandbox::PERMISSION_REQUESTED,
             agentd_integration_sandbox::PERMISSION_DENIED,
@@ -136,7 +136,7 @@ async fn deny_wins_over_a_forged_granted_event() {
         loop {
             match subscriber.recv().await {
                 Ok(recorded)
-                    if recorded.event.kind == agentd_integration_sandbox::PERMISSION_REQUESTED =>
+                    if recorded.event.r#type == agentd_integration_sandbox::PERMISSION_REQUESTED =>
                 {
                     let _ = log
                         .publish(Event::new(

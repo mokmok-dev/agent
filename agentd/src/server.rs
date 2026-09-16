@@ -340,7 +340,7 @@ async fn send_message(
     message: WireMessage,
 ) -> Result<(), axum::Error> {
     let Ok(text) = serde_json::to_string(&message) else {
-        tracing::warn!(kind = %message.event.kind, "failed to serialize event");
+        tracing::warn!(r#type = %message.event.r#type, "failed to serialize event");
         return Ok(());
     };
     sink.send(Message::Text(text.into())).await
@@ -439,8 +439,8 @@ mod tests {
             .expect("send should succeed");
     }
 
-    fn test_event(kind: &str) -> Event {
-        Event::new(kind, json!({ "value": 1 }))
+    fn test_event(r#type: &str) -> Event {
+        Event::new(r#type, json!({ "value": 1 }))
     }
 
     fn numbered_event(index: u64) -> Event {
@@ -499,7 +499,7 @@ mod tests {
 
         let (seq, event) = recv_wire(&mut client).await;
         assert_eq!(seq, None);
-        assert_eq!(event.kind, "error.invalid_event");
+        assert_eq!(event.r#type, "error.invalid_event");
 
         server.abort();
     }
@@ -521,7 +521,7 @@ mod tests {
 
         let (seq, event) = recv_wire(&mut client).await;
         assert_eq!(seq, None);
-        assert_eq!(event.kind, "error.invalid_event");
+        assert_eq!(event.r#type, "error.invalid_event");
         assert_eq!(event.data["error"], "specversion must be 1.0");
 
         server.abort();
@@ -620,7 +620,7 @@ mod tests {
 
         let (seq, event) = recv_wire(&mut client).await;
         assert_eq!(seq, None);
-        assert_eq!(event.kind, "error.resume_out_of_range");
+        assert_eq!(event.r#type, "error.resume_out_of_range");
         assert_eq!(event.data["tail"], 1);
 
         server.abort();
@@ -636,7 +636,7 @@ mod tests {
 
         let (seq, event) = recv_wire(&mut client).await;
         assert_eq!(seq, None);
-        assert_eq!(event.kind, "error.resume_out_of_range");
+        assert_eq!(event.r#type, "error.resume_out_of_range");
 
         server.abort();
     }

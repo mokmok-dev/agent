@@ -41,7 +41,8 @@ pub const DAEMON_SOURCE: &str = "urn:mokmokd";
 /// An event exchanged between agentd components and connected clients.
 ///
 /// The serialized form uses the `CloudEvents` 1.0 attribute names; the `type`
-/// attribute is exposed as [`Event::kind`] because `type` is a Rust keyword.
+/// attribute is exposed as the `r#type` field of [`Event`], the raw-identifier
+/// spelling of the Rust keyword.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Event {
     /// The `CloudEvents` `id` attribute, generated as a UUID version 7 so
@@ -53,8 +54,7 @@ pub struct Event {
     /// The `CloudEvents` `specversion` attribute.
     pub specversion: String,
     /// The `CloudEvents` `type` attribute.
-    #[serde(rename = "type")]
-    pub kind: String,
+    pub r#type: String,
     /// The `CloudEvents` `time` attribute as an RFC 3339 timestamp. Optional in
     /// the specification, so absent timestamps are tolerated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,7 +65,7 @@ pub struct Event {
 }
 
 impl Event {
-    /// Creates a daemon-produced event with `kind` and `data`, assigning a
+    /// Creates a daemon-produced event with `type` and `data`, assigning a
     /// fresh `id`, the daemon `source`, the current `specversion`, and the
     /// current UTC `time`.
     ///
@@ -73,14 +73,14 @@ impl Event {
     /// formatted as RFC 3339 (e.g. a system clock far outside the representable
     /// range); `time` is optional in the specification.
     pub fn new(
-        kind: impl Into<String>,
+        r#type: impl Into<String>,
         data: serde_json::Value,
     ) -> Self {
         Self {
             id: uuid::Uuid::now_v7().to_string(),
             source: String::from(DAEMON_SOURCE),
             specversion: String::from(SPEC_VERSION),
-            kind: kind.into(),
+            r#type: r#type.into(),
             time: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
             data,
         }
@@ -208,8 +208,8 @@ mod tests {
     use serde_json::json;
     use tokio::sync::broadcast::error::RecvError;
 
-    fn test_event(kind: &str) -> Event {
-        Event::new(kind, json!({ "value": 1 }))
+    fn test_event(r#type: &str) -> Event {
+        Event::new(r#type, json!({ "value": 1 }))
     }
 
     #[test]
@@ -218,7 +218,7 @@ mod tests {
 
         assert_eq!(event.source, DAEMON_SOURCE);
         assert_eq!(event.specversion, SPEC_VERSION);
-        assert_eq!(event.kind, "test.event");
+        assert_eq!(event.r#type, "test.event");
         uuid::Uuid::parse_str(&event.id).expect("id should be a UUID");
         let time = event.time.expect("time should be set");
         time::OffsetDateTime::parse(&time, &time::format_description::well_known::Rfc3339)

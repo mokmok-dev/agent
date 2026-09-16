@@ -269,9 +269,9 @@ mod tests {
         assert_eq!(executor.count(), 1);
 
         let events = drain(&mut subscriber);
-        let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+        let types: Vec<&str> = events.iter().map(|event| event.r#type.as_str()).collect();
         assert_eq!(
-            kinds,
+            types,
             [
                 crate::events::PERMISSION_REQUESTED,
                 crate::events::PERMISSION_GRANTED,
@@ -302,9 +302,9 @@ mod tests {
         assert_eq!(executor.count(), 0);
 
         let events = drain(&mut subscriber);
-        let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+        let types: Vec<&str> = events.iter().map(|event| event.r#type.as_str()).collect();
         assert_eq!(
-            kinds,
+            types,
             [
                 crate::events::PERMISSION_REQUESTED,
                 crate::events::PERMISSION_DENIED,
@@ -333,9 +333,9 @@ mod tests {
         assert_eq!(executor.count(), 2);
 
         let events = drain(&mut subscriber);
-        let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+        let types: Vec<&str> = events.iter().map(|event| event.r#type.as_str()).collect();
         assert_eq!(
-            kinds,
+            types,
             [
                 crate::events::PERMISSION_REQUESTED,
                 crate::events::PERMISSION_GRANTED,
@@ -382,7 +382,7 @@ mod tests {
         let approver = tokio::spawn(async move {
             while let Ok(recorded) = subscriber.recv().await {
                 let event = recorded.event;
-                if event.kind == crate::events::PERMISSION_REQUESTED
+                if event.r#type == crate::events::PERMISSION_REQUESTED
                     && event.data["sandbox_id"] == sandbox_id
                 {
                     let _ = publisher_log

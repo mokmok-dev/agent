@@ -204,7 +204,7 @@ its reach is not.
 
 ## Permission events
 
-Every policy evaluation publishes events following the existing dotted-kind
+Every policy evaluation publishes events following the existing dotted-type
 convention with `source: urn:mokmokd`:
 
 ```json
