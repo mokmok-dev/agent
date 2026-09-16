@@ -12,9 +12,12 @@ use agentd_events::{LogEntry, Seq};
 use agentd_inference::{Message, ToolCall};
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde_json::Value;
+use std::path::Path;
 
 use crate::error::AgentError;
 
+/// A session began: the conversation id it runs and where.
+pub const AGENT_SESSION_STARTED: &str = "agent.session.started";
 /// A user prompt that starts a turn.
 pub const AGENT_INBOX: &str = "agent.inbox";
 /// A finalized assistant message.
@@ -49,7 +52,15 @@ impl super::SqliteReducer for Conversation {
                 tool_call_id TEXT
             );
             CREATE INDEX IF NOT EXISTS agent_messages_conversation
-                ON agent_messages (conversation_id, seq);",
+                ON agent_messages (conversation_id, seq);
+            CREATE TABLE IF NOT EXISTS agent_sessions (
+                conversation_id TEXT PRIMARY KEY,
+                workdir TEXT NOT NULL,
+                model TEXT NOT NULL,
+                seq INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS agent_sessions_workdir
+                ON agent_sessions (workdir, seq);",
         )?;
         Ok(())
     }
@@ -60,6 +71,24 @@ impl super::SqliteReducer for Conversation {
     ) -> Result<(), Self::Error> {
         let data = &entry.event.data;
         let conversation_id = field(data, "conversation_id").unwrap_or_default();
+        if entry.event.r#type == AGENT_SESSION_STARTED {
+            if conversation_id.is_empty() {
+                return Ok(());
+            }
+            tx.execute(
+                "INSERT INTO agent_sessions (conversation_id, workdir, model, seq) \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(conversation_id) DO UPDATE SET \
+                     workdir = excluded.workdir, model = excluded.model, seq = excluded.seq",
+                rusqlite::params![
+                    conversation_id,
+                    field(data, "workdir").unwrap_or_default(),
+                    field(data, "model").unwrap_or_default(),
+                    i64::try_from(entry.seq).unwrap_or(i64::MAX),
+                ],
+            )?;
+            return Ok(());
+        }
         let content = field(data, "content").unwrap_or_default();
         let (role, tool_calls, tool_call_id) = match entry.event.r#type.as_str() {
             AGENT_INBOX => (String::from("user"), None, None),
@@ -162,6 +191,35 @@ impl Conversation {
         let message = decode_message(&role, content, tool_calls, tool_call_id)?;
         Ok(Some((seq, message)))
     }
+
+    /// The most recent session recorded for `workdir`, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::Sqlite`] if the query fails.
+    pub fn latest_session(
+        conn: &Connection,
+        workdir: &str,
+    ) -> Result<Option<String>, AgentError> {
+        conn.query_row(
+            "SELECT conversation_id FROM agent_sessions WHERE workdir = ?1 \
+             ORDER BY seq DESC LIMIT 1",
+            [workdir],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(AgentError::from)
+    }
+}
+
+/// The stable key a session is scoped by: the canonical workdir path.
+#[must_use]
+pub fn session_key(workdir: &Path) -> String {
+    workdir
+        .canonicalize()
+        .unwrap_or_else(|_| workdir.to_path_buf())
+        .display()
+        .to_string()
 }
 
 /// Rebuilds a [`Message`] from its stored columns.
@@ -199,7 +257,9 @@ fn field(
 
 #[cfg(test)]
 mod tests {
-    use super::{AGENT_INBOX, AGENT_MESSAGE, AGENT_TOOL_RESULT, Conversation};
+    use super::{
+        AGENT_INBOX, AGENT_MESSAGE, AGENT_SESSION_STARTED, AGENT_TOOL_RESULT, Conversation,
+    };
     use crate::error::AgentError;
     use crate::projection::SqliteProjection;
     use agentd_events::{Event, LogEntry};
@@ -297,6 +357,42 @@ mod tests {
         let history =
             Conversation::history(projection.connection(), "c2").expect("history should load");
         assert_eq!(history, vec![Message::user("two")]);
+    }
+
+    #[test]
+    fn sessions_are_recorded_and_resolved_by_workdir() {
+        let (_dir, mut projection) = projection();
+
+        for (seq, conversation, workdir) in [(1, "c1", "/a"), (2, "c2", "/b"), (3, "c3", "/a")] {
+            projection
+                .apply(entry(
+                    seq,
+                    AGENT_SESSION_STARTED,
+                    json!({
+                        "conversation_id": conversation,
+                        "workdir": workdir,
+                        "model": "m",
+                    }),
+                ))
+                .expect("session should apply");
+        }
+
+        assert_eq!(
+            Conversation::latest_session(projection.connection(), "/a")
+                .expect("query")
+                .as_deref(),
+            Some("c3")
+        );
+        assert_eq!(
+            Conversation::latest_session(projection.connection(), "/b")
+                .expect("query")
+                .as_deref(),
+            Some("c2")
+        );
+        assert_eq!(
+            Conversation::latest_session(projection.connection(), "/z").expect("query"),
+            None
+        );
     }
 
     #[test]

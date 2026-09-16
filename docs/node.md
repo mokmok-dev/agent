@@ -125,20 +125,25 @@ to validate the transport, checkpoint, and resume behaviour.
 
 `agentd-agent` is the node a real session runs. It keeps the same connection,
 checkpoint, and resume behaviour, but its reducer is the conversation read model
-and it *reacts*: when an `agent.inbox` event for its conversation is applied, it
-asks the daemon for a completion on `/inference`, runs the `shell` tool for any
-tool call, and publishes the finalized messages as `agent.*` events (see
+and it *reacts*: when the conversation's tail is an unanswered turn, it asks the
+daemon for a completion on `/inference`, runs the `shell` tool for any tool call,
+and publishes the finalized messages as `agent.*` events (see
 [inference](inference.md)).
 
+A **session** is a conversation id. On start the agent publishes
+`agent.session.started` (the conversation, workdir, and model), so sessions are
+discoverable and auditable from the log. Without `--conversation`, a new session
+gets a fresh id; with `--resume` the agent continues the most recent session
+recorded for `--workdir`, which also makes it pick up a turn interrupted by a
+restart. `agentd-publish --inbox "..."` sends a prompt to that same session.
+
 ```sh
-agentd-agent \
-  --socket /abs/path/agentd.sock \
-  --db /path/to/session/agent.db \
-  --token-file /path/to/agent.token \
-  --conversation <id> \
-  --workdir /path/to/workspace \
-  --model <alias> \
-  --source urn:mokmokd:agent
+# start a new session (paths default to the XDG directories)
+agentd-agent --workdir /path/to/workspace --model <alias>
+
+# continue the last session for the workspace, then prompt it
+agentd-agent --resume --workdir /path/to/workspace --model <alias>
+agentd-publish --workdir /path/to/workspace --inbox "fix the failing test"
 ```
 
 `--model` names a model the daemon resolves (an alias or `provider/model`); when

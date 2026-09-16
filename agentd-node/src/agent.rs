@@ -27,8 +27,8 @@ use tokio::time::timeout;
 
 use crate::client::WsClient;
 use crate::conversation::{
-    AGENT_INBOX, AGENT_MESSAGE, AGENT_TOOL_RESULT, AGENT_TURN_COMPLETED, AGENT_TURN_FAILED,
-    AGENT_TURN_STARTED, Conversation,
+    AGENT_INBOX, AGENT_MESSAGE, AGENT_SESSION_STARTED, AGENT_TOOL_RESULT, AGENT_TURN_COMPLETED,
+    AGENT_TURN_FAILED, AGENT_TURN_STARTED, Conversation, session_key,
 };
 use crate::error::AgentError;
 use crate::projection::SqliteProjection;
@@ -98,6 +98,8 @@ pub struct Agent {
     /// The position of the last unanswered turn already run, so recovery does
     /// not re-run the same tail twice.
     last_answered: Seq,
+    /// Whether the session has been announced on the log this process.
+    announced: bool,
 }
 
 impl Agent {
@@ -122,6 +124,7 @@ impl Agent {
             model: None,
             projection,
             last_answered: 0,
+            announced: false,
         }
     }
 
@@ -213,6 +216,19 @@ impl Agent {
         client: &mut WsClient,
         shutdown: &mut watch::Receiver<bool>,
     ) -> Result<bool, AgentError> {
+        if !self.announced {
+            publish(
+                client,
+                AGENT_SESSION_STARTED,
+                json!({
+                    "conversation_id": self.conversation_id,
+                    "workdir": session_key(&self.workdir),
+                    "model": self.model.as_deref().unwrap_or(""),
+                }),
+            )
+            .await?;
+            self.announced = true;
+        }
         let mut received = false;
         loop {
             tokio::select! {

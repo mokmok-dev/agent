@@ -8,7 +8,7 @@
 //! session manager launched it under, so the commands it spawns inherit the
 //! confinement.
 
-use agentd_node::{Agent, AgentError, Conversation, ShellLimits, SqliteProjection};
+use agentd_node::{Agent, AgentError, Conversation, ShellLimits, SqliteProjection, session_key};
 use clap::Parser;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -17,6 +17,7 @@ use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use uuid::Uuid;
 
 #[derive(Debug, Parser)]
 #[command(name = "agentd-agent", version = env!("CARGO_PKG_VERSION"))]
@@ -25,15 +26,22 @@ struct Args {
     #[arg(long, default_value_os_t = agentd_events::paths::default_socket())]
     socket: PathBuf,
     /// The SQLite conversation projection file. Its directory must be writable.
-    #[arg(long)]
+    /// Defaults to `$XDG_DATA_HOME/agentd/agent.db`.
+    #[arg(long, default_value_os_t = default_db())]
     db: PathBuf,
     /// A file whose entire contents is the bearer token the daemon expects. The
-    /// token needs the read, publish, and infer claims.
-    #[arg(long)]
+    /// token needs the read, publish, and infer claims. Defaults to
+    /// `$XDG_CONFIG_HOME/agentd/agent.token`.
+    #[arg(long, default_value_os_t = default_agent_token())]
     token_file: PathBuf,
-    /// The conversation this agent answers.
-    #[arg(long, default_value = "default")]
-    conversation: String,
+    /// The conversation this agent answers. Without it, a new session is
+    /// created unless `--resume` is given.
+    #[arg(long)]
+    conversation: Option<String>,
+    /// Resume the most recent session recorded for `--workdir` instead of
+    /// starting a new one.
+    #[arg(long)]
+    resume: bool,
     /// The workspace directory the shell tool runs in.
     #[arg(long, default_value_os_t = default_workdir())]
     workdir: PathBuf,
@@ -64,6 +72,16 @@ fn default_workdir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// The default projection path.
+fn default_db() -> PathBuf {
+    agentd_events::paths::data_dir().join("agent.db")
+}
+
+/// The default agent token file.
+fn default_agent_token() -> PathBuf {
+    agentd_events::paths::config_dir().join("agent.token")
+}
+
 /// Errors returned by the binary.
 #[derive(Debug, Error)]
 enum RunError {
@@ -76,6 +94,9 @@ enum RunError {
     /// The agent run loop failed.
     #[error(transparent)]
     Agent(AgentError),
+    /// `--resume` found no session for the workdir.
+    #[error("no session to resume for this workdir; start without --resume to create one")]
+    NoSession,
 }
 
 async fn run() -> Result<(), RunError> {
@@ -87,6 +108,15 @@ async fn run() -> Result<(), RunError> {
 
     let projection =
         SqliteProjection::<Conversation>::open(&args.db).map_err(RunError::Projection)?;
+    let conversation = match args.conversation {
+        Some(conversation) => conversation,
+        None if args.resume => {
+            Conversation::latest_session(projection.connection(), &session_key(&args.workdir))
+                .map_err(RunError::Projection)?
+                .ok_or(RunError::NoSession)?
+        },
+        None => Uuid::new_v4().to_string(),
+    };
     let token = std::fs::read_to_string(&args.token_file)?;
     let limits = ShellLimits {
         timeout: Duration::from_secs(args.shell_timeout_secs),
@@ -95,7 +125,7 @@ async fn run() -> Result<(), RunError> {
     let mut agent = Agent::new(
         args.socket,
         projection,
-        args.conversation,
+        conversation,
         args.workdir,
         args.source,
         token.trim(),
