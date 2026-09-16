@@ -286,18 +286,28 @@ existing dotted-type convention and `source: urn:mokmokd`:
 | `sandbox.violation.network`   | The OS refused a network operation                                 |
 | `sandbox.exec.completed`      | Terminal state of an execution: exit code, duration, output sizes |
 
-`decision` in `requested` is `pending` when human approval is configured and
-`auto` when a static rule decided immediately. An approver is a WS client that
+Every permission event carries a `request_id` (a UUID) alongside `sandbox_id`, so
+a decision is correlated to one request even when execs run concurrently.
+`decision` in `requested` is `auto` when a static rule granted immediately and
+`pending` when human approval is configured. An approver is a WS client that
 reacts to `requested` by publishing a `granted`/`denied` event carrying the same
-`sandbox_id`; it authenticates with a token holding the `authority` claim, so a
+`request_id`; it authenticates with a token holding the `authority` claim, so a
 client without it cannot publish a `sandbox.permission.*` event (see
 [architecture](architecture.md#access-control)).
+
+With `Approval::Auto` the sandbox publishes `requested`(`auto`) and then
+`granted` itself. With `Approval::Required { timeout }` it publishes
+`requested`(`pending`) and awaits a matching decision: a grant proceeds (the
+approver's `granted` is the durable record, so it is not republished), a denial
+returns a denied `ExecResult`, and a timeout records a `denied` itself and
+returns a denied result. A decision that does not carry the request's id is
+ignored, so one request cannot release another.
 
 A violation event is the improvement over codex, which classifies
 `operation not permitted` / `read-only file system` / `SIGSYS` but only emits a
 `tracing::warn`: here the reason (`OperationNotPermitted`, `ReadOnlyFileSystem`,
-`PolicyDenied`, `SignalSyscall`, ...), the backend, and a bounded output snippet
-become durable, correlated state.
+`PolicyDenied`, `SignalSyscall`, ...), the denied path, and a bounded output
+snippet become durable, correlated state.
 
 ## Security guarantees and stated gaps
 
@@ -313,6 +323,8 @@ Prevented:
 - Runaway loops (wall-clock timeout).
 - Silent host contamination by default (writes require an explicit `write`
   entry).
+- **Self-approval.** A client cannot publish a `sandbox.permission.*` event
+  without the `authority` claim, so an agent cannot approve its own command.
 - **Network egress.** A confined command cannot open an IP connection.
 - Reads of the paths named in `deny` entries, held against a spawned host
   binary and verified end to end.
@@ -348,7 +360,8 @@ Modeled on Sheena's methodology and codex's, adapted to Rust:
 - **Path precedence tests**: `deny` inside `write` holds; protected metadata
   cannot be created or modified; canonicalisation collapses `/tmp`.
 - **Permission flow tests**: end-to-end through the log — `requested` →
-  `granted` → `exec.completed`.
+  `granted` → `exec.completed`, and `Approval::Required` granting, denying, and
+  timing out over the log with `request_id` correlation.
 - **Violation flow tests**: a structured `sandbox.violation.*` for a recognised
   OS denial, and no violation for an unrelated failure.
 - **Differential tests**: golden files recorded from real bash + coreutils for
@@ -364,13 +377,11 @@ Triggers, not dates — none of these steps are taken early:
    it (egress is otherwise denied already).
 2. Linux backend: bubblewrap preferred, Landlock fallback, seccomp for network
    and syscall narrowing, with the arg0 self-exec helper.
-3. Human-in-the-loop approval flow over the WS event API, using the `authority`
-   claim from `docs/architecture.md`.
-4. A long-lived session spawn API: today `Sandbox::exec` is a one-shot bounded
+3. A long-lived session spawn API: today `Sandbox::exec` is a one-shot bounded
    by a timeout that waits for the child to exit. A session needs a supervised
    process that outlives one command, with a writable session entry for its
    SQLite projection (`docs/node.md`).
-5. A session manager in `agentd` that launches a sandboxed node and reports
+4. A session manager in `agentd` that launches a sandboxed node and reports
    lifecycle through `session.*` events.
 
 ## Implementation status
@@ -378,7 +389,8 @@ Triggers, not dates — none of these steps are taken early:
 The crate matches this design except for the follow-ups above: `Policy` is the
 three-domain path-entry model with no allowlist or caps, the macOS profile
 renders the entries with protected metadata and root-unlink denial and opens no
-network, a denial is classified into a `sandbox.violation.*` event, and the
-deleted concepts (VFS, allowlist, caps) are gone from the code. What remains
-unimplemented is the Linux backend, the approval flow, and sessions. A crate doc
+network, a denial is classified into a `sandbox.violation.*` event, the
+human-in-the-loop approval flow runs over the log with `request_id`
+correlation, and the deleted concepts (VFS, allowlist, caps) are gone from the
+code. What remains unimplemented is the Linux backend and sessions. A crate doc
 comment records the same status next to the code.
