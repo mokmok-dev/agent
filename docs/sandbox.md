@@ -44,6 +44,11 @@ Non-goals (stated honestly, per the Sheena precedent):
   caps are best-effort there.
 - The sandbox is not a boundary for hostile native code. It confines the tool
   calls an agent *requests* against a configured policy.
+- **No confinement of the sandboxed node's own connection to the daemon.** A
+  node that runs inside the sandbox reaches the daemon's UDS because the socket
+  path is mounted in, not because the profile grants it; the connection is
+  unconfined and unauthenticated, and that is by design (see "Reaching a
+  Unix-domain socket from inside the profile").
 
 ## Design principles
 
@@ -246,16 +251,29 @@ except `/usr`, `/lib`, `/etc`, `/bin`, `/sbin`:
 | `listdir`                                   | `EACCES` (denied, as intended) |
 | `connect(2)` to the socket                  | **succeeds** |
 
-The lesson is the opposite of macOS: on Linux the socket must be made reachable
-by *filesystem* means, because the file API is the only lever an older ABI
-gives. Two consequences follow:
+The lesson is the opposite of macOS: on Linux the socket is reached through the
+filesystem like any other file, and the file API is the only lever an older ABI
+gives.
 
-- Until the Linux backend targets ABI 9, UDS reachability cannot be a Landlock
-  rule; it falls out of whether the socket path is inside an accessible mount.
-- This makes the mount-based option live again on Linux, where it does nothing
-  on macOS. Any shared design must therefore express the socket path as an
-  explicit, platform-neutral input and let each backend map it to its own
-  mechanism.
+#### Decision: the node's socket connection is not confined
+
+Neither mechanism is used to confine the connection, and no attempt is made to
+narrow it to one socket path on Linux. The reasoning:
+
+- On Linux a deny-by-default Landlock ruleset cannot stop the connection before
+  ABI 9, and the tested Ubuntu 24.04 kernel (6.8, ABI 4) is one of them.
+  Requiring ABI 9 would exclude current LTS kernels to protect a channel the
+  threat model does not treat as hostile.
+- The daemon has no client authentication, so "which socket may the sandbox
+  reach" is not a security boundary to begin with — anything that can connect
+  can already subscribe to and publish events.
+- The sandbox confines the tool calls an agent *requests*, not the node's own
+  transport. A node reaching its daemon is legitimate traffic.
+
+So the socket path is an explicit, platform-neutral policy input, and each
+backend maps it as its platform allows: on macOS to the narrowest available
+network clause, on Linux to mount reachability with no confinement claimed. The
+shared contract is the path, not the mechanism.
 
 ## Permission events
 
@@ -351,9 +369,11 @@ Stated gaps:
 - **`NetworkPolicy` is an empty struct.** Per-host allow/deny rules, port and
   method restrictions, the SSRF guard, and the body cap described above are not
   implemented, and nothing consults the field. Network denial today rests
-  entirely on the OS profile's deny-default. The one exception a sandboxed node
-  needs — its connection to the daemon's UDS — is a profile clause, not a policy
-  field (see above).
+  entirely on the OS profile's deny-default.
+- **The sandboxed node's socket connection is unconfined and unauthenticated**
+  (see "Decision: the node's socket connection is not confined"). This is a
+  conscious non-goal, not an oversight: the daemon has no client authentication,
+  and Landlock cannot restrict a pathname socket connection before ABI 9.
 
 ## Testing strategy
 
@@ -391,11 +411,8 @@ Triggers, not dates — none of these steps are taken early:
    lifecycle through `session.*` events. The whole node process is confined by
    one profile and child processes inherit it, so per-command
    `sandbox.permission.*` events are not emitted for a sandboxed node.
-7. Unix-socket reachability: a sandboxed node must connect to the daemon's UDS,
-   which the current deny-default profile blocks (`NetworkPolicy` is an empty
-   struct). Both platforms are settled and they differ (see "Reaching a
-   Unix-domain socket from inside the profile"): macOS needs a network clause
-   built from the canonicalised socket path, Linux needs the path to be
-   reachable as a file because Landlock cannot police it before ABI 9. The
+7. Unix-socket reachability: a sandboxed node must connect to the daemon's UDS.
+   The mechanism is settled per platform and the connection is deliberately not
+   confined (see "Reaching a Unix-domain socket from inside the profile"). The
    remaining work is expressing the socket path as a policy input and letting
-   each backend map it.
+   each backend map it — a network clause on macOS, mount reachability on Linux.

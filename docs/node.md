@@ -145,8 +145,9 @@ The remaining work is on the daemon side and is tracked in `docs/sandbox.md`:
    `(allow network-outbound (literal "<resolved socket path>"))` and a
    filesystem grant does nothing; the path must be canonical (`/private/tmp`,
    not `/tmp`). On Linux it is a file lookup that Landlock cannot restrict
-   before ABI 9, so reachability follows from the socket path being inside an
-   accessible mount. The shared input is the socket path; see `docs/sandbox.md`.
+   before ABI 9, so the socket is reached through the filesystem and no
+   confinement is claimed. The connection is deliberately not confined: see
+   `docs/sandbox.md`.
 
 ## Stated gaps
 
