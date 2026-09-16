@@ -50,6 +50,12 @@ enum Command {
         #[arg(long)]
         session_lifetime_secs: Option<u64>,
     },
+    /// Verify the event log's hash chain.
+    VerifyLog {
+        /// The JSONL event log. Defaults to `~/.agentd/events.jsonl`.
+        #[arg(long)]
+        log_path: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -193,6 +199,16 @@ async fn run() -> Result<(), RunError> {
                 .await
                 .map_err(RunError::Serve)?;
             Ok(())
+        },
+        Command::VerifyLog { log_path } => {
+            let path = log_path.unwrap_or_else(|| runtime_dir().join("events.jsonl"));
+            match agentd_events::verify_chain(&path) {
+                Ok(count) => {
+                    tracing::info!(count, path = %path.display(), "hash chain verified");
+                    Ok(())
+                },
+                Err(error) => Err(RunError::Log(error)),
+            }
         },
     }
 }

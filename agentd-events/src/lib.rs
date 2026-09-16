@@ -24,10 +24,11 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::broadcast;
 
+pub mod chain;
 pub mod log;
 pub mod projection;
 
-pub use log::{EventLog, LogError, LogReader, Seq};
+pub use log::{EventLog, LogError, LogReader, Seq, verify_chain};
 pub use projection::{Projection, ProjectionError, catch_up};
 
 /// Capacity of the channel buffering events per subscriber before it lags.

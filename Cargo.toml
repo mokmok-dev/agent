@@ -12,6 +12,7 @@ futures-util = { version = "0.3.34", features = ["sink"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151" }
+sha2 = "0.10.9"
 thiserror = { version = "2.0.20" }
 time = { version = "0.3.55", features = ["formatting", "parsing"] }
 tokio = { version = "1.53.1" }

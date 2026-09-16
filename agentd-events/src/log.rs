@@ -22,7 +22,8 @@
 //! but not acknowledged can survive a crash, so a publisher that retries may
 //! append it twice. Consumers deduplicate by the stable [`Event::id`].
 
-use crate::{Event, EventBus, LogEntry};
+use crate::{Event, EventBus, LogEntry, chain};
+use serde_json::Value;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -57,6 +58,15 @@ pub enum LogError {
     /// redirect the append (and the recovery truncation) to a file they control.
     #[error("the event log path {0} is a symbolic link")]
     Symlink(PathBuf),
+    /// The hash chain is broken at `seq`: the log was edited, reordered, or
+    /// written without the chain.
+    #[error("the event log hash chain is broken at position {seq}: {reason}")]
+    Chain {
+        /// The one-based position of the record that failed verification.
+        seq: Seq,
+        /// What was wrong with it.
+        reason: String,
+    },
 }
 
 /// An append-only JSONL log with a live fanout.
@@ -112,7 +122,7 @@ impl EventLog {
         {
             return Err(LogError::Symlink(path));
         }
-        let next_seq = recover(&path)?;
+        let (next_seq, last_hash) = recover(&path)?;
         restrict_permissions(&path)?;
         let file = OpenOptions::new().append(true).open(&path)?;
 
@@ -123,7 +133,16 @@ impl EventLog {
         let thread_tail = Arc::clone(&tail);
         std::thread::Builder::new()
             .name(String::from("eventlog"))
-            .spawn(move || write_loop(file, next_seq, pending, &thread_bus, &thread_tail))?;
+            .spawn(move || {
+                write_loop(
+                    file,
+                    next_seq,
+                    last_hash,
+                    pending,
+                    &thread_bus,
+                    &thread_tail,
+                );
+            })?;
 
         Ok(Self {
             inner: Arc::new(Inner {
@@ -191,22 +210,91 @@ impl EventLog {
     ) -> Result<LogReader, LogError> {
         LogReader::open(&self.inner.path, from)
     }
+
+    /// Verifies this log's hash chain, returning the number of chained records.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogError::Chain`] at the first record that breaks the chain.
+    pub fn verify_chain(&self) -> Result<u64, LogError> {
+        verify_chain(&self.inner.path)
+    }
 }
 
-/// Recovers `path` and returns the next free [`Seq`].
+/// Verifies the hash chain of the log at `path`, returning the number of
+/// chained records.
+///
+/// A trailing line without a newline is a partial append and is ignored, so
+/// verification does not fail on a log being written. A record without the
+/// chain attributes (a log that predates the chain, or one written by an
+/// attacker) fails as unchained.
+///
+/// # Errors
+///
+/// Returns [`LogError::Chain`] at the first record whose `prevhash` does not
+/// match the previous record or whose `chainhash` does not match its contents,
+/// [`LogError::Json`] for a malformed line, and [`LogError::Io`] on a read
+/// failure.
+pub fn verify_chain(path: &Path) -> Result<u64, LogError> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut buffer = Vec::new();
+    let mut expected = String::from(chain::GENESIS_HASH);
+    let mut verified = 0_u64;
+    loop {
+        buffer.clear();
+        let read = reader.read_until(b'\n', &mut buffer)?;
+        if read == 0 || buffer.last() != Some(&b'\n') {
+            break;
+        }
+        verified += 1;
+        let seq = verified;
+        let value: Value =
+            serde_json::from_slice(&buffer[..buffer.len() - 1]).map_err(LogError::Json)?;
+        let Some((prev, hash)) = chain::attributes(&value) else {
+            return Err(LogError::Chain {
+                seq,
+                reason: String::from(
+                    "the record has no hash chain attributes; the log predates the chain or was rewritten",
+                ),
+            });
+        };
+        if prev != expected {
+            return Err(LogError::Chain {
+                seq,
+                reason: String::from(
+                    "the previous-hash attribute does not match the previous record",
+                ),
+            });
+        }
+        let canonical = chain::canonical(&value)?;
+        if chain::hash(&prev, &canonical) != hash {
+            return Err(LogError::Chain {
+                seq,
+                reason: String::from("the record hash does not match its contents"),
+            });
+        }
+        expected = hash;
+    }
+    Ok(verified)
+}
+
+/// Recovers `path` and returns the next free [`Seq`] and the last record's
+/// hash, so the chain can continue.
 ///
 /// Creates an empty file when `path` is missing. When the file does not end in
 /// a newline, the trailing bytes are a partial append from a crash and are
 /// truncated. The file is streamed, so recovery does not load the log into
 /// memory.
-fn recover(path: &Path) -> Result<Seq, LogError> {
+fn recover(path: &Path) -> Result<(Seq, String), LogError> {
     let file = recover_options().open(path)?;
 
-    let (complete_end, lines) = {
+    let (complete_end, lines, last_hash) = {
         let mut reader = BufReader::new(&file);
         let mut buffer = Vec::new();
         let mut complete_end: u64 = 0;
         let mut lines: u64 = 0;
+        let mut last_hash: Option<String> = None;
         loop {
             buffer.clear();
             let read = reader.read_until(b'\n', &mut buffer)?;
@@ -215,15 +303,25 @@ fn recover(path: &Path) -> Result<Seq, LogError> {
             }
             complete_end += read as u64;
             lines += 1;
+            last_hash = serde_json::from_slice::<Value>(&buffer[..buffer.len() - 1])
+                .ok()
+                .and_then(|value| chain::attributes(&value))
+                .map(|(_, hash)| hash);
         }
-        (complete_end, lines)
+        (complete_end, lines, last_hash)
     };
 
     if complete_end < file.metadata()?.len() {
         file.set_len(complete_end)?;
         file.sync_all()?;
     }
-    Ok(lines + 1)
+    // A log written before the chain existed (or with an unchained trailing
+    // line) resumes the chain from genesis; `verify_chain` reports it when it
+    // walks the whole file.
+    Ok((
+        lines + 1,
+        last_hash.unwrap_or_else(|| String::from(chain::GENESIS_HASH)),
+    ))
 }
 
 /// Opens (creating if needed) the log for recovery, private to the owner on
@@ -257,6 +355,7 @@ fn restrict_permissions(path: &Path) -> Result<(), LogError> {
 fn write_loop(
     mut file: File,
     mut next_seq: Seq,
+    mut last_hash: String,
     mut pending: mpsc::Receiver<Pending>,
     bus: &EventBus,
     tail: &AtomicU64,
@@ -270,7 +369,7 @@ fn write_loop(
             }
         }
 
-        if let Err(error) = commit(&mut file, &mut next_seq, batch, bus, tail) {
+        if let Err(error) = commit(&mut file, &mut next_seq, &mut last_hash, batch, bus, tail) {
             tracing::error!(%error, "event log write failed; stopping the writer");
             return;
         }
@@ -278,9 +377,13 @@ fn write_loop(
 }
 
 /// Appends `batch` in one write, syncs once, then fans out in log order.
+///
+/// Each line is sealed into the hash chain before it is written, so the chain
+/// covers exactly the bytes on disk.
 fn commit(
     file: &mut File,
     next_seq: &mut Seq,
+    last_hash: &mut String,
     batch: Vec<Pending>,
     bus: &EventBus,
     tail: &AtomicU64,
@@ -288,8 +391,9 @@ fn commit(
     let mut buffer = String::new();
     let mut accepted = Vec::with_capacity(batch.len());
     for item in batch {
-        match serde_json::to_string(&item.event) {
-            Ok(line) => {
+        match chain::seal(&item.event, last_hash) {
+            Ok((line, hash)) => {
+                *last_hash = hash;
                 buffer.push_str(&line);
                 buffer.push('\n');
                 accepted.push((*next_seq, item));
@@ -567,5 +671,96 @@ mod tests {
         open_log(&path);
 
         assert!(Path::new(&path).exists());
+    }
+
+    #[tokio::test]
+    async fn published_records_form_a_verifiable_chain() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("events.jsonl");
+        let log = open_log(&path);
+
+        for index in 0..4 {
+            log.publish(test_event(index)).await.expect("publish");
+        }
+
+        assert_eq!(log.verify_chain().expect("chain should verify"), 4);
+        assert_eq!(super::verify_chain(&path).expect("chain should verify"), 4);
+    }
+
+    #[tokio::test]
+    async fn editing_a_record_breaks_the_chain_at_its_position() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("events.jsonl");
+        let log = open_log(&path);
+        for index in 0..3 {
+            log.publish(test_event(index)).await.expect("publish");
+        }
+        drop(log);
+
+        // Rewrite the payload of the second line, leaving its hash attribute.
+        let contents = std::fs::read_to_string(&path).expect("read");
+        let mut lines: Vec<String> = contents.lines().map(String::from).collect();
+        lines[1] = lines[1].replace("\"index\":1", "\"index\":99");
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write");
+
+        assert!(matches!(
+            super::verify_chain(&path),
+            Err(LogError::Chain { seq: 2, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn reordering_records_breaks_the_chain() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("events.jsonl");
+        let log = open_log(&path);
+        for index in 0..3 {
+            log.publish(test_event(index)).await.expect("publish");
+        }
+        drop(log);
+
+        let contents = std::fs::read_to_string(&path).expect("read");
+        let mut lines: Vec<String> = contents.lines().map(String::from).collect();
+        lines.swap(0, 1);
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write");
+
+        assert!(matches!(
+            super::verify_chain(&path),
+            Err(LogError::Chain { seq: 1, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_chain_resumes_across_a_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("events.jsonl");
+
+        {
+            let log = open_log(&path);
+            log.publish(test_event(0)).await.expect("publish");
+            log.publish(test_event(1)).await.expect("publish");
+        }
+        {
+            let log = open_log(&path);
+            log.publish(test_event(2)).await.expect("publish");
+            assert_eq!(log.verify_chain().expect("chain should verify"), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_record_without_chain_attributes_is_reported() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("events.jsonl");
+        let event = test_event(0);
+        std::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&event).expect("serialize")),
+        )
+        .expect("write");
+
+        assert!(matches!(
+            super::verify_chain(&path),
+            Err(LogError::Chain { seq: 1, .. })
+        ));
     }
 }
