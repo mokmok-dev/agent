@@ -137,8 +137,13 @@ agentd-agent \
   --token-file /path/to/agent.token \
   --conversation <id> \
   --workdir /path/to/workspace \
+  --model <alias> \
   --source urn:mokmokd:agent
 ```
+
+`--model` names a model the daemon resolves (an alias or `provider/model`); when
+omitted, the daemon's `default_model` is used. See
+[inference](inference.md#providers-and-model-routing).
 
 The agent's token carries `read`, `publish`, and `infer` — never `authority`,
 so it cannot forge daemon-authority events. It holds no provider credentials:

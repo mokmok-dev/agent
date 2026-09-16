@@ -40,6 +40,10 @@ struct Args {
     /// The agent's `CloudEvents` `source` identity.
     #[arg(long, default_value = "urn:mokmokd:agent")]
     source: String,
+    /// The model to ask the daemon for (an alias or `provider/model`). Without
+    /// it the daemon uses its configured default.
+    #[arg(long)]
+    model: Option<String>,
     /// Wall-clock seconds a single shell command may run before it is killed.
     #[arg(long, default_value_t = 120)]
     shell_timeout_secs: u64,
@@ -104,6 +108,9 @@ async fn run() -> Result<(), RunError> {
         token.trim(),
     )
     .with_limits(limits);
+    if let Some(model) = args.model {
+        agent = agent.with_model(model);
+    }
 
     let (sender, shutdown) = watch::channel(false);
     tokio::spawn(async move {

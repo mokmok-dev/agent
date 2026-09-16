@@ -78,6 +78,7 @@ pub struct Agent {
     conversation_id: String,
     workdir: PathBuf,
     limits: ShellLimits,
+    model: Option<String>,
     projection: SqliteProjection<Conversation>,
 }
 
@@ -99,6 +100,7 @@ impl Agent {
             conversation_id: conversation_id.into(),
             workdir: workdir.into(),
             limits: ShellLimits::default(),
+            model: None,
             projection,
         }
     }
@@ -110,6 +112,17 @@ impl Agent {
         limits: ShellLimits,
     ) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Sets the model the agent asks the daemon for; without it the daemon uses
+    /// its configured default.
+    #[must_use]
+    pub fn with_model(
+        mut self,
+        model: impl Into<String>,
+    ) -> Self {
+        self.model = Some(model.into());
         self
     }
 
@@ -190,6 +203,7 @@ impl Agent {
                                     limits: self.limits,
                                     source: &self.source,
                                     conversation_id: &self.conversation_id,
+                                    model: self.model.as_deref(),
                                 };
                                 if let Err(error) = turn.run(client, &mut history).await {
                                     tracing::warn!(%error, "the agent turn failed");
@@ -249,6 +263,7 @@ struct Turn<'a> {
     limits: ShellLimits,
     source: &'a str,
     conversation_id: &'a str,
+    model: Option<&'a str>,
 }
 
 impl Turn<'_> {
@@ -303,6 +318,7 @@ impl Turn<'_> {
             let request = InferenceRequest {
                 messages: request_messages(history),
                 tools: tools.clone(),
+                model: self.model.map(String::from),
             };
             let deltas = inference.complete(&request).await?;
             let (text, calls) = fold_deltas(deltas)?;
