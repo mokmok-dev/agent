@@ -107,11 +107,16 @@ projection with `--rebuild`.
 
 ```sh
 agentd-node \
-  --socket /tmp/mokmokd.sock \
+  --socket ~/.agentd/agentd.sock \
   --db /path/to/session/node.db \
+  --token-file /path/to/node.token \
   --source urn:mokmokd:session:1 \
   --type-prefix sandbox.
 ```
+
+`--token-file` is a file whose contents are the bearer secret the daemon
+expects; the node needs only the `read` claim unless it publishes. Keep the file
+private to the node's user.
 
 The bundled binary projects a count of events per `type` and exists to validate
 the transport, checkpoint, and resume behaviour. A real session replaces the
@@ -129,7 +134,7 @@ does not require rework:
 - The node does not spawn subprocesses, so no `process-exec` grant is needed.
 - SQLite writes its journal or WAL sidecar next to the database, so the whole
   **directory** must be writable, not just the file. Place the database in one
-  sandbox `ReadWrite` mount per session.
+  sandbox session `write` entry per session.
 
 The remaining work is on the daemon side and is tracked in `docs/sandbox.md`:
 
@@ -139,11 +144,10 @@ The remaining work is on the daemon side and is tracked in `docs/sandbox.md`:
    with a timeout that waits for exit).
 3. The whole node process is confined by one profile; child processes inherit
    it, so per-command `sandbox.permission.*` events are not emitted.
-4. The node's connection to the daemon needs no new mechanism: the profile
-   opens outbound connections, so a sandboxed node reaches the socket without a
-   per-socket grant, and nothing about the connection is confined. The node also
-   needs no read of host files, and the database lives in its own session mount,
-   so the file-effect policy is unchanged.
+4. The node's connection to the daemon is the one allowed network path: egress is
+   denied outright, and the sandbox explicitly permits only the daemon's Unix
+   socket. The node needs no read of host files, and the database lives in its
+   own session write entry, so the file-effect policy is otherwise unchanged.
 
 ## Stated gaps
 

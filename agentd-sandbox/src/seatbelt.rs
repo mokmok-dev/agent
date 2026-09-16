@@ -8,9 +8,10 @@
 //! - **File writes** are limited to the read-write mounts, `/dev/null`, and
 //!   the sandbox scratch directory; the process and every descendant share
 //!   the fate of the process group on timeout.
-//! - **Network** is outbound-only: `deny default` blocks a listening socket,
-//!   and one `allow network-outbound` clause opens connections so a command can
-//!   reach a remote service. Reachability is intentionally not confined; see
+//! - **Network** is outbound-only in the current rendering: `deny default`
+//!   blocks a listening socket, and one `allow network-outbound` clause opens
+//!   connections. The target design denies egress and permits only the daemon's
+//!   Unix socket; this profile predates it and is the deviation recorded with
 //!   `docs/sandbox.md`.
 //! - **File reads are NOT path-confined** at the OS level: on macOS 26,
 //!   platform binaries abort inside `dyld4::CacheFinder` when their reads are
@@ -20,9 +21,9 @@
 //!   [`FsPolicy::deny_read`](crate::policy::FsPolicy::deny_read) paths are
 //!   emitted as `(deny file-read-data ...)`, `(deny file-read-metadata ...)`,
 //!   and `(deny file-read-xattr ...)`, which override the broad grants. Without
-//!   a denial the read confinement stays at the [`Vfs`](crate::vfs::Vfs) layer,
-//!   which a spawned host binary bypasses; this is a stated gap; see
-//!   `docs/sandbox.md`.
+//!   a denial, reads are unconfined at the OS level; the [`Vfs`](crate::vfs::Vfs)
+//!   layer screens virtual paths for a future in-process executor but a spawned
+//!   host binary bypasses it — a stated gap; see `docs/sandbox.md`.
 //!
 //! Seatbelt is officially unsupported by Apple and profiles are best-effort.
 

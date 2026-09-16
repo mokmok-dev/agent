@@ -43,7 +43,7 @@ flowchart LR
 | Component          | Crate           | Role                                                                                                              |
 | ------------------ | --------------- | ----------------------------------------------------------------------------------------------------------------- |
 | Unix domain socket | `agentd`        | Transport and single-instance boundary; a stale socket file is removed, a live one reports `AlreadyRunning`.       |
-| WebSocket endpoint | `agentd`        | Ingress and egress protocol. Inbound text frames must parse as CloudEvents; outbound messages pair the event with its `seq` (see [Wire envelope](#wire-envelope)) and support `?from=` to resume. |
+| WebSocket endpoint | `agentd`        | Ingress and egress protocol. Connections authenticate with a bearer token (see [Access control](#access-control)); inbound text frames must parse as CloudEvents and pass validation; outbound messages pair the event with its `seq` (see [Wire envelope](#wire-envelope)) and support `?from=` to resume. |
 | `EventBus`         | `agentd-events` | Internal live fanout to subscribers via a `tokio::sync::broadcast` channel (capacity 1024 per subscriber); only `EventLog` publishes to it. |
 | `EventLog`         | `agentd-events` | Durable write path: owns the writer thread, the log sequence number, the JSONL file, and the live fanout.           |
 | JSONL log          | `agentd-events` | Append-only source of truth; one CloudEvents envelope per line, position = one-based line number (`Seq`).          |
@@ -100,6 +100,33 @@ position on append.
 
 A consumer's saved position (its cursor) must only advance on a message whose
 `seq` is non-null; notices carry `null` and must not overwrite it.
+
+## Access control
+
+The daemon is not an open bus. Every connection presents an
+`Authorization: Bearer <token>` header whose token maps to a set of claims:
+
+| Claim       | Grants                                                                              |
+| ----------- | ----------------------------------------------------------------------------------- |
+| `read`      | Subscribe to the stream (replay and live).                                            |
+| `publish`   | Append non-reserved events.                                                           |
+| `authority` | Publish the reserved daemon-authority types `error.*`, `sandbox.*`, and `session.*`.  |
+
+A read-only connection cannot append; a publish attempt is answered with an
+`error.unauthorized` notice. A token without `authority` cannot publish a
+reserved type, so a client cannot forge `sandbox.permission.granted`/`denied`
+and hijack the approval flow. The daemon overwrites the client-supplied
+`source` (with the authenticated principal's) and `time` (with its own), and
+validates `specversion`, `type`, and `id`, so an event's provenance in the log
+is daemon-owned.
+
+Tokens live in a JSON file (`--token-file`, default `~/.agentd/tokens.json`)
+that must not be readable or writable by group or other users; the daemon
+refuses to start otherwise. The socket directory and protocol files default to
+`~/.agentd` and are created mode `0700`/`0600`. The token is a **capability**:
+strong isolation from a compromised same-uid agent depends on the agent running
+inside the sandbox with the token file in `deny_read` (see
+[sandbox](sandbox.md)) — wiring the sandbox is the remaining step.
 
 ## Sequences
 
@@ -244,8 +271,9 @@ truncated to a checkpoint, and the projection is not a second source of truth.
 ## Extension model
 
 The daemon is extended out of process. An extension consumes and produces
-CloudEvents 1.0 JSON over the WebSocket event API (a Unix socket); any external
-program in any language qualifies and no crate is required. There is no
+CloudEvents 1.0 JSON over the WebSocket event API (a Unix socket), authenticating
+with a bearer token that carries the claims it needs; any external program in any
+language qualifies and no crate is required. There is no
 in-process extension mechanism: components that need in-process access to the
 event contract are first-class crates, not plug-ins.
 
@@ -269,16 +297,20 @@ The current structure follows these rules:
 
 `agentd-sandbox` (see `docs/sandbox.md`) is the confinement layer through which
 an agent drives shell commands. It holds an `EventLog`, durably appending
-`sandbox.permission.*` and `sandbox.exec.completed` for every decision, so
-approval flows are ordinary subscribers and no decision is lost. `Sandbox::exec`
-returns a `Result` and surfaces `SandboxError::Publish` when an append fails;
-the decision is appended before a command runs, so a command never starts
-without its decision recorded. Its layer-1 executor is macOS-only so far
-(Seatbelt; Linux Landlock/seccomp is a follow-up), spawned-command reads are
-not path-confined on macOS 26 (dyld aborts on filtered read grants — a stated
-gap recorded in the crate docs), and no component drives the sandbox yet, so
-the feature exists to validate the dependency graph under CI's
-`--all-features`.
+`sandbox.permission.*`, `sandbox.violation.*`, and `sandbox.exec.completed` for
+every decision and OS denial, so approval flows are ordinary subscribers and no
+decision is lost. `Sandbox::exec` returns a `Result` and surfaces
+`SandboxError::Publish` when an append fails; the decision is appended before a
+command runs, so a command never starts without its decision recorded. The
+boundary is the platform's native isolation (Seatbelt on macOS;
+bubblewrap-preferred with a Landlock fallback on Linux), and the sandbox has no
+network egress: inference is a daemon capability, reached over the daemon's Unix
+socket, which is the only endpoint a confined command may connect to. The
+current code lags this design — its layer-1 executor is macOS-only so far,
+`NetworkPolicy` is empty and the rendered profile still opens outbound, and the
+`Vfs` trait is not wired to the executor (it is layer-2 only) — and no component
+drives the sandbox yet, so the feature exists to validate the dependency graph
+under CI's `--all-features`.
 
 Further structural steps keep explicit triggers and are not taken early:
 
