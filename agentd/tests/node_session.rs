@@ -1,6 +1,7 @@
 //! End-to-end test: a node projects the daemon's event log into SQLite and
 //! resumes from its checkpoint across a restart.
 
+use agentd::auth::{Claim, Principal, Token, TokenStore};
 use agentd::server;
 use agentd_events::{Event, EventLog, LogEntry, Seq};
 use agentd_node::{Node, SqliteError, SqliteProjection, SqliteReducer, TypePrefixes, WsClient};
@@ -10,6 +11,17 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::net::UnixListener;
 use tokio::sync::watch;
+
+/// The read-and-publish token used by the tests.
+const NODE_TOKEN: &str = "node-secret";
+
+/// A token store granting read and publish.
+fn tokens() -> TokenStore {
+    TokenStore::new(vec![Token {
+        secret: String::from(NODE_TOKEN),
+        principal: Principal::new("urn:test:node", [Claim::Read, Claim::Publish]),
+    }])
+}
 
 /// Counts events per `type`.
 struct EventCounts;
@@ -90,6 +102,7 @@ fn spawn_node(
         projection,
         TypePrefixes::new(["test."]),
         "urn:mokmokd:session:test",
+        NODE_TOKEN,
     );
     let (sender, receiver) = watch::channel(false);
     let handle = tokio::spawn(async move { node.run(receiver).await });
@@ -106,7 +119,7 @@ async fn node_projects_from_the_log_and_resumes_from_its_checkpoint() {
     let listener = UnixListener::bind(&socket).expect("listener should bind");
     let server_log = log.clone();
     let server = tokio::spawn(async move {
-        axum::serve(listener, server::router(server_log))
+        axum::serve(listener, server::router(server_log, tokens()))
             .await
             .expect("server should run");
     });
@@ -171,12 +184,12 @@ async fn ws_client_publishes_an_event_the_daemon_broadcasts_back() {
     let listener = UnixListener::bind(&socket).expect("listener should bind");
     let server_log = log.clone();
     let server = tokio::spawn(async move {
-        axum::serve(listener, server::router(server_log))
+        axum::serve(listener, server::router(server_log, tokens()))
             .await
             .expect("server should run");
     });
 
-    let mut client = WsClient::connect(&socket, None)
+    let mut client = WsClient::connect(&socket, None, NODE_TOKEN)
         .await
         .expect("client should connect");
     let event = Event::new("test.sent", json!({ "n": 1 }));
@@ -189,7 +202,8 @@ async fn ws_client_publishes_an_event_the_daemon_broadcasts_back() {
         .expect("the connection should stay open");
 
     assert_eq!(wire.seq, Some(1));
-    assert_eq!(wire.event, event);
+    assert_eq!(wire.event.data, event.data);
+    assert_eq!(wire.event.source, "urn:test:node");
 
     server.abort();
 }

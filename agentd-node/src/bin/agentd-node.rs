@@ -19,11 +19,14 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[command(name = "agentd-node", version = env!("CARGO_PKG_VERSION"))]
 struct Args {
     /// The daemon's event WebSocket Unix socket.
-    #[arg(long, default_value = "/tmp/mokmokd.sock")]
+    #[arg(long, default_value_os_t = default_socket())]
     socket: PathBuf,
     /// The SQLite projection file. Its directory must be writable.
     #[arg(long)]
     db: PathBuf,
+    /// A file whose entire contents is the bearer token the daemon expects.
+    #[arg(long)]
+    token_file: PathBuf,
     /// The node's `CloudEvents` `source` identity.
     #[arg(long, default_value = "urn:mokmokd:node")]
     source: String,
@@ -35,9 +38,19 @@ struct Args {
     rebuild: bool,
 }
 
+/// The daemon's default socket path, matching `agentd`'s `~/.agentd` runtime
+/// directory.
+fn default_socket() -> PathBuf {
+    std::env::var_os("HOME")
+        .map_or_else(
+            || std::env::temp_dir().join("agentd"),
+            |home| PathBuf::from(home).join(".agentd"),
+        )
+        .join("agentd.sock")
+}
+
 /// Counts events per `type`.
 struct EventCounts;
-
 impl SqliteReducer for EventCounts {
     type Error = SqliteError;
 
@@ -87,7 +100,8 @@ async fn run() -> Result<(), RunError> {
 
     let projection = SqliteProjection::<EventCounts>::open(&args.db)?;
     let interest = TypePrefixes::new(args.type_prefixes);
-    let mut node = Node::new(args.socket, projection, interest, args.source);
+    let token = std::fs::read_to_string(&args.token_file)?;
+    let mut node = Node::new(args.socket, projection, interest, args.source, token.trim());
 
     let (sender, shutdown) = watch::channel(false);
     tokio::spawn(async move {

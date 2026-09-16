@@ -60,6 +60,7 @@ where
 {
     socket: PathBuf,
     source: String,
+    token: String,
     interest: F,
     projection: SqliteProjection<R>,
 }
@@ -70,16 +71,18 @@ where
     R: SqliteReducer,
 {
     /// Creates a node for `socket` with the given projection, interest, and
-    /// stable `CloudEvents` `source` identity.
+    /// stable `CloudEvents` `source` identity, authenticating with `token`.
     pub fn new(
         socket: impl Into<PathBuf>,
         projection: SqliteProjection<R>,
         interest: F,
         source: impl Into<String>,
+        token: impl Into<String>,
     ) -> Self {
         Self {
             socket: socket.into(),
             source: source.into(),
+            token: token.into(),
             interest,
             projection,
         }
@@ -125,7 +128,7 @@ where
             }
 
             let from = self.projection.applied_seq().saturating_add(1);
-            match WsClient::connect(&self.socket, Some(from)).await {
+            match WsClient::connect(&self.socket, Some(from), &self.token).await {
                 Ok(mut client) => {
                     let received = self.session(&mut client, &mut shutdown).await?;
                     if received {
@@ -272,6 +275,7 @@ mod tests {
             projection,
             TypePrefixes::new(["test."]),
             "urn:test:node",
+            "test-token",
         )
     }
 

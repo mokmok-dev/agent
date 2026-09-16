@@ -33,7 +33,7 @@
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let projection = SqliteProjection::<Counts>::open("node.db")?;
 //! let interest = TypePrefixes::new(["sandbox."]);
-//! let mut node = Node::new("/tmp/mokmokd.sock", projection, interest, "urn:mokmokd:session:1");
+//! let mut node = Node::new("/tmp/mokmokd.sock", projection, interest, "urn:mokmokd:session:1", "token");
 //! let (sender, shutdown) = tokio::sync::watch::channel(false);
 //! let _ = sender;
 //! node.run(shutdown).await?;

@@ -1,9 +1,11 @@
-use agentd_events::{Event, EventLog, LogEntry, LogError, SPEC_VERSION, Seq, WireMessage};
+use agentd_events::{Event, EventLog, LogEntry, LogError, Seq, WireMessage};
 use axum::Router;
 use axum::extract::Query;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::http::HeaderMap;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use futures_util::SinkExt;
 use futures_util::stream::{SplitSink, StreamExt};
@@ -12,6 +14,8 @@ use serde_json::json;
 use thiserror::Error;
 use tokio::sync::broadcast::error::RecvError;
 use tower_http::trace::TraceLayer;
+
+use crate::auth::{Claim, TokenStore};
 
 /// The largest number of historical events read from the log at once while
 /// replaying to a client. Bounds the memory one replay step can hold.
@@ -26,6 +30,10 @@ pub enum ServerError {
     /// A live instance is already listening on the socket.
     #[error("another instance is already listening on {0}")]
     AlreadyRunning(std::path::PathBuf),
+    /// The socket's directory is writable by other users, so another local user
+    /// could replace the socket and impersonate the daemon.
+    #[error("the socket directory {0} is writable by other users")]
+    InsecureDirectory(std::path::PathBuf),
 }
 
 /// Serves the HTTP and WebSocket API over the Unix domain socket at `socket`
@@ -36,6 +44,11 @@ pub enum ServerError {
 /// [`ServerError::AlreadyRunning`] is returned; otherwise the stale file is
 /// removed and the socket is bound.
 ///
+/// The socket's parent directory and the socket itself are made private to the
+/// daemon user (mode `0700`/`0600`) when they are created, so another local user
+/// cannot connect or inject events. Access is then decided by the bearer tokens
+/// in `tokens` (see [`crate::auth`]).
+///
 /// # Errors
 ///
 /// Returns [`ServerError::Io`] if creating the socket, its parent directory,
@@ -44,9 +57,19 @@ pub enum ServerError {
 pub async fn run(
     socket: std::path::PathBuf,
     log: EventLog,
+    tokens: TokenStore,
 ) -> Result<(), ServerError> {
-    if let Some(parent) = socket.parent() {
-        std::fs::create_dir_all(parent)?;
+    if let Some(parent) = socket.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        if parent.exists() {
+            if is_shared_directory(parent) {
+                return Err(ServerError::InsecureDirectory(parent.to_path_buf()));
+            }
+        } else {
+            std::fs::create_dir_all(parent)?;
+            set_mode(parent, 0o700)?;
+        }
     }
 
     let listener = match tokio::net::UnixListener::bind(&socket) {
@@ -60,11 +83,12 @@ pub async fn run(
         },
         Err(e) => return Err(e.into()),
     };
+    set_mode(&socket, 0o600)?;
 
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
-    let () = axum::serve(listener, router(log))
+    let () = axum::serve(listener, router(log, tokens))
         .with_graceful_shutdown(async move {
             tokio::select! {
                 _ = interrupt.recv() => {},
@@ -76,12 +100,59 @@ pub async fn run(
     Ok(())
 }
 
+/// Sets a filesystem mode on Unix; a no-op elsewhere.
+#[cfg(unix)]
+fn set_mode(
+    path: &std::path::Path,
+    mode: u32,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+/// Sets a filesystem mode on Unix; a no-op elsewhere.
+#[cfg(not(unix))]
+fn set_mode(
+    _path: &std::path::Path,
+    _mode: u32,
+) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Whether a directory is writable by users other than its owner.
+///
+/// A shared directory would let another local user unlink and replace the
+/// socket, so the daemon refuses to serve from one.
+#[cfg(unix)]
+fn is_shared_directory(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o002 != 0)
+}
+
+/// Whether a directory is writable by users other than its owner.
+#[cfg(not(unix))]
+fn is_shared_directory(_path: &std::path::Path) -> bool {
+    false
+}
+
 /// Builds the router exposing the event API.
-pub fn router(log: EventLog) -> Router {
+pub fn router(
+    log: EventLog,
+    tokens: TokenStore,
+) -> Router {
     Router::new()
         .route("/events", any(events_handler))
         .layer(TraceLayer::new_for_http())
-        .with_state(log)
+        .with_state(AppState { log, tokens })
+}
+
+/// The state shared by the event API handlers.
+#[derive(Debug, Clone)]
+struct AppState {
+    /// The durable event log that inbound events are appended to.
+    log: EventLog,
+    /// The configured bearer tokens.
+    tokens: TokenStore,
 }
 
 /// Query parameters of the event stream.
@@ -92,48 +163,69 @@ struct Resume {
     from: Option<Seq>,
 }
 
-/// Upgrades `GET /events` connections to bidirectional event streams.
+/// Upgrades authenticated `GET /events` connections to bidirectional event
+/// streams.
 ///
-/// The optional `from` query parameter resumes from a log position: history is
-/// replayed from `from` and then the live stream continues without gaps or
-/// duplicates. Without it, only events appended after the connection are sent.
+/// The `Authorization: Bearer` header selects a [`Principal`](crate::auth::Principal);
+/// a missing or unknown token, or one that grants neither read nor publish, is
+/// answered with `401 Unauthorized` before the upgrade. The optional `from`
+/// query parameter resumes from a log position: history is replayed from `from`
+/// and then the live stream continues without gaps or duplicates. Without it,
+/// only events appended after the connection are sent.
 async fn events_handler(
-    State(log): State<EventLog>,
+    State(AppState { log, tokens }): State<AppState>,
     Query(resume): Query<Resume>,
+    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    upgrade.on_upgrade(move |socket| handle_events_socket(socket, log, resume.from))
+    let principal = match tokens.authorize(&headers) {
+        Ok(principal) => principal,
+        Err(error) => {
+            tracing::debug!(%error, "rejected an unauthenticated event connection");
+            return StatusCode::UNAUTHORIZED.into_response();
+        },
+    };
+    upgrade.on_upgrade(move |socket| handle_events_socket(socket, log, principal, resume.from))
 }
 
 /// Pumps events in both directions between the log and the socket until the
 /// client disconnects or the log closes.
 ///
-/// Inbound text messages are parsed as [`Event`]s and durably published; a
-/// message parsing successfully but announcing an unsupported `CloudEvents`
-/// `specversion` is rejected like an invalid one. Outbound messages are
-/// [`WireMessage`]s, pairing each event with its log position (or `null` for a
-/// transient notice). Invalid messages are answered with an `error.invalid_event`
-/// event and a failed durable append with an `error.publish_failed` event
-/// instead of closing the connection.
+/// What the connection may do is decided by `principal`:
 ///
-/// When `from` is `Some`, history is replayed from that position before the live
-/// stream continues. A position outside `1..=tail+1` (with `tail` the last
-/// committed position) is answered with an `error.resume_out_of_range` notice
-/// and the connection is closed. A replay failure also closes the connection
-/// after an `error.replay_failed` notice, because continuing would leave a
-/// permanent gap. A subscriber that falls behind while resuming recovers by
-/// re-reading the durable tail, so it never silently skips events; without a
-/// resume position it is notified through an `error.lagged` event, as before.
-/// Binary, ping, and pong frames are ignored; pongs are answered automatically
-/// by the WebSocket implementation.
+/// - [`Claim::Read`] enables the outbound stream (replay and live). Without it,
+///   the socket is publish-only and receives nothing but notices.
+/// - [`Claim::Publish`] enables inbound text frames. Without it, a publish
+///   attempt is answered with an `error.unauthorized` notice.
+///
+/// Inbound text messages are parsed as [`Event`]s, validated, and durably
+/// published with the daemon-owned `source` and `time` overwritten; an invalid
+/// frame is answered with an `error.invalid_event` notice, a missing
+/// [`Claim::Authority`] for a reserved type with `error.unauthorized`, and a
+/// failed durable append with `error.publish_failed` instead of closing the
+/// connection. Outbound messages are [`WireMessage`]s, pairing each event with
+/// its log position (or `null` for a transient notice).
+///
+/// When `from` is `Some` and the connection can read, history is replayed from
+/// that position before the live stream continues. A position outside
+/// `1..=tail+1` (with `tail` the last committed position) is answered with an
+/// `error.resume_out_of_range` notice and the connection is closed. A replay
+/// failure also closes the connection after an `error.replay_failed` notice,
+/// because continuing would leave a permanent gap. A subscriber that falls
+/// behind while resuming recovers by re-reading the durable tail, so it never
+/// silently skips events; without a resume position it is notified through an
+/// `error.lagged` event, as before. Binary, ping, and pong frames are ignored;
+/// pongs are answered automatically by the WebSocket implementation.
 async fn handle_events_socket(
     socket: WebSocket,
     log: EventLog,
+    principal: crate::auth::Principal,
     from: Option<Seq>,
 ) {
     let (mut sink, mut inbound) = socket.split();
+    let can_read = principal.has(Claim::Read);
 
-    if let Some(position) = from {
+    if can_read && let Some(position) = from {
         let tail = log.tail_seq();
         if position == 0 || position > tail.saturating_add(1) {
             tracing::debug!(position, tail, "resume position is out of range");
@@ -150,7 +242,8 @@ async fn handle_events_socket(
     let resuming = from.is_some();
     let mut last_sent: Seq = from.map_or(0, |position| position.saturating_sub(1));
 
-    if let Some(position) = from
+    if can_read
+        && let Some(position) = from
         && let Err(error) = replay(&log, position, &mut sink, &mut last_sent).await
     {
         tracing::error!(%error, "failed to replay history");
@@ -161,7 +254,7 @@ async fn handle_events_socket(
 
     loop {
         tokio::select! {
-            recorded = events.recv() => {
+            recorded = events.recv(), if can_read => {
                 match recorded {
                     Ok(recorded) => {
                         if recorded.seq <= last_sent {
@@ -198,7 +291,7 @@ async fn handle_events_socket(
             },
             message = inbound.next() => {
                 let Some(Ok(message)) = message else { break };
-                if !handle_inbound(&mut sink, &log, message).await {
+                if !handle_inbound(&mut sink, &log, message, &principal).await {
                     break;
                 }
             },
@@ -209,43 +302,61 @@ async fn handle_events_socket(
 /// Handles one inbound frame, returning `false` when the connection should
 /// close.
 ///
-/// A text frame is parsed as an [`Event`] and durably published; an invalid
-/// frame or an unsupported `specversion` is answered with an
-/// `error.invalid_event` notice and a failed append with an
-/// `error.publish_failed` notice, without closing the connection. Binary, ping,
-/// and pong frames are ignored.
+/// A text frame is published only when the connection holds
+/// [`Claim::Publish`]; the event is validated, a reserved type additionally
+/// requires [`Claim::Authority`], and the daemon overwrites `source` and `time`
+/// before the durable append. Each refusal is answered with a notice rather
+/// than closing the connection. Binary, ping, and pong frames are ignored.
 async fn handle_inbound(
     sink: &mut SplitSink<WebSocket, Message>,
     log: &EventLog,
     message: Message,
+    principal: &crate::auth::Principal,
 ) -> bool {
     match message {
         Message::Text(text) => {
-            match serde_json::from_str::<Event>(&text) {
-                Ok(event) if event.specversion == SPEC_VERSION => {
-                    if let Err(error) = log.publish(event).await {
-                        tracing::error!(%error, "failed to durably publish an event");
-                        let reply = Event::new(
-                            "error.publish_failed",
-                            json!({ "error": error.to_string() }),
-                        );
-                        return send_notice(sink, reply).await.is_ok();
-                    }
-                },
-                Ok(_) => {
-                    tracing::debug!("client sent an event with an unsupported specversion");
-                    let reply = Event::new(
-                        "error.invalid_event",
-                        json!({ "error": format!("specversion must be {SPEC_VERSION}") }),
-                    );
-                    return send_notice(sink, reply).await.is_ok();
-                },
+            if !principal.has(Claim::Publish) {
+                tracing::debug!("a read-only client attempted to publish");
+                let reply = Event::new(
+                    "error.unauthorized",
+                    json!({ "error": "the token does not grant the publish claim" }),
+                );
+                return send_notice(sink, reply).await.is_ok();
+            }
+            let mut event = match serde_json::from_str::<Event>(&text) {
+                Ok(event) => event,
                 Err(error) => {
                     tracing::debug!(%error, "client sent an invalid event");
                     let reply =
                         Event::new("error.invalid_event", json!({ "error": error.to_string() }));
                     return send_notice(sink, reply).await.is_ok();
                 },
+            };
+            if let Err(error) = event.validate() {
+                tracing::debug!(%error, "client sent an event with invalid attributes");
+                let reply =
+                    Event::new("error.invalid_event", json!({ "error": error.to_string() }));
+                return send_notice(sink, reply).await.is_ok();
+            }
+            if event.is_reserved() && !principal.has(Claim::Authority) {
+                tracing::debug!(r#type = %event.r#type, "client attempted a reserved event type");
+                let reply = Event::new(
+                    "error.unauthorized",
+                    json!({
+                        "error": "the token does not grant the authority claim",
+                        "type": event.r#type,
+                    }),
+                );
+                return send_notice(sink, reply).await.is_ok();
+            }
+            event.set_provenance(principal.source());
+            if let Err(error) = log.publish(event).await {
+                tracing::error!(%error, "failed to durably publish an event");
+                let reply = Event::new(
+                    "error.publish_failed",
+                    json!({ "error": error.to_string() }),
+                );
+                return send_notice(sink, reply).await.is_ok();
             }
             true
         },
@@ -349,6 +460,7 @@ async fn send_message(
 #[cfg(test)]
 mod tests {
     use super::{ServerError, router, run};
+    use crate::auth::{Claim, Principal, Token, TokenStore};
     use agentd_events::{Event, EventLog, Seq, WireMessage};
     use futures_util::SinkExt;
     use futures_util::StreamExt;
@@ -358,6 +470,35 @@ mod tests {
     use tokio::net::UnixStream;
     use tokio_tungstenite::WebSocketStream;
     use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    /// A read-only token secret.
+    const READ_TOKEN: &str = "read-secret";
+    /// A read-and-publish token secret.
+    const WRITE_TOKEN: &str = "write-secret";
+    /// A read, publish, and authority token secret.
+    const AUTHORITY_TOKEN: &str = "authority-secret";
+
+    /// The token set used by the tests: read-only, read+publish, and authority.
+    fn tokens() -> TokenStore {
+        TokenStore::new(vec![
+            Token {
+                secret: String::from(READ_TOKEN),
+                principal: Principal::new("urn:test:reader", [Claim::Read]),
+            },
+            Token {
+                secret: String::from(WRITE_TOKEN),
+                principal: Principal::new("urn:test:writer", [Claim::Read, Claim::Publish]),
+            },
+            Token {
+                secret: String::from(AUTHORITY_TOKEN),
+                principal: Principal::new(
+                    "urn:test:approver",
+                    [Claim::Read, Claim::Publish, Claim::Authority],
+                ),
+            },
+        ])
+    }
 
     /// Opens a fresh log under `dir`.
     fn open_log(dir: &Path) -> EventLog {
@@ -369,22 +510,37 @@ mod tests {
         socket: PathBuf,
         log: EventLog,
     ) -> tokio::task::JoinHandle<std::io::Result<()>> {
+        spawn_server_with(socket, log, tokens())
+    }
+
+    /// Spawns a server with an explicit token store.
+    fn spawn_server_with(
+        socket: PathBuf,
+        log: EventLog,
+        tokens: TokenStore,
+    ) -> tokio::task::JoinHandle<std::io::Result<()>> {
         tokio::spawn(async move {
             let listener = tokio::net::UnixListener::bind(socket)?;
-            let () = axum::serve(listener, router(log)).await?;
+            let () = axum::serve(listener, router(log, tokens)).await?;
             Ok(())
         })
     }
 
-    /// Connects a WebSocket client to `url`, retrying while the server starts
-    /// up.
-    async fn connect_to(
+    /// Connects a WebSocket client to `url` with `token`, retrying while the
+    /// server starts up.
+    async fn connect_with(
         url: &str,
         socket: &Path,
+        token: &str,
     ) -> WebSocketStream<UnixStream> {
         for _ in 0..100 {
             if let Ok(stream) = UnixStream::connect(socket).await {
-                let (ws, _) = tokio_tungstenite::client_async(url, stream)
+                let mut request = url.into_client_request().expect("client request");
+                request.headers_mut().insert(
+                    "authorization",
+                    format!("Bearer {token}").parse().expect("header value"),
+                );
+                let (ws, _) = tokio_tungstenite::client_async(request, stream)
                     .await
                     .expect("handshake should succeed");
                 return ws;
@@ -394,17 +550,40 @@ mod tests {
         panic!("could not connect to {socket:?}");
     }
 
-    /// Connects a WebSocket client to `/events` without a resume position.
+    /// Connects a read-only client to `/events`.
     async fn connect(socket: &Path) -> WebSocketStream<UnixStream> {
-        connect_to("ws://localhost/events", socket).await
+        connect_with("ws://localhost/events", socket, READ_TOKEN).await
     }
 
-    /// Connects a WebSocket client to `/events` resuming from `from`.
+    /// Connects a read-and-publish client to `/events`.
+    async fn connect_writer(socket: &Path) -> WebSocketStream<UnixStream> {
+        connect_with("ws://localhost/events", socket, WRITE_TOKEN).await
+    }
+
+    /// Connects a read-only client to `/events` resuming from `from`.
     async fn connect_from(
         socket: &Path,
         from: Seq,
     ) -> WebSocketStream<UnixStream> {
-        connect_to(&format!("ws://localhost/events?from={from}"), socket).await
+        connect_with(
+            &format!("ws://localhost/events?from={from}"),
+            socket,
+            READ_TOKEN,
+        )
+        .await
+    }
+
+    /// Connects a read-and-publish client to `/events` resuming from `from`.
+    async fn connect_from_writer(
+        socket: &Path,
+        from: Seq,
+    ) -> WebSocketStream<UnixStream> {
+        connect_with(
+            &format!("ws://localhost/events?from={from}"),
+            socket,
+            WRITE_TOKEN,
+        )
+        .await
     }
 
     /// Decodes a text message into its position and event.
@@ -439,6 +618,19 @@ mod tests {
             .expect("send should succeed");
     }
 
+    /// Asserts `received` is `sent` with the daemon-owned provenance overwritten.
+    fn assert_attributed(
+        received: &Event,
+        sent: &Event,
+        source: &str,
+    ) {
+        assert_eq!(received.id, sent.id);
+        assert_eq!(received.r#type, sent.r#type);
+        assert_eq!(received.data, sent.data);
+        assert_eq!(received.source, source);
+        assert!(received.time.is_some());
+    }
+
     fn test_event(r#type: &str) -> Event {
         Event::new(r#type, json!({ "value": 1 }))
     }
@@ -453,14 +645,14 @@ mod tests {
         let socket = dir.path().join("test.sock");
         let server = spawn_server(socket.clone(), open_log(dir.path()));
 
-        let mut client = connect(&socket).await;
+        let mut client = connect_writer(&socket).await;
         let event = test_event("test.event");
 
         send_event(&mut client, &event).await;
 
         let (seq, received) = recv_wire(&mut client).await;
         assert_eq!(seq, Some(1));
-        assert_eq!(received, event);
+        assert_attributed(&received, &event, "urn:test:writer");
 
         server.abort();
     }
@@ -472,14 +664,14 @@ mod tests {
         let server = spawn_server(socket.clone(), open_log(dir.path()));
 
         let mut subscriber = connect(&socket).await;
-        let mut publisher = connect(&socket).await;
+        let mut publisher = connect_writer(&socket).await;
         let event = test_event("test.event");
 
         send_event(&mut publisher, &event).await;
 
         let (seq, received) = recv_wire(&mut subscriber).await;
         assert_eq!(seq, Some(1));
-        assert_eq!(received, event);
+        assert_attributed(&received, &event, "urn:test:writer");
 
         server.abort();
     }
@@ -490,7 +682,7 @@ mod tests {
         let socket = dir.path().join("test.sock");
         let server = spawn_server(socket.clone(), open_log(dir.path()));
 
-        let mut client = connect(&socket).await;
+        let mut client = connect_writer(&socket).await;
 
         client
             .send(Message::from("not an event"))
@@ -510,7 +702,7 @@ mod tests {
         let socket = dir.path().join("test.sock");
         let server = spawn_server(socket.clone(), open_log(dir.path()));
 
-        let mut client = connect(&socket).await;
+        let mut client = connect_writer(&socket).await;
 
         client
             .send(Message::from(
@@ -540,7 +732,7 @@ mod tests {
                 .expect("publish should succeed");
         }
 
-        let mut client = connect(&socket).await;
+        let mut client = connect_writer(&socket).await;
         send_event(&mut client, &numbered_event(3)).await;
 
         // Only the newly published event arrives; the history is not replayed.
@@ -595,7 +787,7 @@ mod tests {
         }
 
         // `tail` is 2, so 3 is the first position that has not been appended yet.
-        let mut client = connect_from(&socket, 3).await;
+        let mut client = connect_from_writer(&socket, 3).await;
         send_event(&mut client, &numbered_event(2)).await;
 
         let (seq, event) = recv_wire(&mut client).await;
@@ -685,10 +877,121 @@ mod tests {
         let _listener = tokio::net::UnixListener::bind(&socket)?;
 
         assert!(matches!(
-            run(socket, open_log(dir.path())).await,
+            run(socket, open_log(dir.path()), tokens()).await,
             Err(ServerError::AlreadyRunning(_))
         ));
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_refuses_a_world_writable_socket_directory() -> Result<(), ServerError> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir()?;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777))?;
+        let socket = dir.path().join("test.sock");
+
+        assert!(matches!(
+            run(socket, open_log(dir.path()), tokens()).await,
+            Err(ServerError::InsecureDirectory(_))
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unauthenticated_connections_are_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let socket = dir.path().join("test.sock");
+        let server = spawn_server(socket.clone(), open_log(dir.path()));
+
+        for _ in 0..100 {
+            if let Ok(stream) = UnixStream::connect(&socket).await {
+                let request = "ws://localhost/events"
+                    .into_client_request()
+                    .expect("client request");
+                let result = tokio_tungstenite::client_async(request, stream).await;
+                assert!(result.is_err(), "a tokenless connection must be refused");
+                server.abort();
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("could not connect to {socket:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_only_connections_cannot_publish() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let socket = dir.path().join("test.sock");
+        let log = open_log(dir.path());
+        let server = spawn_server(socket.clone(), log.clone());
+
+        let mut client = connect(&socket).await;
+        send_event(&mut client, &test_event("test.event")).await;
+
+        let (seq, event) = recv_wire(&mut client).await;
+        assert_eq!(seq, None);
+        assert_eq!(event.r#type, "error.unauthorized");
+        assert_eq!(log.tail_seq(), 0, "nothing should have been appended");
+
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reserved_types_require_authority() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let socket = dir.path().join("test.sock");
+        let log = open_log(dir.path());
+        let server = spawn_server(socket.clone(), log.clone());
+
+        let mut client = connect_writer(&socket).await;
+        send_event(&mut client, &test_event("sandbox.permission.granted")).await;
+
+        let (seq, event) = recv_wire(&mut client).await;
+        assert_eq!(seq, None);
+        assert_eq!(event.r#type, "error.unauthorized");
+        assert_eq!(event.data["type"], "sandbox.permission.granted");
+        assert_eq!(log.tail_seq(), 0, "nothing should have been appended");
+
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn authority_can_publish_reserved_types() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let socket = dir.path().join("test.sock");
+        let server = spawn_server(socket.clone(), open_log(dir.path()));
+
+        let mut client = connect_with("ws://localhost/events", &socket, AUTHORITY_TOKEN).await;
+        let event = test_event("sandbox.permission.granted");
+        send_event(&mut client, &event).await;
+
+        let (seq, received) = recv_wire(&mut client).await;
+        assert_eq!(seq, Some(1));
+        assert_attributed(&received, &event, "urn:test:approver");
+
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn daemon_overwrites_client_supplied_provenance() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let socket = dir.path().join("test.sock");
+        let server = spawn_server(socket.clone(), open_log(dir.path()));
+
+        let mut client = connect_writer(&socket).await;
+        let mut event = test_event("test.event");
+        event.source = String::from("urn:spoofed");
+        event.time = Some(String::from("2000-01-01T00:00:00Z"));
+        send_event(&mut client, &event).await;
+
+        let (seq, received) = recv_wire(&mut client).await;
+        assert_eq!(seq, Some(1));
+        assert_eq!(received.source, "urn:test:writer");
+        assert_ne!(received.time, event.time);
+
+        server.abort();
     }
 }

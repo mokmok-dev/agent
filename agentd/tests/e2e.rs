@@ -1,6 +1,7 @@
-//! End-to-end coverage of the choreography flow: WebSocket clients exchange
-//! `CloudEvents` over the Unix domain socket, the server relays them through
-//! the durable event log, and every event is appended to JSONL.
+//! End-to-end coverage of the choreography flow: authenticated WebSocket
+//! clients exchange `CloudEvents` over the Unix domain socket, the server
+//! relays them through the durable event log, and every event is appended to
+//! JSONL with daemon-owned provenance.
 //!
 //! The helpers below use `expect` and `panic` like the `#[cfg(test)]` modules
 //! in `src` do; the workspace `allow-*-in-tests` clippy configuration cannot
@@ -8,6 +9,7 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+use agentd::auth::{Claim, Principal, Token, TokenStore};
 use agentd::server::router;
 use agentd_events::{Event, EventLog, Seq};
 use futures_util::SinkExt;
@@ -18,6 +20,18 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+/// The read-and-publish token used by the tests.
+const WRITER_TOKEN: &str = "writer-secret";
+
+/// A token store granting read and publish.
+fn tokens() -> TokenStore {
+    TokenStore::new(vec![Token {
+        secret: String::from(WRITER_TOKEN),
+        principal: Principal::new("urn:test:writer", [Claim::Read, Claim::Publish]),
+    }])
+}
 
 /// Spawns a server on `socket` without signal handling.
 fn spawn_server(
@@ -26,7 +40,7 @@ fn spawn_server(
 ) -> tokio::task::JoinHandle<std::io::Result<()>> {
     tokio::spawn(async move {
         let listener = tokio::net::UnixListener::bind(socket)?;
-        let () = axum::serve(listener, router(log)).await?;
+        let () = axum::serve(listener, router(log, tokens())).await?;
         Ok(())
     })
 }
@@ -38,7 +52,12 @@ async fn connect_to(
 ) -> WebSocketStream<UnixStream> {
     for _ in 0..100 {
         if let Ok(stream) = UnixStream::connect(socket).await {
-            let (ws, _) = tokio_tungstenite::client_async(url, stream)
+            let mut request = url.into_client_request().expect("client request");
+            request.headers_mut().insert(
+                "authorization",
+                format!("Bearer {WRITER_TOKEN}").parse().expect("header"),
+            );
+            let (ws, _) = tokio_tungstenite::client_async(request, stream)
                 .await
                 .expect("handshake should succeed");
             return ws;
@@ -96,6 +115,18 @@ async fn send_event(
         .expect("send should succeed");
 }
 
+/// Asserts `received` is `sent` with the daemon-owned provenance overwritten.
+fn assert_attributed(
+    received: &Event,
+    sent: &Event,
+) {
+    assert_eq!(received.id, sent.id);
+    assert_eq!(received.r#type, sent.r#type);
+    assert_eq!(received.data, sent.data);
+    assert_eq!(received.source, "urn:test:writer");
+    assert!(received.time.is_some());
+}
+
 /// Reads every event from the JSONL log in order.
 fn read_log(path: &Path) -> Vec<Event> {
     std::fs::read_to_string(path)
@@ -122,17 +153,24 @@ async fn choreographed_events_flow_from_websockets_into_the_log() {
     let completed = {
         let (seq, relayed) = recv_wire(&mut worker).await;
         assert_eq!(seq, Some(1));
-        assert_eq!(relayed, submitted);
+        assert_attributed(&relayed, &submitted);
 
         let completed = Event::new("task.completed", json!({ "task": "demo" }));
         send_event(&mut worker, &completed).await;
         completed
     };
 
-    assert_eq!(recv_wire(&mut producer).await, (Some(1), submitted.clone()));
-    assert_eq!(recv_wire(&mut producer).await, (Some(2), completed.clone()));
+    let (seq, first) = recv_wire(&mut producer).await;
+    assert_eq!(seq, Some(1));
+    assert_attributed(&first, &submitted);
+    let (seq, second) = recv_wire(&mut producer).await;
+    assert_eq!(seq, Some(2));
+    assert_attributed(&second, &completed);
 
-    assert_eq!(read_log(&log_path), [submitted, completed]);
+    let logged = read_log(&log_path);
+    assert_eq!(logged.len(), 2);
+    assert_attributed(&logged[0], &submitted);
+    assert_attributed(&logged[1], &completed);
 
     server.abort();
 }
@@ -150,21 +188,30 @@ async fn a_reconnecting_consumer_resumes_from_its_cursor() {
     let first = Event::new("task.submitted", json!({ "task": "demo" }));
     let second = Event::new("task.started", json!({ "task": "demo" }));
     send_event(&mut producer, &first).await;
-    assert_eq!(recv_wire(&mut producer).await, (Some(1), first));
+    let (seq, received) = recv_wire(&mut producer).await;
+    assert_eq!(seq, Some(1));
+    assert_attributed(&received, &first);
     send_event(&mut producer, &second).await;
-    assert_eq!(recv_wire(&mut producer).await, (Some(2), second.clone()));
+    let (seq, received) = recv_wire(&mut producer).await;
+    assert_eq!(seq, Some(2));
+    assert_attributed(&received, &second);
     drop(producer);
 
     // The consumer reconnects from the position after the first event and sees
     // the second from history, then the third live.
     let mut consumer = connect_from(&socket, 2).await;
-    assert_eq!(recv_wire(&mut consumer).await, (Some(2), second));
+    let (seq, received) = recv_wire(&mut consumer).await;
+    assert_eq!(seq, Some(2));
+    assert_attributed(&received, &second);
 
     let third = Event::new("task.completed", json!({ "task": "demo" }));
     log.publish(third.clone())
         .await
         .expect("publish should succeed");
-    assert_eq!(recv_wire(&mut consumer).await, (Some(3), third));
+    let (seq, received) = recv_wire(&mut consumer).await;
+    assert_eq!(seq, Some(3));
+    assert_eq!(received.id, third.id);
+    assert_eq!(received.source, agentd_events::DAEMON_SOURCE);
 
     server.abort();
 }

@@ -12,6 +12,7 @@ use thiserror::Error;
 use tokio::net::UnixStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 /// Errors returned by [`WsClient`].
 #[derive(Debug, Error)]
@@ -22,6 +23,9 @@ pub enum ClientError {
     /// The WebSocket handshake or a frame failed.
     #[error(transparent)]
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    /// The bearer token could not be encoded as a header value.
+    #[error("the bearer token is not a valid header value")]
+    Token,
     /// A received frame was not a valid [`WireMessage`].
     #[error("the daemon sent an invalid wire message: {0}")]
     Decode(#[source] serde_json::Error),
@@ -38,25 +42,35 @@ pub struct WsClient {
 
 impl WsClient {
     /// Connects to the daemon's `/events` endpoint over the Unix domain socket
-    /// at `socket`.
+    /// at `socket`, authenticating with `token`.
     ///
     /// When `from` is `Some(position)`, the daemon replays history from that
     /// position (inclusive) before continuing live.
     ///
     /// # Errors
     ///
-    /// Returns [`ClientError::Io`] if the socket cannot be reached and
-    /// [`ClientError::WebSocket`] if the handshake fails.
+    /// Returns [`ClientError::Io`] if the socket cannot be reached,
+    /// [`ClientError::Token`] if the token is not a valid header value, and
+    /// [`ClientError::WebSocket`] if the handshake fails (including a rejected
+    /// token).
     pub async fn connect(
         socket: &Path,
         from: Option<Seq>,
+        token: &str,
     ) -> Result<Self, ClientError> {
         let stream = UnixStream::connect(socket).await?;
         let url = from.map_or_else(
             || String::from("ws://localhost/events"),
             |position| format!("ws://localhost/events?from={position}"),
         );
-        let (stream, _response) = tokio_tungstenite::client_async(url.as_str(), stream).await?;
+        let mut request = url.as_str().into_client_request()?;
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {token}")
+                .parse()
+                .map_err(|_| ClientError::Token)?,
+        );
+        let (stream, _response) = tokio_tungstenite::client_async(request, stream).await?;
         Ok(Self { stream })
     }
 

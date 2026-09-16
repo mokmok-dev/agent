@@ -19,6 +19,7 @@
 //! [CloudEvents]: https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error as ThisError;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::broadcast;
@@ -37,6 +38,43 @@ pub const SPEC_VERSION: &str = "1.0";
 
 /// The `source` attribute assigned to events produced by the daemon itself.
 pub const DAEMON_SOURCE: &str = "urn:mokmokd";
+
+/// `type` prefixes that only a daemon-authority publisher may emit.
+///
+/// These carry decisions or daemon lifecycle that a client must not be able to
+/// fabricate — above all `sandbox.permission.granted`/`denied`, which drive the
+/// approval flow, and `error.*`, which is a daemon notice. An external
+/// extension is expected to use its own prefix; see `docs/architecture.md` and
+/// `docs/sandbox.md`.
+pub const RESERVED_TYPE_PREFIXES: &[&str] = &["error.", "sandbox.", "session."];
+
+/// Whether an event `type` is reserved to daemon-authority publishers.
+#[must_use]
+pub fn is_reserved_type(r#type: &str) -> bool {
+    RESERVED_TYPE_PREFIXES
+        .iter()
+        .any(|prefix| r#type.starts_with(prefix))
+}
+
+/// Why an event is not acceptable on ingress.
+///
+/// A client-supplied event is validated before it is appended, so a malformed
+/// or unauthenticated event never becomes part of the durable log.
+#[derive(Debug, Clone, PartialEq, Eq, ThisError)]
+pub enum InvalidEvent {
+    /// The `specversion` is not the supported `CloudEvents` version.
+    #[error("specversion must be {SPEC_VERSION}")]
+    SpecVersion,
+    /// The `type` attribute is empty or contains whitespace.
+    #[error("type must be a non-empty dotted name")]
+    Type,
+    /// The `id` attribute is not a UUID.
+    #[error("id must be a UUID")]
+    Id,
+    /// The `time` attribute is present but is not an RFC 3339 timestamp.
+    #[error("time must be an RFC 3339 timestamp")]
+    Time,
+}
 
 /// An event exchanged between agentd components and connected clients.
 ///
@@ -84,6 +122,52 @@ impl Event {
             time: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
             data,
         }
+    }
+
+    /// Whether this event's `type` is reserved to daemon-authority publishers
+    /// (see [`is_reserved_type`]).
+    #[must_use]
+    pub fn is_reserved(&self) -> bool {
+        is_reserved_type(&self.r#type)
+    }
+
+    /// Overwrites the provenance attributes the daemon owns on ingress: the
+    /// `source` is replaced with the authenticated principal's, and `time` with
+    /// the daemon's current UTC time, so a client cannot forge where or when an
+    /// event entered the log.
+    pub fn set_provenance(
+        &mut self,
+        source: impl Into<String>,
+    ) {
+        self.source = source.into();
+        self.time = OffsetDateTime::now_utc().format(&Rfc3339).ok();
+    }
+
+    /// Validates the `CloudEvents` context attributes accepted on ingress.
+    ///
+    /// The daemon owns `source` and `time` and overwrites them, so this checks
+    /// only what a client is trusted to supply: the `specversion`, a non-empty
+    /// `type`, a UUID `id`, and an RFC 3339 `time` when present.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidEvent`] naming the offending attribute.
+    pub fn validate(&self) -> Result<(), InvalidEvent> {
+        if self.specversion != SPEC_VERSION {
+            return Err(InvalidEvent::SpecVersion);
+        }
+        if self.r#type.trim().is_empty() || self.r#type.chars().any(char::is_whitespace) {
+            return Err(InvalidEvent::Type);
+        }
+        if uuid::Uuid::parse_str(&self.id).is_err() {
+            return Err(InvalidEvent::Id);
+        }
+        if let Some(time) = &self.time
+            && OffsetDateTime::parse(time, &Rfc3339).is_err()
+        {
+            return Err(InvalidEvent::Time);
+        }
+        Ok(())
     }
 }
 
@@ -204,7 +288,9 @@ impl Default for EventBus {
 
 #[cfg(test)]
 mod tests {
-    use super::{DAEMON_SOURCE, Event, EventBus, LogEntry, SPEC_VERSION};
+    use super::{
+        DAEMON_SOURCE, Event, EventBus, InvalidEvent, LogEntry, SPEC_VERSION, is_reserved_type,
+    };
     use serde_json::json;
     use tokio::sync::broadcast::error::RecvError;
 
@@ -272,5 +358,42 @@ mod tests {
 
         assert!(matches!(received, Err(RecvError::Lagged(1))));
         assert_eq!(subscriber.recv().await.ok().as_ref(), Some(&second));
+    }
+
+    #[test]
+    fn reserved_types_cover_authority_event_families() {
+        assert!(is_reserved_type("sandbox.permission.granted"));
+        assert!(is_reserved_type("sandbox.exec.completed"));
+        assert!(is_reserved_type("error.invalid_event"));
+        assert!(is_reserved_type("session.started"));
+        assert!(!is_reserved_type("task.submitted"));
+        assert!(!is_reserved_type("error"));
+    }
+
+    #[test]
+    fn validate_rejects_malformed_context_attributes() {
+        let mut event = test_event("test.event");
+        assert_eq!(event.validate(), Ok(()));
+
+        event.specversion = String::from("0.3");
+        assert_eq!(event.validate(), Err(InvalidEvent::SpecVersion));
+
+        let mut event = test_event("test.event");
+        event.r#type = String::from("  ");
+        assert_eq!(event.validate(), Err(InvalidEvent::Type));
+        let mut event = test_event("test.event");
+        event.r#type = String::from("bad type");
+        assert_eq!(event.validate(), Err(InvalidEvent::Type));
+
+        let mut event = test_event("test.event");
+        event.id = String::from("not-a-uuid");
+        assert_eq!(event.validate(), Err(InvalidEvent::Id));
+
+        let mut event = test_event("test.event");
+        event.time = Some(String::from("yesterday"));
+        assert_eq!(event.validate(), Err(InvalidEvent::Time));
+        let mut event = test_event("test.event");
+        event.time = None;
+        assert_eq!(event.validate(), Ok(()));
     }
 }

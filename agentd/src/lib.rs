@@ -4,4 +4,5 @@
 //! into a running daemon; the module is exposed so the same wiring can be
 //! embedded elsewhere and exercised by integration tests.
 
+pub mod auth;
 pub mod server;
