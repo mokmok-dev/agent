@@ -9,6 +9,7 @@ dependencies = [
  "agentd-events",
  "agentd-node",
  "agentd-sandbox",
+ "async-trait",
  "axum",
  "clap",
  "futures-util",

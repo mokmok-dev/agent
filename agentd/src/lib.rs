@@ -6,3 +6,5 @@
 
 pub mod auth;
 pub mod server;
+#[cfg(feature = "sandbox")]
+pub mod session;

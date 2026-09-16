@@ -32,6 +32,7 @@ workspace = true
 
 [dev-dependencies]
 agentd-node = { workspace = true }
+async-trait = "0.1.89"
 rusqlite = { workspace = true }
 tempfile = "3.27.0"
 tokio-tungstenite = { workspace = true }
