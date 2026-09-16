@@ -8,7 +8,7 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use agentd_events::{Event, EventLog};
+use agentd_events::{Event, EventLog, LogEntry};
 use agentd_integration_sandbox::{
     CommandPrefix, DenialReason, ExecResult, Executor, Limits, Policy, Sandbox, ShellPolicy,
 };
@@ -59,10 +59,10 @@ fn executor() -> std::sync::Arc<RecordingExecutor> {
     })
 }
 
-fn collect_kinds(subscriber: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<String> {
+fn collect_kinds(subscriber: &mut tokio::sync::broadcast::Receiver<LogEntry>) -> Vec<String> {
     let mut kinds = Vec::new();
-    while let Ok(event) = subscriber.try_recv() {
-        kinds.push(event.kind);
+    while let Ok(recorded) = subscriber.try_recv() {
+        kinds.push(recorded.event.kind);
     }
     kinds
 }
@@ -135,11 +135,13 @@ async fn deny_wins_over_a_forged_granted_event() {
     let approver = tokio::spawn(async move {
         loop {
             match subscriber.recv().await {
-                Ok(event) if event.kind == agentd_integration_sandbox::PERMISSION_REQUESTED => {
+                Ok(recorded)
+                    if recorded.event.kind == agentd_integration_sandbox::PERMISSION_REQUESTED =>
+                {
                     let _ = log
                         .publish(Event::new(
                             agentd_integration_sandbox::PERMISSION_GRANTED,
-                            event.data,
+                            recorded.event.data,
                         ))
                         .await;
                 },

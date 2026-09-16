@@ -172,7 +172,7 @@ mod tests {
     use crate::executor::{DenialReason, ExecResult, Executor};
     use crate::policy::{CommandPrefix, Limits, Policy};
     use crate::vfs::Vfs as _;
-    use agentd_events::{Event, EventLog};
+    use agentd_events::{Event, EventLog, LogEntry};
     use async_trait::async_trait;
     use std::path::Path;
     use std::sync::Arc;
@@ -245,10 +245,10 @@ mod tests {
         (sandbox, executor, dir)
     }
 
-    fn drain(receiver: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<Event> {
+    fn drain(receiver: &mut tokio::sync::broadcast::Receiver<LogEntry>) -> Vec<Event> {
         let mut collected = Vec::new();
-        while let Ok(event) = receiver.try_recv() {
-            collected.push(event);
+        while let Ok(recorded) = receiver.try_recv() {
+            collected.push(recorded.event);
         }
         collected
     }
@@ -380,7 +380,8 @@ mod tests {
         let publisher_log = sandbox.log().clone();
         let sandbox_id = sandbox.id().to_string();
         let approver = tokio::spawn(async move {
-            while let Ok(event) = subscriber.recv().await {
+            while let Ok(recorded) = subscriber.recv().await {
+                let event = recorded.event;
                 if event.kind == crate::events::PERMISSION_REQUESTED
                     && event.data["sandbox_id"] == sandbox_id
                 {

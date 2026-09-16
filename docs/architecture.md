@@ -21,7 +21,9 @@ connect over a WebSocket served on a Unix domain socket.
 Every event is written to a durable append-only JSONL log **before** it is
 fanned out, so the log is the source of truth and a live subscriber can never
 see an event that is not already durable. Read models are rebuilt from the log
-rather than from a second source of truth.
+rather than from a second source of truth. Every event that leaves the log
+carries its one-based position (`Seq`) alongside it, so a consumer can record
+how far it has processed and resume from there.
 
 ## Components
 
@@ -41,11 +43,11 @@ flowchart LR
 | Component          | Crate           | Role                                                                                                              |
 | ------------------ | --------------- | ----------------------------------------------------------------------------------------------------------------- |
 | Unix domain socket | `agentd`        | Transport and single-instance boundary; a stale socket file is removed, a live one reports `AlreadyRunning`.       |
-| WebSocket endpoint | `agentd`        | Ingress and egress protocol. Inbound text frames must parse as CloudEvents; outbound events are forwarded verbatim. |
-| `EventBus`         | `agentd-events` | In-process live fanout to subscribers via a `tokio::sync::broadcast` channel (capacity 1024 per subscriber).       |
+| WebSocket endpoint | `agentd`        | Ingress and egress protocol. Inbound text frames must parse as CloudEvents; outbound messages pair the event with its `seq` (see [Wire envelope](#wire-envelope)) and support `?from=` to resume. |
+| `EventBus`         | `agentd-events` | Internal live fanout to subscribers via a `tokio::sync::broadcast` channel (capacity 1024 per subscriber); only `EventLog` publishes to it. |
 | `EventLog`         | `agentd-events` | Durable write path: owns the writer thread, the log sequence number, the JSONL file, and the live fanout.           |
-| JSONL log          | `agentd-events` | Append-only source of truth; one CloudEvents envelope per line, position = one-based line number (`Lsn`).          |
-| Projections        | `agentd-events` | Read models derived from the log, resuming from an `applied_lsn` checkpoint (`agentd_events::projection`).          |
+| JSONL log          | `agentd-events` | Append-only source of truth; one CloudEvents envelope per line, position = one-based line number (`Seq`).          |
+| Projections        | `agentd-events` | Read models derived from the log, resuming from an `applied_seq` checkpoint (`agentd_events::projection`).          |
 
 ## Event model
 
@@ -71,6 +73,33 @@ Every event on the bus and in the log is a CloudEvents 1.0 envelope:
 }
 ```
 
+### Wire envelope
+
+Outbound WebSocket messages pair the event with its position:
+
+```json
+{
+  "seq": 42,
+  "event": {
+    "id": "0199b7ea-8f4a-7d12-9c3a-2f8b1e4d6a90",
+    "source": "urn:mokmokd",
+    "specversion": "1.0",
+    "type": "test.event",
+    "time": "2026-09-13T12:00:00.123456Z",
+    "data": { "value": 1 }
+  }
+}
+```
+
+`seq` is the one-based log position, or `null` for a transient daemon notice
+that is not part of the log (for example `error.lagged`). The position is
+transport metadata and is never written into the JSONL log, whose lines remain
+plain CloudEvents. Inbound frames are a bare CloudEvent; the daemon assigns the
+position on append.
+
+A consumer's saved position (its cursor) must only advance on a message whose
+`seq` is non-null; notices carry `null` and must not overwrite it.
+
 ## Sequences
 
 ### Publishing and relaying an event
@@ -93,8 +122,8 @@ sequenceDiagram
             L-->>S: Err
             S-->>P: error.publish_failed event
         else append committed
-            L-->>S: Ok(lsn)
-            L-->>C: fan out the event
+            L-->>S: Ok(seq)
+            L-->>C: fan out { seq, event }
         end
     end
 ```
@@ -129,6 +158,38 @@ subscribers: a subscriber that cannot keep up loses its live stream and
 observes an `error.lagged` event, but the log is unaffected because it was
 written before the fanout.
 
+### Resuming from a position
+
+A consumer persists the last `seq` it applied and reconnects with
+`GET /events?from=<seq>` (inclusive). The server subscribes to the live bus
+first, replays history from `from` to the end of the log, then continues live,
+skipping any event it already sent:
+
+```mermaid
+sequenceDiagram
+    participant C as Consumer (reconnect)
+    participant S as Server
+    participant L as EventLog
+    participant B as EventBus
+
+    C->>S: GET /events?from=42
+    S->>B: subscribe (buffer live)
+    S->>L: read_from(42)
+    L-->>S: entries 42..N
+    S-->>C: wire { seq, event } for 42..N
+    B-->>S: live events (some already replayed)
+    S-->>C: wire { seq, event } for events after N (duplicates skipped)
+```
+
+If the live buffer overflows during a long replay, the server re-reads the
+durable tail from the last sent position instead of dropping events, so a
+resumed consumer never silently skips a position. A position outside
+`1..=tail+1` (with `tail` the last committed position) is answered with an
+`error.resume_out_of_range` notice and the connection is closed; a replay
+failure likewise closes after an `error.replay_failed` notice, because
+continuing would leave a permanent gap. Without `from`, a consumer is live-only
+and a lag is reported as `error.lagged`, as before.
+
 ### Startup and recovery
 
 ```mermaid
@@ -141,7 +202,7 @@ sequenceDiagram
     M->>E: open(log_path)
     E->>D: create parent dir, open (create if missing)
     E->>D: stream complete lines, truncate a partial trailing line
-    E->>E: resume LSN after the last complete line, spawn writer thread
+    E->>E: resume the sequence after the last complete line, spawn writer thread
     M->>S: run(socket, log)
 ```
 
@@ -152,15 +213,19 @@ envelope, so the schema is stable when extension attributes appear and the log
 stays consumable by ordinary tooling (`jq`, `rg`, DuckDB). There is no
 migration list: attributes are read on demand.
 
-- The position of a line is its one-based line number, exposed as `Lsn`.
+- The position of a line is its one-based line number, exposed as `Seq`.
 - A crash mid-append can leave a partial trailing line; recovery truncates it
   and keeps every complete line, so the log always ends on a line boundary.
 - The log is at-least-once across a writer failure: an event that was written
   but not acknowledged may survive, so a retrying publisher can append it
   twice. Consumers deduplicate by `Event::id`.
+- Positions are not stored in the file; they are derived from line numbers and
+  attached as `agentd_events::LogEntry` on the live bus and the WebSocket API,
+  so the file stays a plain CloudEvents stream. A consumer resumes by passing
+  the last position it applied to `GET /events?from=`.
 - History queries read the log directly (DuckDB over the JSONL, or `rg`);
   stateful read models replay it through `projection::catch_up`, which resumes
-  from the projection's `applied_lsn`.
+  from the projection's `applied_seq`.
 
 ## Extension model
 

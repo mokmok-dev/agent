@@ -1,38 +1,37 @@
 //! Read models derived from the event log.
 //!
 //! The log is the source of truth; a projection is state derived from it by
-//! applying events in [`Lsn`] order. A projection records the last position it
+//! applying events in [`Seq`] order. A projection records the last position it
 //! applied, so startup can [`catch_up`] from where it left off.
 //!
 //! Rebuilding needs no separate operation: construct a fresh projection (with
-//! an [`applied_lsn`](Projection::applied_lsn) of zero) and catch it up over the
+//! an [`applied_seq`](Projection::applied_seq) of zero) and catch it up over the
 //! whole log.
 
-use crate::Event;
-use crate::log::{EventLog, LogError, Lsn};
+use crate::LogEntry;
+use crate::log::{EventLog, LogError, Seq};
 use thiserror::Error;
 
 /// A read model built by applying the event log in order.
 ///
 /// Implementors own their state and the checkpoint of the last applied
 /// position. [`apply`](Projection::apply) must be deterministic and idempotent
-/// per `lsn`, so replaying the same range yields the same state.
+/// per `seq`, so replaying the same range yields the same state.
 pub trait Projection {
     /// The error returned when an event cannot be applied.
     type Error: std::error::Error + 'static;
 
     /// The position of the last event this projection has applied, or zero.
-    fn applied_lsn(&self) -> Lsn;
+    fn applied_seq(&self) -> Seq;
 
-    /// Applies the event at `lsn` and advances the checkpoint.
+    /// Applies `recorded` and advances the checkpoint to its position.
     ///
     /// # Errors
     ///
     /// Returns [`Self::Error`] when the projection cannot apply the event.
     fn apply(
         &mut self,
-        lsn: Lsn,
-        event: Event,
+        recorded: LogEntry,
     ) -> Result<(), Self::Error>;
 }
 
@@ -52,7 +51,7 @@ where
 
 /// Applies every log entry the projection has not seen yet, in order.
 ///
-/// Starts after [`Projection::applied_lsn`], so a projection loaded from its
+/// Starts after [`Projection::applied_seq`], so a projection loaded from its
 /// checkpoint resumes exactly where it stopped.
 ///
 /// # Errors
@@ -66,12 +65,9 @@ pub fn catch_up<P>(
 where
     P: Projection,
 {
-    let from = projection.applied_lsn().saturating_add(1);
+    let from = projection.applied_seq().saturating_add(1);
     for entry in log.read_from(from)? {
-        let (lsn, event) = entry?;
-        projection
-            .apply(lsn, event)
-            .map_err(ProjectionError::Apply)?;
+        projection.apply(entry?).map_err(ProjectionError::Apply)?;
     }
     Ok(())
 }
@@ -80,7 +76,8 @@ where
 mod tests {
     use super::{Projection, catch_up};
     use crate::Event;
-    use crate::log::{EventLog, Lsn};
+    use crate::LogEntry;
+    use crate::log::{EventLog, Seq};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::convert::Infallible;
@@ -89,23 +86,22 @@ mod tests {
     #[derive(Default)]
     struct KindCounts {
         counts: BTreeMap<String, u64>,
-        applied: Lsn,
+        applied: Seq,
     }
 
     impl Projection for KindCounts {
         type Error = Infallible;
 
-        fn applied_lsn(&self) -> Lsn {
+        fn applied_seq(&self) -> Seq {
             self.applied
         }
 
         fn apply(
             &mut self,
-            lsn: Lsn,
-            event: Event,
+            recorded: LogEntry,
         ) -> Result<(), Self::Error> {
-            *self.counts.entry(event.kind).or_default() += 1;
-            self.applied = lsn;
+            *self.counts.entry(recorded.event.kind).or_default() += 1;
+            self.applied = recorded.seq;
             Ok(())
         }
     }

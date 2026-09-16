@@ -36,7 +36,7 @@
 ## agentd のイベントログ(グローバルな JSONL ログ)
 
 - 実装は `agentd-events/src/log.rs` の `EventLog`。1本の JSONL ファイルをデーモン全体・全セッションで共有する、append-only のイベントログとして動作する。
-- 1行が CloudEvents 1.0 エンベロープ JSON そのもの。位置は1始まりの行番号(`Lsn`)で、スキーマレスなので拡張属性はそのまま保存される。
+- 1行が CloudEvents 1.0 エンベロープ JSON そのもの。位置は1始まりの行番号(`Seq`)で、スキーマレスなので拡張属性はそのまま保存される。
 - 履歴検索はログを直接読む(`jq`/`rg`/DuckDB)。状態を持つ読み取りモデルは `agentd_events::projection` でログから replay する。
 - ファイルはデフォルトで `/tmp/mokmokd-events.jsonl`、`--log-path` で変更可能(`agentd/src/main.rs` の `Serve` サブコマンド定義)。open() 時に親ディレクトリが自動作成される。
 

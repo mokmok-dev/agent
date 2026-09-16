@@ -3,7 +3,7 @@
 //! Under the event-sourced model the log is the source of truth:
 //! [`EventLog::publish`] returns only after the event has been appended and
 //! synced, so an acknowledged event cannot be lost. Live fanout through the
-//! inner [`EventBus`] happens after the sync and in log order; a subscriber
+//! inner fanout happens after the sync and in log order; a subscriber
 //! that falls behind loses its live stream without affecting the log.
 //!
 //! One dedicated writer thread owns the file and the sequence number, which
@@ -14,17 +14,20 @@
 //!
 //! Events are stored one per line as their verbatim `CloudEvents` envelope, so
 //! the log is consumable by ordinary tooling (`jq`, `rg`, `DuckDB`). Positions
-//! are one-based line numbers, exposed as [`Lsn`].
+//! are one-based line numbers, exposed as [`Seq`]; the position is paired with
+//! the event as a [`LogEntry`] on the live bus and when reading history, but is
+//! never written into the file, so the file stays a plain `CloudEvents` stream.
 //!
 //! The log is at-least-once across a writer failure: an event that was written
 //! but not acknowledged can survive a crash, so a publisher that retries may
 //! append it twice. Consumers deduplicate by the stable [`Event::id`].
 
-use crate::{Event, EventBus};
+use crate::{Event, EventBus, LogEntry};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -36,7 +39,7 @@ const MAX_BATCH_EVENTS: usize = 1024;
 const DEFAULT_CAPACITY: usize = 1024;
 
 /// A one-based position in the event log.
-pub type Lsn = u64;
+pub type Seq = u64;
 
 /// Errors returned by the log.
 #[derive(Debug, Error)]
@@ -52,7 +55,7 @@ pub enum LogError {
     WriterStopped,
 }
 
-/// An append-only JSONL log attached to a live [`EventBus`].
+/// An append-only JSONL log with a live fanout.
 ///
 /// Cloning shares the same file, writer thread, and subscriber set.
 #[derive(Debug, Clone)]
@@ -64,6 +67,8 @@ pub struct EventLog {
 struct Inner {
     path: PathBuf,
     writer: mpsc::Sender<Pending>,
+    /// The position of the last committed event, maintained by the writer.
+    tail: Arc<AtomicU64>,
     bus: EventBus,
 }
 
@@ -71,7 +76,7 @@ struct Inner {
 #[derive(Debug)]
 struct Pending {
     event: Event,
-    ack: oneshot::Sender<Result<Lsn, LogError>>,
+    ack: oneshot::Sender<Result<Seq, LogError>>,
 }
 
 impl EventLog {
@@ -93,18 +98,25 @@ impl EventLog {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let next_lsn = recover(&path)?;
+        let next_seq = recover(&path)?;
         let file = OpenOptions::new().append(true).open(&path)?;
 
         let bus = EventBus::new(DEFAULT_CAPACITY);
         let (writer, pending) = mpsc::channel(DEFAULT_CAPACITY);
+        let tail = Arc::new(AtomicU64::new(next_seq - 1));
         let thread_bus = bus.clone();
+        let thread_tail = Arc::clone(&tail);
         std::thread::Builder::new()
             .name(String::from("eventlog"))
-            .spawn(move || write_loop(file, next_lsn, pending, &thread_bus))?;
+            .spawn(move || write_loop(file, next_seq, pending, &thread_bus, &thread_tail))?;
 
         Ok(Self {
-            inner: Arc::new(Inner { path, writer, bus }),
+            inner: Arc::new(Inner {
+                path,
+                writer,
+                tail,
+                bus,
+            }),
         })
     }
 
@@ -121,7 +133,7 @@ impl EventLog {
     pub async fn publish(
         &self,
         event: Event,
-    ) -> Result<Lsn, LogError> {
+    ) -> Result<Seq, LogError> {
         let (ack, applied) = oneshot::channel();
         self.inner
             .writer
@@ -138,8 +150,19 @@ impl EventLog {
     /// [`broadcast::error::RecvError::Lagged`]. Use [`read_from`](Self::read_from)
     /// to consume history regardless of pace.
     #[must_use]
-    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+    pub fn subscribe(&self) -> broadcast::Receiver<LogEntry> {
         self.inner.bus.subscribe()
+    }
+
+    /// Returns the position of the last committed event, or zero when the log
+    /// is empty.
+    ///
+    /// This is the highest position any subscriber can have observed. A resume
+    /// request for a position above `tail_seq() + 1` refers to a position that
+    /// will never be appended to this log.
+    #[must_use]
+    pub fn tail_seq(&self) -> Seq {
+        self.inner.tail.load(Ordering::Relaxed)
     }
 
     /// Reads the log from `from` (inclusive) to the end.
@@ -149,19 +172,19 @@ impl EventLog {
     /// Returns [`LogError::Io`] if the file cannot be opened.
     pub fn read_from(
         &self,
-        from: Lsn,
+        from: Seq,
     ) -> Result<LogReader, LogError> {
         LogReader::open(&self.inner.path, from)
     }
 }
 
-/// Recovers `path` and returns the next free [`Lsn`].
+/// Recovers `path` and returns the next free [`Seq`].
 ///
 /// Creates an empty file when `path` is missing. When the file does not end in
 /// a newline, the trailing bytes are a partial append from a crash and are
 /// truncated. The file is streamed, so recovery does not load the log into
 /// memory.
-fn recover(path: &Path) -> Result<Lsn, LogError> {
+fn recover(path: &Path) -> Result<Seq, LogError> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -196,9 +219,10 @@ fn recover(path: &Path) -> Result<Lsn, LogError> {
 /// Drains pending publishes into batches, commits each batch, and fans it out.
 fn write_loop(
     mut file: File,
-    mut next_lsn: Lsn,
+    mut next_seq: Seq,
     mut pending: mpsc::Receiver<Pending>,
     bus: &EventBus,
+    tail: &AtomicU64,
 ) {
     while let Some(first) = pending.blocking_recv() {
         let mut batch = vec![first];
@@ -209,7 +233,7 @@ fn write_loop(
             }
         }
 
-        if let Err(error) = commit(&mut file, &mut next_lsn, batch, bus) {
+        if let Err(error) = commit(&mut file, &mut next_seq, batch, bus, tail) {
             tracing::error!(%error, "event log write failed; stopping the writer");
             return;
         }
@@ -219,9 +243,10 @@ fn write_loop(
 /// Appends `batch` in one write, syncs once, then fans out in log order.
 fn commit(
     file: &mut File,
-    next_lsn: &mut Lsn,
+    next_seq: &mut Seq,
     batch: Vec<Pending>,
     bus: &EventBus,
+    tail: &AtomicU64,
 ) -> Result<(), LogError> {
     let mut buffer = String::new();
     let mut accepted = Vec::with_capacity(batch.len());
@@ -230,8 +255,8 @@ fn commit(
             Ok(line) => {
                 buffer.push_str(&line);
                 buffer.push('\n');
-                accepted.push((*next_lsn, item));
-                *next_lsn += 1;
+                accepted.push((*next_seq, item));
+                *next_seq += 1;
             },
             Err(error) => {
                 let _ = item.ack.send(Err(LogError::Json(error)));
@@ -242,9 +267,12 @@ fn commit(
     file.write_all(buffer.as_bytes())?;
     file.sync_data()?;
 
-    for (lsn, item) in accepted {
-        bus.publish(item.event);
-        let _ = item.ack.send(Ok(lsn));
+    // Publish the tail before the fanout, so a subscriber that observes an
+    // event also observes a tail that covers its position.
+    tail.store(*next_seq - 1, Ordering::Relaxed);
+    for (seq, item) in accepted {
+        bus.publish(LogEntry::new(seq, item.event));
+        let _ = item.ack.send(Ok(seq));
     }
     Ok(())
 }
@@ -257,7 +285,7 @@ fn commit(
 #[derive(Debug)]
 pub struct LogReader {
     reader: BufReader<File>,
-    next_lsn: Lsn,
+    next_seq: Seq,
     buffer: Vec<u8>,
     done: bool,
 }
@@ -266,7 +294,7 @@ impl LogReader {
     /// Opens `path` positioned at `from`.
     fn open(
         path: &Path,
-        from: Lsn,
+        from: Seq,
     ) -> Result<Self, LogError> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
@@ -279,7 +307,7 @@ impl LogReader {
         }
         Ok(Self {
             reader,
-            next_lsn: from.max(1),
+            next_seq: from.max(1),
             buffer: Vec::new(),
             done: false,
         })
@@ -287,7 +315,7 @@ impl LogReader {
 }
 
 impl Iterator for LogReader {
-    type Item = Result<(Lsn, Event), LogError>;
+    type Item = Result<LogEntry, LogError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
@@ -307,9 +335,9 @@ impl Iterator for LogReader {
                 self.buffer.pop();
                 match serde_json::from_slice::<Event>(&self.buffer) {
                     Ok(event) => {
-                        let lsn = self.next_lsn;
-                        self.next_lsn += 1;
-                        Some(Ok((lsn, event)))
+                        let seq = self.next_seq;
+                        self.next_seq += 1;
+                        Some(Ok(LogEntry::new(seq, event)))
                     },
                     Err(error) => {
                         self.done = true;
@@ -327,8 +355,8 @@ impl Iterator for LogReader {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventLog, LogError, Lsn};
-    use crate::{Event, EventBus};
+    use super::{EventLog, LogError};
+    use crate::{Event, EventBus, LogEntry};
     use serde_json::json;
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
@@ -344,7 +372,7 @@ mod tests {
     fn read_all(log: &EventLog) -> Vec<Event> {
         log.read_from(1)
             .expect("read should open")
-            .map(|entry| entry.expect("entry should decode").1)
+            .map(|entry| entry.expect("entry should decode").event)
             .collect()
     }
 
@@ -360,8 +388,14 @@ mod tests {
         assert_eq!(log.publish(first.clone()).await.expect("publish"), 1);
         assert_eq!(log.publish(second.clone()).await.expect("publish"), 2);
 
-        assert_eq!(subscriber.recv().await.ok().as_ref(), Some(&first));
-        assert_eq!(subscriber.recv().await.ok().as_ref(), Some(&second));
+        assert_eq!(
+            subscriber.recv().await.ok().as_ref(),
+            Some(&LogEntry::new(1, first.clone()))
+        );
+        assert_eq!(
+            subscriber.recv().await.ok().as_ref(),
+            Some(&LogEntry::new(2, second.clone()))
+        );
         assert_eq!(read_all(&log), [first, second]);
     }
 
@@ -439,12 +473,29 @@ mod tests {
             log.publish(event.clone()).await.expect("publish");
         }
 
-        let entries: Vec<(Lsn, Event)> = log
+        let entries: Vec<LogEntry> = log
             .read_from(2)
             .expect("read should open")
             .map(|entry| entry.expect("entry should decode"))
             .collect();
-        assert_eq!(entries, [(2, events[1].clone()), (3, events[2].clone())]);
+        assert_eq!(
+            entries,
+            [
+                LogEntry::new(2, events[1].clone()),
+                LogEntry::new(3, events[2].clone())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn tail_seq_tracks_the_last_committed_position() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let log = open_log(&dir.path().join("events.jsonl"));
+
+        assert_eq!(log.tail_seq(), 0);
+        log.publish(test_event(0)).await.expect("publish");
+        log.publish(test_event(1)).await.expect("publish");
+        assert_eq!(log.tail_seq(), 2);
     }
 
     #[tokio::test]
@@ -458,6 +509,7 @@ mod tests {
                 drop(receiver);
                 sender
             },
+            tail: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             bus: EventBus::default(),
         };
         let dead = EventLog {

@@ -6,10 +6,15 @@
 //! context attributes (`id`, `source`, `specversion`, `type`) serialized with
 //! their spec-defined names, plus the event `data`.
 //!
-//! [`EventBus`] is the in-process live fanout. [`EventLog`] is the durable
-//! append-only JSONL log that is the source of truth: it writes an event before
-//! fanning it out, so an acknowledged event cannot be lost. [`projection`]
-//! holds read models replayed from the log.
+//! An internal live fanout delivers each committed event to subscribers;
+//! [`EventLog`] is the durable append-only JSONL log that is the source of
+//! truth: it writes an event before fanning it out, so an acknowledged event
+//! cannot be lost. [`projection`] holds read models replayed from the log.
+//!
+//! Everything that leaves the log — the live fanout and the WebSocket API —
+//! carries the event's [`Seq`] alongside it: as a [`LogEntry`] in-process, and
+//! as a [`WireMessage`] on the wire, so a consumer can record how far it has
+//! processed and resume from there.
 //!
 //! [CloudEvents]: https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md
 
@@ -21,7 +26,7 @@ use tokio::sync::broadcast;
 pub mod log;
 pub mod projection;
 
-pub use log::{EventLog, LogError, LogReader, Lsn};
+pub use log::{EventLog, LogError, LogReader, Seq};
 pub use projection::{Projection, ProjectionError, catch_up};
 
 /// Capacity of the channel buffering events per subscriber before it lags.
@@ -82,14 +87,80 @@ impl Event {
     }
 }
 
-/// Broadcasts [`Event`]s to every subscriber.
+/// An [`Event`] together with its position in the log.
 ///
-/// Components publish events through [`EventBus::publish`] and react to the
-/// events of other components through [`EventBus::subscribe`]; there is no
-/// central orchestrator.
+/// This is the unit that flows on the log's live fanout (see
+/// [`EventLog::subscribe`]). Because the position travels with the event, a
+/// consumer can persist the last [`seq`](LogEntry::seq) it applied and resume
+/// from there with [`EventLog::read_from`].
+///
+/// The position is in-process metadata; the shape sent over the WebSocket API
+/// is [`WireMessage`], whose `seq` is optional to admit transient daemon
+/// notices that are not part of the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogEntry {
+    /// The one-based log position of [`event`](LogEntry::event).
+    pub seq: Seq,
+    /// The committed event.
+    pub event: Event,
+}
+
+impl LogEntry {
+    /// Pairs `event` with its log position `seq`.
+    #[must_use]
+    pub const fn new(
+        seq: Seq,
+        event: Event,
+    ) -> Self {
+        Self { seq, event }
+    }
+}
+
+/// The JSON envelope exchanged with WebSocket clients: an [`Event`] and its log
+/// position.
+///
+/// `seq` is the one-based log position, or `None` for a transient daemon notice
+/// that is not part of the log (for example `error.lagged`). Inbound frames are
+/// a bare [`Event`]; the daemon assigns the position on append, so `seq` is
+/// produced by the daemon and never by a client.
+///
+/// [`Event`] serializes as its verbatim `CloudEvents` envelope, so a
+/// `WireMessage` is `{ "seq": <n|null>, "event": <cloud event> }`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireMessage {
+    /// The one-based log position, or `None` for a transient notice.
+    #[serde(default)]
+    pub seq: Option<Seq>,
+    /// The event, as a verbatim `CloudEvents` envelope.
+    pub event: Event,
+}
+
+impl WireMessage {
+    /// Wraps a transient daemon notice that has no log position.
+    #[must_use]
+    pub const fn notice(event: Event) -> Self {
+        Self { seq: None, event }
+    }
+}
+
+impl From<LogEntry> for WireMessage {
+    /// Wraps a committed log entry with its position.
+    fn from(entry: LogEntry) -> Self {
+        Self {
+            seq: Some(entry.seq),
+            event: entry.event,
+        }
+    }
+}
+
+/// Broadcasts [`LogEntry`] events to every subscriber.
+///
+/// This is an internal detail of [`EventLog`], which is the only publisher:
+/// every `LogEntry` it sends carries the position the event actually received
+/// in the log. Use [`EventLog::subscribe`] to receive the fanout.
 #[derive(Debug, Clone)]
-pub struct EventBus {
-    sender: broadcast::Sender<Event>,
+pub(crate) struct EventBus {
+    sender: broadcast::Sender<LogEntry>,
 }
 
 impl EventBus {
@@ -100,27 +171,27 @@ impl EventBus {
     ///
     /// Panics if `capacity` is zero.
     #[must_use]
-    pub fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         let (sender, _) = broadcast::channel(capacity);
         Self { sender }
     }
 
-    /// Publishes `event` to all current subscribers.
+    /// Publishes `recorded` to all current subscribers.
     ///
     /// Publishing without subscribers is not an error; the event is dropped
     /// and the condition is logged.
-    pub fn publish(
+    pub(crate) fn publish(
         &self,
-        event: Event,
+        recorded: LogEntry,
     ) {
-        if self.sender.send(event).is_err() {
+        if self.sender.send(recorded).is_err() {
             tracing::debug!("event dropped because there are no subscribers");
         }
     }
 
     /// Subscribes to all events published after this call.
     #[must_use]
-    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<LogEntry> {
         self.sender.subscribe()
     }
 }
@@ -133,7 +204,7 @@ impl Default for EventBus {
 
 #[cfg(test)]
 mod tests {
-    use super::{DAEMON_SOURCE, Event, EventBus, SPEC_VERSION};
+    use super::{DAEMON_SOURCE, Event, EventBus, LogEntry, SPEC_VERSION};
     use serde_json::json;
     use tokio::sync::broadcast::error::RecvError;
 
@@ -174,27 +245,27 @@ mod tests {
         let bus = EventBus::new(8);
         let mut first = bus.subscribe();
         let mut second = bus.subscribe();
-        let event = test_event("test.event");
+        let recorded = LogEntry::new(1, test_event("test.event"));
 
-        bus.publish(event.clone());
+        bus.publish(recorded.clone());
 
-        assert_eq!(first.recv().await.ok().as_ref(), Some(&event));
-        assert_eq!(second.recv().await.ok().as_ref(), Some(&event));
+        assert_eq!(first.recv().await.ok().as_ref(), Some(&recorded));
+        assert_eq!(second.recv().await.ok().as_ref(), Some(&recorded));
     }
 
     #[tokio::test]
     async fn publish_without_subscribers_is_not_an_error() {
         let bus = EventBus::new(8);
 
-        bus.publish(test_event("test.event"));
+        bus.publish(LogEntry::new(1, test_event("test.event")));
     }
 
     #[tokio::test]
     async fn lagged_subscribers_observe_lagged_before_events_resume() {
         let bus = EventBus::new(1);
         let mut subscriber = bus.subscribe();
-        let second = test_event("test.second");
-        bus.publish(test_event("test.first"));
+        let second = LogEntry::new(2, test_event("test.second"));
+        bus.publish(LogEntry::new(1, test_event("test.first")));
         bus.publish(second.clone());
 
         let received = subscriber.recv().await;
