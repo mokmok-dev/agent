@@ -12,7 +12,6 @@ agentd-integration-sandbox = { workspace = true, optional = true }
 axum = { workspace = true, features = ["tracing", "ws"] }
 clap = { workspace = true, features = ["derive"] }
 futures-util = { workspace = true }
-rusqlite = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [

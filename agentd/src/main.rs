@@ -1,6 +1,5 @@
-use agentd::eventstore;
+use agentd::log::{self, EventLog};
 use agentd::server;
-use agentd_events::EventBus;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use thiserror::Error;
@@ -23,8 +22,8 @@ enum Command {
     Serve {
         #[arg(long, default_value = "/tmp/mokmokd.sock")]
         socket: PathBuf,
-        #[arg(long, default_value = "/tmp/mokmokd-events.db")]
-        db_path: PathBuf,
+        #[arg(long, default_value = "/tmp/mokmokd-events.jsonl")]
+        log_path: PathBuf,
     },
 }
 
@@ -32,18 +31,17 @@ enum Command {
 enum RunError {
     #[error("failed to serve: {0}")]
     Serve(server::ServerError),
-    #[error("failed to open the event store: {0}")]
-    Store(eventstore::StoreError),
+    #[error("failed to open the event log: {0}")]
+    Log(log::LogError),
 }
 
 async fn run() -> Result<(), RunError> {
     let args = Args::parse();
 
     match args.command {
-        Command::Serve { socket, db_path } => {
-            let bus = EventBus::default();
-            eventstore::open(&db_path, &bus).map_err(RunError::Store)?;
-            let () = server::run(socket, bus).await.map_err(RunError::Serve)?;
+        Command::Serve { socket, log_path } => {
+            let log = EventLog::open(&log_path).map_err(RunError::Log)?;
+            let () = server::run(socket, log).await.map_err(RunError::Serve)?;
             Ok(())
         },
     }

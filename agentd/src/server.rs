@@ -1,4 +1,5 @@
-use agentd_events::{Event, EventBus, SPEC_VERSION};
+use crate::log::EventLog;
+use agentd_events::{Event, SPEC_VERSION};
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -37,7 +38,7 @@ pub enum ServerError {
 /// [`ServerError::AlreadyRunning`] if a live instance already owns `socket`.
 pub async fn run(
     socket: std::path::PathBuf,
-    bus: EventBus,
+    log: EventLog,
 ) -> Result<(), ServerError> {
     if let Some(parent) = socket.parent() {
         std::fs::create_dir_all(parent)?;
@@ -58,7 +59,7 @@ pub async fn run(
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
-    let () = axum::serve(listener, router(bus))
+    let () = axum::serve(listener, router(log))
         .with_graceful_shutdown(async move {
             tokio::select! {
                 _ = interrupt.recv() => {},
@@ -71,38 +72,39 @@ pub async fn run(
 }
 
 /// Builds the router exposing the event API.
-pub fn router(bus: EventBus) -> Router {
+pub fn router(log: EventLog) -> Router {
     Router::new()
         .route("/events", any(events_handler))
         .layer(TraceLayer::new_for_http())
-        .with_state(bus)
+        .with_state(log)
 }
 
 /// Upgrades `GET /events` connections to bidirectional event streams.
 async fn events_handler(
-    State(bus): State<EventBus>,
+    State(log): State<EventLog>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    upgrade.on_upgrade(move |socket| handle_events_socket(socket, bus))
+    upgrade.on_upgrade(move |socket| handle_events_socket(socket, log))
 }
 
-/// Pumps events in both directions between the bus and the socket until the
-/// client disconnects or the bus closes.
+/// Pumps events in both directions between the log and the socket until the
+/// client disconnects or the log closes.
 ///
-/// Inbound text messages are parsed as [`Event`]s and published to the bus;
-/// messages parsing successfully but announcing an unsupported `CloudEvents`
-/// `specversion` are rejected like invalid messages. Outbound events are
-/// forwarded as JSON text messages. Invalid messages are answered with an
-/// `error.invalid_event` event instead of closing the connection, and a
+/// Inbound text messages are parsed as [`Event`]s and durably published; a
+/// message parsing successfully but announcing an unsupported `CloudEvents`
+/// `specversion` is rejected like an invalid one. Outbound events are forwarded
+/// as JSON text messages. Invalid messages are answered with an
+/// `error.invalid_event` event and a failed durable append with an
+/// `error.publish_failed` event instead of closing the connection, and a
 /// subscriber that falls behind is notified through an `error.lagged` event.
 /// Binary, ping, and pong frames are ignored; pongs are answered automatically
 /// by the WebSocket implementation.
 async fn handle_events_socket(
     socket: WebSocket,
-    bus: EventBus,
+    log: EventLog,
 ) {
     let (mut sink, mut inbound) = socket.split();
-    let mut events = bus.subscribe();
+    let mut events = log.subscribe();
 
     loop {
         tokio::select! {
@@ -114,7 +116,7 @@ async fn handle_events_socket(
                         }
                     },
                     Err(RecvError::Lagged(missed)) => {
-                        tracing::warn!(missed, "client fell behind the event bus");
+                        tracing::warn!(missed, "client fell behind the event log");
                         let notice = Event::new("error.lagged", json!({ "missed": missed }));
                         if send_event(&mut sink, &notice).await.is_err() {
                             break;
@@ -127,7 +129,18 @@ async fn handle_events_socket(
                 let Some(Ok(message)) = message else { break };
                 match message {
                     Message::Text(text) => match serde_json::from_str::<Event>(&text) {
-                        Ok(event) if event.specversion == SPEC_VERSION => bus.publish(event),
+                        Ok(event) if event.specversion == SPEC_VERSION => {
+                            if let Err(error) = log.publish(event).await {
+                                tracing::error!(%error, "failed to durably publish an event");
+                                let reply = Event::new(
+                                    "error.publish_failed",
+                                    json!({ "error": error.to_string() }),
+                                );
+                                if send_event(&mut sink, &reply).await.is_err() {
+                                    break;
+                                }
+                            }
+                        },
                         Ok(_) => {
                             tracing::debug!("client sent an event with an unsupported specversion");
                             let reply = Event::new(
@@ -177,7 +190,8 @@ async fn send_event(
 #[cfg(test)]
 mod tests {
     use super::{ServerError, router, run};
-    use agentd_events::{Event, EventBus};
+    use crate::log::EventLog;
+    use agentd_events::Event;
     use futures_util::SinkExt;
     use futures_util::StreamExt;
     use serde_json::json;
@@ -187,14 +201,19 @@ mod tests {
     use tokio_tungstenite::WebSocketStream;
     use tokio_tungstenite::tungstenite::Message;
 
+    /// Opens a fresh log under `dir`.
+    fn open_log(dir: &Path) -> EventLog {
+        EventLog::open(dir.join("events.jsonl")).expect("log should open")
+    }
+
     /// Spawns a server on `socket` without signal handling.
     fn spawn_server(
         socket: PathBuf,
-        bus: EventBus,
+        log: EventLog,
     ) -> tokio::task::JoinHandle<std::io::Result<()>> {
         tokio::spawn(async move {
             let listener = tokio::net::UnixListener::bind(socket)?;
-            let () = axum::serve(listener, router(bus)).await?;
+            let () = axum::serve(listener, router(log)).await?;
             Ok(())
         })
     }
@@ -230,7 +249,7 @@ mod tests {
     async fn events_socket_publishes_inbound_messages_and_relays_them_back() {
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let socket = dir.path().join("test.sock");
-        let server = spawn_server(socket.clone(), EventBus::new(16));
+        let server = spawn_server(socket.clone(), open_log(dir.path()));
 
         let mut client = connect(&socket).await;
         let event = test_event("test.event");
@@ -257,7 +276,7 @@ mod tests {
     async fn events_socket_relays_published_events_to_other_clients() {
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let socket = dir.path().join("test.sock");
-        let server = spawn_server(socket.clone(), EventBus::new(16));
+        let server = spawn_server(socket.clone(), open_log(dir.path()));
 
         let mut subscriber = connect(&socket).await;
         let mut publisher = connect(&socket).await;
@@ -285,7 +304,7 @@ mod tests {
     async fn events_socket_replies_with_error_event_for_invalid_messages() {
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let socket = dir.path().join("test.sock");
-        let server = spawn_server(socket.clone(), EventBus::new(16));
+        let server = spawn_server(socket.clone(), open_log(dir.path()));
 
         let mut client = connect(&socket).await;
 
@@ -309,7 +328,7 @@ mod tests {
     async fn events_socket_replies_with_error_event_for_unsupported_specversions() {
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let socket = dir.path().join("test.sock");
-        let server = spawn_server(socket.clone(), EventBus::new(16));
+        let server = spawn_server(socket.clone(), open_log(dir.path()));
 
         let mut client = connect(&socket).await;
 
@@ -340,7 +359,7 @@ mod tests {
         let _listener = tokio::net::UnixListener::bind(&socket)?;
 
         assert!(matches!(
-            run(socket, EventBus::new(1)).await,
+            run(socket, open_log(dir.path())).await,
             Err(ServerError::AlreadyRunning(_))
         ));
 
