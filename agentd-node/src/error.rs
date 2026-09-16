@@ -23,4 +23,11 @@ pub enum AgentError {
     /// The provider reported a failure in the response stream.
     #[error("the provider failed: {0}")]
     Provider(String),
+    /// The provider did not finish a response within the timeout, so the turn
+    /// was abandoned rather than blocking the agent forever.
+    #[error("the inference request did not finish within {0:?}")]
+    InferenceTimeout(std::time::Duration),
+    /// The model kept calling tools without stopping, so the turn was abandoned.
+    #[error("the model called tools more than {0} times without finishing")]
+    TooManyToolRounds(u32),
 }

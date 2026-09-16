@@ -12,8 +12,11 @@
 use agentd::auth::{Claim, Principal, Token, TokenStore};
 use agentd::server;
 use agentd_events::{Event, EventLog};
-use agentd_inference::{Delta, FakeProvider};
+use agentd_inference::{
+    Delta, FakeProvider, InferenceRequest, InferenceStream, Provider, ProviderError,
+};
 use agentd_node::{Agent, Conversation, Message, ShellLimits, SqliteProjection};
+use async_trait::async_trait;
 use serde_json::json;
 use std::path::Path;
 use std::sync::Arc;
@@ -47,7 +50,7 @@ fn tokens() -> TokenStore {
 fn spawn_server(
     socket: &Path,
     log: EventLog,
-    provider: Arc<FakeProvider>,
+    provider: Arc<dyn Provider>,
 ) -> tokio::task::JoinHandle<()> {
     let listener = UnixListener::bind(socket).expect("listener should bind");
     tokio::spawn(async move {
@@ -58,7 +61,7 @@ fn spawn_server(
 }
 
 /// A provider script that calls `shell` once and then finishes.
-fn scripted_provider() -> Arc<FakeProvider> {
+fn scripted_provider() -> Arc<dyn Provider> {
     Arc::new(FakeProvider::new(vec![
         vec![
             Delta::ToolCall {
@@ -169,6 +172,80 @@ async fn an_inbox_runs_a_tool_turn_and_publishes_the_conversation() {
     assert!(types.contains(&String::from("agent.tool_result")));
     assert!(types.contains(&String::from("agent.turn.completed")));
     assert!(!types.contains(&String::from("agent.turn.failed")));
+
+    shutdown.send(true).expect("shutdown should be sent");
+    handle
+        .await
+        .expect("agent should join")
+        .expect("agent should stop cleanly");
+    server.abort();
+}
+
+/// A provider whose response never arrives, to exercise the inference timeout.
+struct HangingProvider;
+
+#[async_trait]
+impl Provider for HangingProvider {
+    async fn stream(
+        &self,
+        _request: InferenceRequest,
+    ) -> Result<InferenceStream, ProviderError> {
+        Ok(Box::pin(futures_util::stream::pending::<
+            Result<Delta, ProviderError>,
+        >()))
+    }
+}
+
+/// Polls the log until it contains an event of `r#type`.
+async fn wait_for_type(
+    path: &Path,
+    r#type: &str,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if logged_types(path).iter().any(|entry| entry == r#type) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stalled_provider_fails_the_turn_instead_of_hanging() {
+    let dir = tempfile::tempdir().expect("tempdir should be created");
+    let socket = dir.path().join("agentd.sock");
+    let db = dir.path().join("agent.db");
+    let log_path = dir.path().join("events.jsonl");
+    let log = EventLog::open(&log_path).expect("log should open");
+    let server = spawn_server(&socket, log.clone(), Arc::new(HangingProvider));
+
+    let projection = SqliteProjection::<Conversation>::open(&db).expect("projection should open");
+    let mut agent = Agent::new(
+        &socket,
+        projection,
+        "c1",
+        dir.path(),
+        "urn:test:agent",
+        AGENT_TOKEN,
+    )
+    .with_inference_timeout(Duration::from_millis(300));
+    let (shutdown, receiver) = watch::channel(false);
+    let handle = tokio::spawn(async move { agent.run(receiver).await });
+
+    log.publish(Event::new(
+        "agent.inbox",
+        json!({ "conversation_id": "c1", "content": "hi" }),
+    ))
+    .await
+    .expect("publish should succeed");
+
+    assert!(
+        wait_for_type(&log_path, "agent.turn.failed").await,
+        "a stalled provider should fail the turn, not hang the agent"
+    );
 
     shutdown.send(true).expect("shutdown should be sent");
     handle

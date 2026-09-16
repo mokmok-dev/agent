@@ -39,6 +39,16 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 /// The longest delay between reconnect attempts.
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
+/// How long a single inference response may take before the turn is abandoned.
+///
+/// Without this a stalled provider holds the agent's read loop open forever, so
+/// no later prompt is ever processed.
+const DEFAULT_INFERENCE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// How many tool rounds a turn may run before it is abandoned, so a model that
+/// never stops calling tools cannot spin forever.
+const MAX_TOOL_ROUNDS: u32 = 64;
+
 /// The only `CloudEvents` `type` prefix the agent applies to its projection.
 const AGENT_PREFIX: &str = "agent.";
 
@@ -78,6 +88,7 @@ pub struct Agent {
     conversation_id: String,
     workdir: PathBuf,
     limits: ShellLimits,
+    inference_timeout: Duration,
     model: Option<String>,
     projection: SqliteProjection<Conversation>,
 }
@@ -100,6 +111,7 @@ impl Agent {
             conversation_id: conversation_id.into(),
             workdir: workdir.into(),
             limits: ShellLimits::default(),
+            inference_timeout: DEFAULT_INFERENCE_TIMEOUT,
             model: None,
             projection,
         }
@@ -112,6 +124,16 @@ impl Agent {
         limits: ShellLimits,
     ) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Overrides how long a single inference response may take.
+    #[must_use]
+    pub const fn with_inference_timeout(
+        mut self,
+        timeout: Duration,
+    ) -> Self {
+        self.inference_timeout = timeout;
         self
     }
 
@@ -201,6 +223,7 @@ impl Agent {
                                     token: &self.token,
                                     workdir: &self.workdir,
                                     limits: self.limits,
+                                    inference_timeout: self.inference_timeout,
                                     source: &self.source,
                                     conversation_id: &self.conversation_id,
                                     model: self.model.as_deref(),
@@ -261,6 +284,7 @@ struct Turn<'a> {
     token: &'a str,
     workdir: &'a Path,
     limits: ShellLimits,
+    inference_timeout: Duration,
     source: &'a str,
     conversation_id: &'a str,
     model: Option<&'a str>,
@@ -314,13 +338,21 @@ impl Turn<'_> {
     ) -> Result<(), AgentError> {
         let tools = vec![shell_tool()];
         let mut inference = InferenceClient::connect(self.socket, self.token).await?;
+        let mut rounds = 0;
         loop {
+            rounds += 1;
+            if rounds > MAX_TOOL_ROUNDS {
+                return Err(AgentError::TooManyToolRounds(MAX_TOOL_ROUNDS));
+            }
             let request = InferenceRequest {
                 messages: request_messages(history),
                 tools: tools.clone(),
                 model: self.model.map(String::from),
             };
-            let deltas = inference.complete(&request).await?;
+            let deltas = match timeout(self.inference_timeout, inference.complete(&request)).await {
+                Ok(result) => result?,
+                Err(_) => return Err(AgentError::InferenceTimeout(self.inference_timeout)),
+            };
             let (text, calls) = fold_deltas(deltas)?;
 
             if text.is_empty() && calls.is_empty() {

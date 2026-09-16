@@ -47,6 +47,10 @@ struct Args {
     /// Wall-clock seconds a single shell command may run before it is killed.
     #[arg(long, default_value_t = 120)]
     shell_timeout_secs: u64,
+    /// Wall-clock seconds a single inference response may take before the turn
+    /// is abandoned.
+    #[arg(long, default_value_t = 180)]
+    inference_timeout_secs: u64,
     /// The largest tool output kept on the result; the rest is truncated.
     #[arg(long, default_value_t = 32 * 1024)]
     max_output_bytes: usize,
@@ -96,7 +100,8 @@ async fn run() -> Result<(), RunError> {
         args.source,
         token.trim(),
     )
-    .with_limits(limits);
+    .with_limits(limits)
+    .with_inference_timeout(Duration::from_secs(args.inference_timeout_secs));
     if let Some(model) = args.model {
         agent = agent.with_model(model);
     }
