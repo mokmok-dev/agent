@@ -247,7 +247,7 @@ pub struct ExecResult {
 
 There is no `denied_by`: the sandbox no longer refuses a command before running
 it, because there is no allowlist. A refusal is an OS denial, visible as a
-non-zero exit code and (once the classifier lands) a `sandbox.violation.*` event.
+non-zero exit code and classified into a `sandbox.violation.*` event.
 
 ### Layer 1 backends
 
@@ -282,7 +282,7 @@ existing dotted-type convention and `source: urn:mokmokd`:
 | `sandbox.permission.requested` | A command or resource access needs a decision                     |
 | `sandbox.permission.granted`  | A static policy rule or an approver allowed it                    |
 | `sandbox.permission.denied`   | A static policy rule or an approver refused it (deny wins)        |
-| `sandbox.violation.filesystem` | The OS refused a filesystem operation: exit code, reason, path, snippet |
+| `sandbox.violation.filesystem` | The OS refused a filesystem operation: reason, denied path, output snippet |
 | `sandbox.violation.network`   | The OS refused a network operation                                 |
 | `sandbox.exec.completed`      | Terminal state of an execution: exit code, duration, output sizes |
 
@@ -349,8 +349,8 @@ Modeled on Sheena's methodology and codex's, adapted to Rust:
   cannot be created or modified; canonicalisation collapses `/tmp`.
 - **Permission flow tests**: end-to-end through the log — `requested` →
   `granted` → `exec.completed`.
-- **Violation flow tests** (follow-up): a structured `sandbox.violation.*` for a
-  real OS denial.
+- **Violation flow tests**: a structured `sandbox.violation.*` for a recognised
+  OS denial, and no violation for an unrelated failure.
 - **Differential tests**: golden files recorded from real bash + coreutils for
   layer 1 behavior, replayed in CI without the recorded host.
 - **Benchmarks**: sandbox construction, trivial `exec` overhead, parallel
@@ -360,18 +360,17 @@ Modeled on Sheena's methodology and codex's, adapted to Rust:
 
 Triggers, not dates — none of these steps are taken early:
 
-1. `sandbox.violation.*` classification for an OS denial (exit code + output).
-2. Deny network egress in the rendered profile (done for macOS: no grant) and
-   allow the daemon UDS when the session manager needs it.
-3. Linux backend: bubblewrap preferred, Landlock fallback, seccomp for network
+1. Allow the daemon UDS in the rendered profile when the session manager needs
+   it (egress is otherwise denied already).
+2. Linux backend: bubblewrap preferred, Landlock fallback, seccomp for network
    and syscall narrowing, with the arg0 self-exec helper.
-4. Human-in-the-loop approval flow over the WS event API, using the `authority`
+3. Human-in-the-loop approval flow over the WS event API, using the `authority`
    claim from `docs/architecture.md`.
-5. A long-lived session spawn API: today `Sandbox::exec` is a one-shot bounded
+4. A long-lived session spawn API: today `Sandbox::exec` is a one-shot bounded
    by a timeout that waits for the child to exit. A session needs a supervised
    process that outlives one command, with a writable session entry for its
    SQLite projection (`docs/node.md`).
-6. A session manager in `agentd` that launches a sandboxed node and reports
+5. A session manager in `agentd` that launches a sandboxed node and reports
    lifecycle through `session.*` events.
 
 ## Implementation status
@@ -379,7 +378,7 @@ Triggers, not dates — none of these steps are taken early:
 The crate matches this design except for the follow-ups above: `Policy` is the
 three-domain path-entry model with no allowlist or caps, the macOS profile
 renders the entries with protected metadata and root-unlink denial and opens no
-network, and the deleted concepts (VFS, allowlist, caps) are gone from the code.
-What remains unimplemented is the Linux backend, the violation classifier, the
-approval flow, and sessions. A crate doc comment records the same status next to
-the code.
+network, a denial is classified into a `sandbox.violation.*` event, and the
+deleted concepts (VFS, allowlist, caps) are gone from the code. What remains
+unimplemented is the Linux backend, the approval flow, and sessions. A crate doc
+comment records the same status next to the code.
