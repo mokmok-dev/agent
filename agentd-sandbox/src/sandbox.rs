@@ -11,6 +11,7 @@ use crate::error::SandboxError;
 use crate::events;
 use crate::executor::{ConfinedProcessExecutor, ExecResult, Executor};
 use crate::policy::Policy;
+use crate::violation;
 
 /// A running sandbox: an agent's confinement layer for shell commands.
 ///
@@ -119,6 +120,16 @@ impl Sandbox {
             .await?;
         let started = Instant::now();
         let result = self.executor.exec(command).await;
+        if let Some(violation) = violation::classify_violation(&result) {
+            self.log
+                .publish(violation::violation_event(
+                    &sandbox_id,
+                    &self.agent_id,
+                    command,
+                    &violation,
+                ))
+                .await?;
+        }
         self.log
             .publish(events::exec_completed(
                 &sandbox_id,
@@ -244,6 +255,52 @@ mod tests {
         }
         assert_eq!(events[2].data["exit_code"], 0);
         assert!(events[2].data["duration_ms"].as_u64().is_some());
+    }
+
+    /// An executor that always reports an OS denial.
+    struct DenyingExecutor;
+
+    #[async_trait]
+    impl Executor for DenyingExecutor {
+        async fn exec(
+            &self,
+            _command: &str,
+        ) -> ExecResult {
+            ExecResult {
+                stdout: String::new(),
+                stderr: String::from("touch: /etc/blocked: Operation not permitted"),
+                exit_code: 1,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_os_denial_publishes_a_violation_event() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let log = open_log(dir.path());
+        let mut subscriber = log.subscribe();
+        let sandbox = Sandbox::with_executor(&policy(), log, "coder-1", Arc::new(DenyingExecutor))
+            .expect("valid policy");
+
+        let result = sandbox
+            .exec("touch /etc/blocked")
+            .await
+            .expect("exec should succeed");
+
+        assert_ne!(result.exit_code, 0);
+        let events = drain(&mut subscriber);
+        let types: Vec<&str> = events.iter().map(|event| event.r#type.as_str()).collect();
+        assert_eq!(
+            types,
+            [
+                crate::events::PERMISSION_REQUESTED,
+                crate::events::PERMISSION_GRANTED,
+                crate::violation::VIOLATION_FILESYSTEM,
+                crate::events::EXEC_COMPLETED,
+            ]
+        );
+        assert_eq!(events[2].data["reason"], "operation_not_permitted");
+        assert_eq!(events[2].data["path"], "/etc/blocked");
     }
 
     #[test]
