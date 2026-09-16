@@ -1,10 +1,15 @@
-//! The event bus at the core of the choreography-style event flow: components
-//! publish events and react to the events published by others; there is no
-//! central orchestrator.
+//! The event contract and transport at the core of the choreography-style
+//! event flow: components publish events and react to the events published by
+//! others; there is no central orchestrator.
 //!
 //! Events conform to [CloudEvents] 1.0: every event carries the required
 //! context attributes (`id`, `source`, `specversion`, `type`) serialized with
 //! their spec-defined names, plus the event `data`.
+//!
+//! [`EventBus`] is the in-process live fanout. [`EventLog`] is the durable
+//! append-only JSONL log that is the source of truth: it writes an event before
+//! fanning it out, so an acknowledged event cannot be lost. [`projection`]
+//! holds read models replayed from the log.
 //!
 //! [CloudEvents]: https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md
 
@@ -12,6 +17,12 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::broadcast;
+
+pub mod log;
+pub mod projection;
+
+pub use log::{EventLog, LogError, LogReader, Lsn};
+pub use projection::{Projection, ProjectionError, catch_up};
 
 /// Capacity of the channel buffering events per subscriber before it lags.
 const EVENT_CHANNEL_CAPACITY: usize = 1024;

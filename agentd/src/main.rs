@@ -1,5 +1,5 @@
-use agentd::log::{self, EventLog};
 use agentd::server;
+use agentd_events::log::{self, EventLog};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use thiserror::Error;

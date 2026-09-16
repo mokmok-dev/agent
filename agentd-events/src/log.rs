@@ -20,7 +20,7 @@
 //! but not acknowledged can survive a crash, so a publisher that retries may
 //! append it twice. Consumers deduplicate by the stable [`Event::id`].
 
-use agentd_events::{Event, EventBus};
+use crate::{Event, EventBus};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -328,7 +328,7 @@ impl Iterator for LogReader {
 #[cfg(test)]
 mod tests {
     use super::{EventLog, LogError, Lsn};
-    use agentd_events::{Event, EventBus};
+    use crate::{Event, EventBus};
     use serde_json::json;
     use std::io::Write as _;
     use std::path::{Path, PathBuf};

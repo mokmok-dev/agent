@@ -8,8 +8,8 @@
 //! an [`applied_lsn`](Projection::applied_lsn) of zero) and catch it up over the
 //! whole log.
 
+use crate::Event;
 use crate::log::{EventLog, LogError, Lsn};
-use agentd_events::Event;
 use thiserror::Error;
 
 /// A read model built by applying the event log in order.
@@ -69,7 +69,9 @@ where
     let from = projection.applied_lsn().saturating_add(1);
     for entry in log.read_from(from)? {
         let (lsn, event) = entry?;
-        projection.apply(lsn, event).map_err(ProjectionError::Apply)?;
+        projection
+            .apply(lsn, event)
+            .map_err(ProjectionError::Apply)?;
     }
     Ok(())
 }
@@ -77,8 +79,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{Projection, catch_up};
+    use crate::Event;
     use crate::log::{EventLog, Lsn};
-    use agentd_events::Event;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::convert::Infallible;

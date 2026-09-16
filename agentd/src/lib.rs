@@ -1,10 +1,7 @@
 //! Daemon components for the choreography-style event flow.
 //!
-//! The binary composes [`server`] and [`log`] into a running daemon; the
-//! modules are exposed so the same wiring can be embedded elsewhere and
-//! exercised by integration tests. [`projection`] provides read models derived
-//! from the log.
+//! The binary composes [`server`] with the durable [`agentd_events::EventLog`]
+//! into a running daemon; the module is exposed so the same wiring can be
+//! embedded elsewhere and exercised by integration tests.
 
-pub mod log;
-pub mod projection;
 pub mod server;

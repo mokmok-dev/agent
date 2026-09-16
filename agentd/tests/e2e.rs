@@ -8,9 +8,8 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use agentd::log::EventLog;
 use agentd::server::router;
-use agentd_events::Event;
+use agentd_events::{Event, EventLog};
 use futures_util::SinkExt;
 use futures_util::StreamExt;
 use serde_json::json;

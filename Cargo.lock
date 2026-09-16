@@ -27,6 +27,8 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
  "time",
  "tokio",
  "tracing",
