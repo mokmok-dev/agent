@@ -3,10 +3,10 @@
 //! A [`Policy`] is deny-by-default in every domain: the zero value grants no
 //! path access, runs no command, and imposes safe resource limits. The
 //! filesystem domain is a single list of path entries evaluated with the
-//! precedence `deny > write > read`; the network has no configurability because
-//! egress and ingress are denied outright. The policy serializes into JSON so
-//! it can arrive as event data; every field defaults to an inert value when
-//! absent.
+//! precedence `deny > write > read`; the network domain grants outbound access
+//! only to the named Unix domain sockets, so egress and ingress are otherwise
+//! denied outright. The policy serializes into JSON so it can arrive as event
+//! data; every field defaults to an inert value when absent.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,6 +22,8 @@ pub struct Policy {
     pub fs: FsPolicy,
     /// Shell policy: environment and working directory.
     pub shell: ShellPolicy,
+    /// Network policy: the Unix domain sockets the command may reach.
+    pub network: NetworkPolicy,
     /// Resource limits: guards, not grants — safe values even when omitted.
     pub limits: Limits,
 }
@@ -31,8 +33,9 @@ impl Policy {
     ///
     /// # Errors
     ///
-    /// Returns [`PolicyError`] for a zero timeout, a relative path entry, or a
-    /// protected name that is empty or contains a separator.
+    /// Returns [`PolicyError`] for a zero timeout, a relative path entry, an
+    /// unrepresentable socket path, or a protected name that is empty, contains
+    /// a separator, or cannot be represented in the profile.
     pub fn validate(&self) -> Result<(), PolicyError> {
         if self.limits.timeout.is_zero() {
             return Err(PolicyError::ZeroTimeout);
@@ -42,13 +45,32 @@ impl Policy {
                 return Err(PolicyError::RelativeEntry(entry.path.clone()));
             }
         }
+        for socket in &self.network.unix_sockets {
+            if !socket.is_absolute() {
+                return Err(PolicyError::RelativeSocket(socket.clone()));
+            }
+            if !profile_safe(&socket.to_string_lossy()) {
+                return Err(PolicyError::InvalidSocket(socket.clone()));
+            }
+        }
         for name in &self.fs.protected {
-            if name.is_empty() || name.contains('/') {
+            if name.is_empty() || name.contains('/') || !profile_safe(name) {
                 return Err(PolicyError::InvalidProtectedName(name.clone()));
             }
         }
         Ok(())
     }
+}
+
+/// Whether `text` can be embedded inside an SBPL `#"..."` literal.
+///
+/// A double quote cannot be escaped inside one and a control character would
+/// break the line, so either could inject a clause or split the profile; a
+/// policy carrying one is rejected rather than rendered.
+fn profile_safe(text: &str) -> bool {
+    !text
+        .chars()
+        .any(|character| character == '"' || character.is_control())
 }
 
 /// A policy input that fails closed.
@@ -60,8 +82,15 @@ pub enum PolicyError {
     /// A path entry must be an absolute host path.
     #[error("path entry {0:?} must be absolute")]
     RelativeEntry(PathBuf),
-    /// A protected name must be one path component, e.g. `.git`.
-    #[error("protected name {0:?} must be a single non-empty path component")]
+    /// A Unix socket path must be an absolute host path.
+    #[error("unix socket {0:?} must be absolute")]
+    RelativeSocket(PathBuf),
+    /// A Unix socket path must be representable in the profile.
+    #[error("unix socket {0:?} contains a character the profile cannot represent")]
+    InvalidSocket(PathBuf),
+    /// A protected name must be one path component that the profile can
+    /// represent.
+    #[error("protected name {0:?} must be a representable single path component")]
     InvalidProtectedName(String),
 }
 
@@ -111,6 +140,20 @@ pub enum Access {
     Write,
     /// No access, overriding any matching `read` or `write`.
     Deny,
+}
+
+/// Network policy for the OS confinement profile.
+///
+/// Only outbound connections to named Unix domain sockets are expressible;
+/// there is no IP grant, because the sandbox has no use for one and the daemon
+/// is reached over a local socket. The zero value grants nothing.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NetworkPolicy {
+    /// Unix domain socket paths the command may connect to. The profile matches
+    /// the path at the end of the socket address, so the connecting process must
+    /// use a path ending with this one (normally the same path string).
+    pub unix_sockets: Vec<PathBuf>,
 }
 
 /// Shell policy for commands executed through the sandbox.
@@ -181,7 +224,9 @@ mod duration_seconds {
 
 #[cfg(test)]
 mod tests {
-    use super::{Access, EnvVar, FsEntry, FsPolicy, Limits, Policy, PolicyError, ShellPolicy};
+    use super::{
+        Access, EnvVar, FsEntry, FsPolicy, Limits, NetworkPolicy, Policy, PolicyError, ShellPolicy,
+    };
     use serde_json::{Value, from_value, json, to_value};
     use std::path::PathBuf;
     use std::time::Duration;
@@ -192,6 +237,7 @@ mod tests {
 
         assert!(policy.fs.entries.is_empty());
         assert!(policy.shell.env.is_empty());
+        assert!(policy.network.unix_sockets.is_empty());
         assert_eq!(policy.shell.workdir, PathBuf::new());
     }
 
@@ -242,6 +288,9 @@ mod tests {
                     value: String::from("/scratch/cargo"),
                 }],
                 workdir: PathBuf::from("/repo"),
+            },
+            network: NetworkPolicy {
+                unix_sockets: vec![PathBuf::from("/run/agentd.sock")],
             },
             limits: Limits {
                 timeout: Duration::from_secs(30),
@@ -329,6 +378,49 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_a_relative_socket() {
+        let relative = Policy {
+            network: NetworkPolicy {
+                unix_sockets: vec![PathBuf::from("agentd.sock")],
+            },
+            ..Policy::default()
+        };
+
+        assert_eq!(
+            relative.validate(),
+            Err(PolicyError::RelativeSocket(PathBuf::from("agentd.sock")))
+        );
+    }
+
+    #[test]
+    fn validate_rejects_unrepresentable_socket_paths_and_names() {
+        let quoted = Policy {
+            network: NetworkPolicy {
+                unix_sockets: vec![PathBuf::from("/run/agent\"d.sock")],
+            },
+            ..Policy::default()
+        };
+        assert_eq!(
+            quoted.validate(),
+            Err(PolicyError::InvalidSocket(PathBuf::from(
+                "/run/agent\"d.sock"
+            )))
+        );
+
+        let quoted_name = Policy {
+            fs: FsPolicy {
+                protected: vec![String::from(".git\"")],
+                ..FsPolicy::default()
+            },
+            ..Policy::default()
+        };
+        assert_eq!(
+            quoted_name.validate(),
+            Err(PolicyError::InvalidProtectedName(String::from(".git\"")))
+        );
+    }
+
+    #[test]
     fn a_sound_default_policy_validates() {
         assert_eq!(Policy::default().validate(), Ok(()));
     }
@@ -337,6 +429,7 @@ mod tests {
     fn unknown_policy_fields_are_rejected() {
         assert!(from_value::<Policy>(json!({ "shells": {} })).is_err());
         assert!(from_value::<ShellPolicy>(json!({ "allowed": [] })).is_err());
+        assert!(from_value::<NetworkPolicy>(json!({ "sockets": [] })).is_err());
         assert!(from_value::<Limits>(json!({ "timeouts": 30 })).is_err());
         assert!(from_value::<EnvVar>(json!({ "name": "A", "value": "b", "extra": 1 })).is_err());
     }
