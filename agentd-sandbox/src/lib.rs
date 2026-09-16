@@ -18,12 +18,12 @@
 //!
 //! ```
 //! use agentd_events::EventLog;
-//! use agentd_integration_sandbox::{
+//! use agentd_sandbox::{
 //!     CommandPrefix, FsPolicy, Mount, MountSource, Policy, Sandbox, ShellPolicy,
 //! };
 //! use std::path::PathBuf;
 //!
-//! # fn main() -> Result<(), agentd_integration_sandbox::SandboxError> {
+//! # fn main() -> Result<(), agentd_sandbox::SandboxError> {
 //! # let repo = std::env::temp_dir().join("agentd-sandbox-doc-test");
 //! # std::fs::create_dir_all(&repo).expect("repo dir");
 //! let policy = Policy {
@@ -42,7 +42,7 @@
 //!     ..Policy::default()
 //! };
 //!
-//! # fn build(policy: Policy) -> Result<Sandbox, agentd_integration_sandbox::SandboxError> {
+//! # fn build(policy: Policy) -> Result<Sandbox, agentd_sandbox::SandboxError> {
 //! # let log_path = std::env::temp_dir().join("agentd-sandbox-doc-events.jsonl");
 //! let log = EventLog::open(&log_path)?;
 //! let sandbox = Sandbox::new(policy, log, "coder-1")?;

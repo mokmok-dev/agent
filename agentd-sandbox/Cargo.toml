@@ -1,6 +1,6 @@
 [package]
 edition.workspace = true
-name = "agentd-integration-sandbox"
+name = "agentd-sandbox"
 version.workspace = true
 
 [dependencies]

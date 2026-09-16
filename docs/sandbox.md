@@ -160,10 +160,9 @@ only the operator knows what their host considers secret.
 
 ## Architecture
 
-The sandbox ships as a new workspace crate, `agentd-integration-sandbox`
-(implemented under `integrations/sandbox`), following the documented
-in-process extension model: it depends on `agentd-events` only and is wired
-into `agentd` behind a cargo feature (`sandbox = ["dep:agentd-integration-sandbox"]`).
+The sandbox ships as a first-class workspace crate, `agentd-sandbox`: it depends
+on `agentd-events` only and is wired into `agentd` behind a cargo feature
+(`sandbox = ["dep:agentd-sandbox"]`).
 
 ```mermaid
 flowchart LR
@@ -178,13 +177,13 @@ flowchart LR
     style B fill:#f8f8f2,stroke:#888
 ```
 
-| Component                 | Crate                        | Role                                                                                      |
-| ------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------- |
-| `Policy`                  | `agentd-integration-sandbox` | The four-domain deny-by-default configuration; serializable so it can arrive as an event. |
-| VFS                       | `agentd-integration-sandbox` | `Vfs` trait with `Mem`, `ReadOnlyMount`, `ReadWriteMount`, `Overlay` implementations.      |
-| `Executor` trait          | `agentd-integration-sandbox` | Runs a command string under a policy; returns `Result { stdout, stderr, exit_code }`.      |
-| `ConfinedProcessExecutor` | `agentd-integration-sandbox` | Layer 1: translates policy into an OS confinement profile and spawns a real bash.          |
-| Permission publisher      | `agentd-integration-sandbox` | Emits `sandbox.permission.*` CloudEvents for every policy evaluation.                      |
+| Component                 | Crate            | Role                                                                                      |
+| ------------------------- | ---------------- | ----------------------------------------------------------------------------------------- |
+| `Policy`                  | `agentd-sandbox` | The four-domain deny-by-default configuration; serializable so it can arrive as an event. |
+| VFS                       | `agentd-sandbox` | `Vfs` trait with `Mem`, `ReadOnlyMount`, `ReadWriteMount`, `Overlay` implementations.     |
+| `Executor` trait          | `agentd-sandbox` | Runs a command string under a policy; returns `Result { stdout, stderr, exit_code }`.     |
+| `ConfinedProcessExecutor` | `agentd-sandbox` | Layer 1: translates policy into an OS confinement profile and spawns a real bash.         |
+| Permission publisher      | `agentd-sandbox` | Emits `sandbox.permission.*` CloudEvents for every policy evaluation.                     |
 
 ### VFS trait
 
@@ -379,7 +378,7 @@ Modeled on Sheena's methodology, adapted to Rust:
 
 Triggers, not dates — none of these steps are taken early:
 
-1. `agentd-integration-sandbox` crate with `Policy`, VFS (`Mem`, `ReadOnlyMount`,
+1. `agentd-sandbox` crate with `Policy`, VFS (`Mem`, `ReadOnlyMount`,
    `ReadWriteMount`, `Overlay`), and `ConfinedProcessExecutor` on Linux.
 2. macOS Seatbelt backend; permission events wired into the log.
 3. Human-in-the-loop approval flow over the WS event API.

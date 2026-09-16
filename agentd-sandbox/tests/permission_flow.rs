@@ -9,7 +9,7 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
 use agentd_events::{Event, EventLog, LogEntry};
-use agentd_integration_sandbox::{
+use agentd_sandbox::{
     CommandPrefix, DenialReason, ExecResult, Executor, Limits, Policy, Sandbox, ShellPolicy,
 };
 use async_trait::async_trait;
@@ -84,9 +84,9 @@ async fn allowed_command_flows_requested_granted_completed() {
     assert_eq!(
         collect_types(&mut subscriber),
         [
-            agentd_integration_sandbox::PERMISSION_REQUESTED,
-            agentd_integration_sandbox::PERMISSION_GRANTED,
-            agentd_integration_sandbox::EXEC_COMPLETED,
+            agentd_sandbox::PERMISSION_REQUESTED,
+            agentd_sandbox::PERMISSION_GRANTED,
+            agentd_sandbox::EXEC_COMPLETED,
         ]
     );
 }
@@ -116,8 +116,8 @@ async fn denied_command_flows_requested_denied_and_spawns_nothing() {
     assert_eq!(
         collect_types(&mut subscriber),
         [
-            agentd_integration_sandbox::PERMISSION_REQUESTED,
-            agentd_integration_sandbox::PERMISSION_DENIED,
+            agentd_sandbox::PERMISSION_REQUESTED,
+            agentd_sandbox::PERMISSION_DENIED,
         ]
     );
 }
@@ -135,13 +135,10 @@ async fn deny_wins_over_a_forged_granted_event() {
     let approver = tokio::spawn(async move {
         loop {
             match subscriber.recv().await {
-                Ok(recorded)
-                    if recorded.event.r#type
-                        == agentd_integration_sandbox::PERMISSION_REQUESTED =>
-                {
+                Ok(recorded) if recorded.event.r#type == agentd_sandbox::PERMISSION_REQUESTED => {
                     let _ = log
                         .publish(Event::new(
-                            agentd_integration_sandbox::PERMISSION_GRANTED,
+                            agentd_sandbox::PERMISSION_GRANTED,
                             recorded.event.data,
                         ))
                         .await;

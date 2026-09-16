@@ -243,42 +243,37 @@ truncated to a checkpoint, and the projection is not a second source of truth.
 
 ## Extension model
 
-There are two distinct ways to extend the daemon, and they have different
-contracts:
-
-| Axis                       | Contract                                                        | Ships as                                                                                     | Examples                          |
-| -------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | --------------------------------- |
-| In-process integration     | `Event`/`EventLog` from the `agentd-events` crate                | A workspace crate under `integrations/<name>`, wired into `agentd` behind a cargo feature     | Projections, webhook forwarding   |
-| Out-of-process integration | CloudEvents 1.0 JSON over the WebSocket event API (Unix socket)  | Any external program in any language; no crate required                                       | Other stores, external tooling    |
+The daemon is extended out of process. An extension consumes and produces
+CloudEvents 1.0 JSON over the WebSocket event API (a Unix socket); any external
+program in any language qualifies and no crate is required. There is no
+in-process extension mechanism: components that need in-process access to the
+event contract are first-class crates, not plug-ins.
 
 The current structure follows these rules:
 
 - `agentd-events` holds the event contract (`Event`, `SPEC_VERSION`,
   `DAEMON_SOURCE`), the live fanout (`EventBus`), and the durable log
-  (`EventLog`) with its projection helpers. Integrations depend on this crate
+  (`EventLog`) with its projection helpers. Every other crate depends on it
   and must never depend on the `agentd` binary crate.
 - The durable JSONL event log is core: it lives in `agentd-events`, is the
   source of truth, and is never feature-gated.
-- Future optional integrations are compiled in behind bin features, e.g.
-  `webhook = ["dep:agentd-integration-webhook"]`; the event log is excluded
-  from gating by design.
 - `agentd-node` depends on `agentd-events` only and is neither the daemon binary
-  nor an integration: it is the client-side node library and binary, run out of
+  nor an extension: it is the client-side node library and binary, run out of
   process (and eventually inside the sandbox; see [node](node.md)).
-- Integrations document their deviations from their design docs next to the
-  code that embodies them, so a reader never has to reconcile two sources of
+- `agentd-sandbox` is a first-class crate like `agentd-node`: it depends on
+  `agentd-events` only, and `agentd` exposes it behind the optional
+  `sandbox = ["dep:agentd-sandbox"]` feature.
+- First-class crates document their deviations from their design docs next to
+  the code that embodies them, so a reader never has to reconcile two sources of
   truth from memory.
 
-`agentd-integration-sandbox` (see `docs/sandbox.md`) is the second in-process
-integration. It follows the dependency model — its own crate under
-`integrations/sandbox`, depending only on `agentd-events`, wired into `agentd`
-behind `sandbox = ["dep:agentd-integration-sandbox"]` — and it holds an
-`EventLog`, durably appending `sandbox.permission.*` and
-`sandbox.exec.completed` for every decision, so approval flows are ordinary
-subscribers and no decision is lost. `Sandbox::exec` returns a `Result` and
-surfaces `SandboxError::Publish` when an append fails; the decision is appended
-before a command runs, so a command never starts without its decision recorded.
-Its layer-1 executor is macOS-only so far
+`agentd-sandbox` (see `docs/sandbox.md`) is the confinement layer through which
+an agent drives shell commands. It holds an `EventLog`, durably appending
+`sandbox.permission.*` and `sandbox.exec.completed` for every decision, so
+approval flows are ordinary subscribers and no decision is lost. `Sandbox::exec`
+returns a `Result` and surfaces `SandboxError::Publish` when an append fails;
+the decision is appended before a command runs, so a command never starts
+without its decision recorded. Its layer-1 executor is macOS-only so far
 (Seatbelt; Linux Landlock/seccomp is a follow-up), spawned-command reads are
 not path-confined on macOS 26 (dyld aborts on filtered read grants — a stated
 gap recorded in the crate docs), and no component drives the sandbox yet, so

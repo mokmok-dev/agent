@@ -4,11 +4,11 @@ name = "agentd"
 version.workspace = true
 
 [features]
-sandbox = ["dep:agentd-integration-sandbox"]
+sandbox = ["dep:agentd-sandbox"]
 
 [dependencies]
 agentd-events = { workspace = true }
-agentd-integration-sandbox = { workspace = true, optional = true }
+agentd-sandbox = { workspace = true, optional = true }
 axum = { workspace = true, features = ["tracing", "ws"] }
 clap = { workspace = true, features = ["derive"] }
 futures-util = { workspace = true }

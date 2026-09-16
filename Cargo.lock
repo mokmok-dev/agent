@@ -7,8 +7,8 @@ name = "agentd"
 version = "0.0.0"
 dependencies = [
  "agentd-events",
- "agentd-integration-sandbox",
  "agentd-node",
+ "agentd-sandbox",
  "axum",
  "clap",
  "futures-util",
@@ -39,23 +39,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentd-integration-sandbox"
-version = "0.0.0"
-dependencies = [
- "agentd-events",
- "async-trait",
- "globset",
- "nix",
- "serde",
- "serde_json",
- "shlex 1.3.0",
- "tempfile",
- "thiserror",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "agentd-node"
 version = "0.0.0"
 dependencies = [
@@ -70,6 +53,23 @@ dependencies = [
  "tokio-tungstenite 0.30.0",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "agentd-sandbox"
+version = "0.0.0"
+dependencies = [
+ "agentd-events",
+ "async-trait",
+ "globset",
+ "nix",
+ "serde",
+ "serde_json",
+ "shlex 1.3.0",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
