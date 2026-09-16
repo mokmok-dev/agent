@@ -89,6 +89,7 @@ impl InferenceClient {
     ) -> Result<Vec<Delta>, ClientError> {
         let text = serde_json::to_string(request).map_err(ClientError::Encode)?;
         self.stream.send(Message::text(text)).await?;
+        tracing::debug!("sent an inference request; awaiting deltas");
 
         let mut deltas = Vec::new();
         while let Some(message) = self.stream.next().await {
