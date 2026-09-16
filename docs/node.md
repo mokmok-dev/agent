@@ -118,46 +118,56 @@ agentd-node \
 expects; the node needs only the `read` claim unless it publishes. Keep the file
 private to the node's user.
 
-The bundled binary projects a count of events per `type` and exists to validate
-the transport, checkpoint, and resume behaviour. A real session replaces the
-reducer and the filter.
+The bundled `agentd-node` binary projects a count of events per `type` and exists
+to validate the transport, checkpoint, and resume behaviour.
 
-## Sandbox direction (planned, not implemented)
+## The agent node
 
-Nodes are intended to run inside the sandbox. The foundation is built so this
-does not require rework:
+`agentd-agent` is the node a real session runs. It keeps the same connection,
+checkpoint, and resume behaviour, but its reducer is the conversation read model
+and it *reacts*: when an `agent.inbox` event for its conversation is applied, it
+asks the daemon for a completion on `/inference`, runs the `shell` tool for any
+tool call, and publishes the finalized messages as `agent.*` events (see
+[inference](inference.md)).
 
-- Everything external is a CLI argument (`--socket`, `--db`, `--source`); the
-  node assumes no host paths and does not read the environment for config.
-- The node communicates only through the event log; stdout and stderr carry
-  diagnostics, not state.
-- The node does not spawn subprocesses, so no `process-exec` grant is needed.
-- SQLite writes its journal or WAL sidecar next to the database, so the whole
-  **directory** must be writable, not just the file. Place the database in one
-  sandbox session `write` entry per session.
+```sh
+agentd-agent \
+  --socket /abs/path/agentd.sock \
+  --db /path/to/session/agent.db \
+  --token-file /path/to/agent.token \
+  --conversation <id> \
+  --workdir /path/to/workspace \
+  --source urn:mokmokd:agent
+```
 
-The remaining work is on the daemon side and is tracked in `docs/sandbox.md`:
+The agent's token carries `read`, `publish`, and `infer` — never `authority`,
+so it cannot forge daemon-authority events. It holds no provider credentials:
+the daemon performs inference. Its `agent.*` types are non-reserved, so it can
+publish them with the `publish` claim alone.
 
-1. The session manager `agentd::session` (behind the `sandbox` feature, started
-   by the binary via `--session-command`/`--sandbox-policy`) reacts to a
-   `session.requested` event by launching a configured sandboxed node, reports
-   `session.*` lifecycle, and restarts a crashed node within a budget. On
-   startup it reconciles the active set with the durable log, failing any node
-   the previous daemon left open (a process cannot be re-adopted across a
-   restart).
-2. The sandbox has a long-lived spawn API (`Sandbox::spawn` returning a
-   `Session` with piped stdio).
-3. The whole node process is confined by one profile; child processes inherit
-   it, so per-command `sandbox.permission.*` events are not emitted.
-4. The node's connection to the daemon is the one allowed network path: egress is
-   denied outright, and the daemon grants its own Unix socket to the session
-   policy (`network.unix_sockets`), rendered as a path-scoped Seatbelt
-   `network-outbound (remote unix-socket ...)` grant. Because the sandbox
-   overrides `HOME` to its scratch directory, the node's default
-   `~/.agentd/agentd.sock` resolves to the scratch path, so `--session-command`
-   must pass the daemon's absolute `--socket` (and its `--token-file`). The node
-   needs no read of host files, and the database lives in its own session write
-   entry, so the file-effect policy is otherwise unchanged.
+## Sandbox deployment
+
+Nodes run inside the sandbox. Everything external is a CLI argument
+(`--socket`, `--db`, `--token-file`, `--workdir`); the node assumes no host paths
+and does not read the environment for config. Its stdout and stderr carry
+diagnostics, not state.
+
+The daemon's session manager (`agentd::session`) launches a configured node on a
+`session.requested` event, reports `session.*` lifecycle, restarts within a
+budget, enforces a lifetime, and reconciles the durable log on startup. The
+sandbox's long-lived `Sandbox::spawn` runs the whole node under one profile;
+because child processes inherit it, the agent's `bash` tool runs confined and no
+per-command `sandbox.permission.*` events are emitted — the session's lifecycle
+events are the audit trail.
+
+The node's connection to the daemon is the one allowed network path: egress is
+denied outright, and the daemon grants its own Unix socket to the session policy
+(`network.unix_sockets`), rendered as a path-scoped Seatbelt grant. Because the
+sandbox overrides `HOME` to its scratch directory, the node's default
+`~/.agentd/agentd.sock` resolves to the scratch path, so `--session-command`
+must pass the daemon's absolute `--socket`, `--token-file`, and `--db`. SQLite
+writes its journal sidecar next to the database, so the whole **directory** must
+be writable: place the database in one session `write` entry.
 
 ## Stated gaps
 
@@ -182,3 +192,7 @@ The remaining work is on the daemon side and is tracked in `docs/sandbox.md`:
 - End-to-end (`agentd/tests/node_session.rs`): a real daemon, a node projecting
   into SQLite, a filtered-out event advancing the checkpoint, and a restart
   resuming from the checkpoint without replaying from zero or double-counting.
+- End-to-end (`agentd/tests/agent_loop.rs`): a real daemon with a scripted
+  provider, a user prompt applied as `agent.inbox`, the agent running the shell
+  tool, and the conversation and `agent.*` events appearing in the projection
+  and the log.

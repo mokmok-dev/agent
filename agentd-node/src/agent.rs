@@ -1,0 +1,733 @@
+//! The agent loop: consume prompts, infer through the daemon, act, publish.
+//!
+//! The agent is a node specialization. It consumes the event log like any node,
+//! but it *reacts*: when an [`AGENT_INBOX`](crate::conversation::AGENT_INBOX)
+//! event for its conversation is applied, it runs a turn — build the
+//! conversation, ask the daemon for a completion, run any tool the model calls,
+//! and publish the finalized messages. Because the whole node runs inside one
+//! sandbox profile, the tool process it spawns (`bash`) inherits the confinement
+//! and needs no per-command permission events.
+//!
+//! The projection holds a non-`Sync` SQLite connection, so no reference to it
+//! is held across an `await`; a turn borrows only the connection-free
+//! [`Turn`] configuration.
+
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+use agentd_events::Event;
+use agentd_inference::{Delta, InferenceClient, InferenceRequest, Message, ToolCall, ToolSpec};
+use serde::Deserialize;
+use serde_json::json;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::process::Command;
+use tokio::sync::watch;
+use tokio::time::timeout;
+
+use crate::client::WsClient;
+use crate::conversation::{
+    AGENT_INBOX, AGENT_MESSAGE, AGENT_TOOL_RESULT, AGENT_TURN_COMPLETED, AGENT_TURN_FAILED,
+    AGENT_TURN_STARTED, Conversation,
+};
+use crate::error::AgentError;
+use crate::projection::SqliteProjection;
+
+/// The delay before the first reconnect attempt; doubled on each failure.
+const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
+
+/// The longest delay between reconnect attempts.
+const MAX_BACKOFF: Duration = Duration::from_secs(5);
+
+/// The only `CloudEvents` `type` prefix the agent applies to its projection.
+const AGENT_PREFIX: &str = "agent.";
+
+/// The instructions the model sees before the conversation.
+const SYSTEM_PROMPT: &str = "\
+You are a coding agent running inside a sandbox. You help with software \
+engineering tasks in the workspace directory. Use the `shell` tool to inspect \
+and change files and to run commands. Run one command at a time, read the \
+output, and adapt. The sandbox has no network access and only the workspace is \
+writable. When the task is complete, reply with a short summary and call no \
+more tools.";
+
+/// The budget a single tool command may use.
+#[derive(Debug, Clone, Copy)]
+pub struct ShellLimits {
+    /// Wall-clock time before the command is killed.
+    pub timeout: Duration,
+    /// The largest output stored on the tool result; the rest is truncated.
+    pub max_output_bytes: usize,
+}
+
+impl Default for ShellLimits {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(120),
+            max_output_bytes: 32 * 1024,
+        }
+    }
+}
+
+/// A node that runs an LLM agent loop for one conversation.
+#[derive(Debug)]
+pub struct Agent {
+    socket: PathBuf,
+    source: String,
+    token: String,
+    conversation_id: String,
+    workdir: PathBuf,
+    limits: ShellLimits,
+    projection: SqliteProjection<Conversation>,
+}
+
+impl Agent {
+    /// Creates an agent for `conversation_id` that works in `workdir`.
+    #[must_use]
+    pub fn new(
+        socket: impl Into<PathBuf>,
+        projection: SqliteProjection<Conversation>,
+        conversation_id: impl Into<String>,
+        workdir: impl Into<PathBuf>,
+        source: impl Into<String>,
+        token: impl Into<String>,
+    ) -> Self {
+        Self {
+            socket: socket.into(),
+            source: source.into(),
+            token: token.into(),
+            conversation_id: conversation_id.into(),
+            workdir: workdir.into(),
+            limits: ShellLimits::default(),
+            projection,
+        }
+    }
+
+    /// Overrides the shell tool's timeout and output cap.
+    #[must_use]
+    pub const fn with_limits(
+        mut self,
+        limits: ShellLimits,
+    ) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// The agent's conversation projection.
+    #[must_use]
+    pub const fn projection(&self) -> &SqliteProjection<Conversation> {
+        &self.projection
+    }
+
+    /// Runs until `shutdown` becomes `true`, reconnecting with backoff while the
+    /// daemon is unavailable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] if the projection fails or a turn cannot publish
+    /// its events. A connection failure is not fatal: the agent reconnects.
+    pub async fn run(
+        &mut self,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> Result<(), AgentError> {
+        let mut backoff = INITIAL_BACKOFF;
+        loop {
+            if *shutdown.borrow() {
+                return Ok(());
+            }
+
+            let from = self.projection.applied_seq().saturating_add(1);
+            match WsClient::connect(&self.socket, Some(from), &self.token).await {
+                Ok(mut client) => {
+                    let received = self.session(&mut client, &mut shutdown).await?;
+                    if received {
+                        backoff = INITIAL_BACKOFF;
+                    }
+                    if *shutdown.borrow() {
+                        return Ok(());
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        socket = %self.socket.display(),
+                        "the agent failed to connect to the daemon",
+                    );
+                },
+            }
+
+            tokio::select! {
+                () = tokio::time::sleep(backoff) => {},
+                _ = shutdown.changed() => return Ok(()),
+            }
+            backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
+        }
+    }
+
+    /// Processes one connection until it closes or `shutdown` fires.
+    async fn session(
+        &mut self,
+        client: &mut WsClient,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Result<bool, AgentError> {
+        let mut received = false;
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => return Ok(received),
+                message = client.next() => {
+                    match message {
+                        Ok(Some(wire)) => {
+                            received = true;
+                            if self.handle(wire)? {
+                                let mut history = Conversation::history(
+                                    self.projection.connection(),
+                                    &self.conversation_id,
+                                )?;
+                                let turn = Turn {
+                                    socket: &self.socket,
+                                    token: &self.token,
+                                    workdir: &self.workdir,
+                                    limits: self.limits,
+                                    source: &self.source,
+                                    conversation_id: &self.conversation_id,
+                                };
+                                if let Err(error) = turn.run(client, &mut history).await {
+                                    tracing::warn!(%error, "the agent turn failed");
+                                }
+                            }
+                        },
+                        Ok(None) => return Ok(received),
+                        Err(error) => {
+                            tracing::warn!(%error, "the agent connection failed");
+                            return Ok(received);
+                        },
+                    }
+                },
+            }
+        }
+    }
+
+    /// Applies or skips one message, returning whether it should start a turn.
+    ///
+    /// A turn starts only for an [`AGENT_INBOX`] that belongs to this agent's
+    /// conversation; every other event still advances the checkpoint.
+    fn handle(
+        &mut self,
+        wire: agentd_events::WireMessage,
+    ) -> Result<bool, AgentError> {
+        let Some(seq) = wire.seq else {
+            return Ok(false);
+        };
+        if seq <= self.projection.applied_seq() {
+            return Ok(false);
+        }
+        let trigger = wire.event.r#type == AGENT_INBOX
+            && wire
+                .event
+                .data
+                .get("conversation_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(self.conversation_id.as_str());
+        if wire.event.r#type.starts_with(AGENT_PREFIX) {
+            self.projection
+                .apply(agentd_events::LogEntry::new(seq, wire.event))?;
+        } else {
+            self.projection.skip(seq)?;
+        }
+        Ok(trigger)
+    }
+}
+
+/// The connection-free configuration a turn borrows.
+///
+/// Every field is `Sync`, so a future holding `&Turn` is `Send` — unlike a
+/// future holding the agent, whose projection is not `Sync`.
+struct Turn<'a> {
+    socket: &'a Path,
+    token: &'a str,
+    workdir: &'a Path,
+    limits: ShellLimits,
+    source: &'a str,
+    conversation_id: &'a str,
+}
+
+impl Turn<'_> {
+    /// Runs one turn, publishing its lifecycle around the inference/tool loop.
+    async fn run(
+        &self,
+        client: &mut WsClient,
+        history: &mut Vec<Message>,
+    ) -> Result<(), AgentError> {
+        publish(
+            client,
+            AGENT_TURN_STARTED,
+            json!({ "conversation_id": self.conversation_id, "agent_id": self.source }),
+        )
+        .await?;
+
+        let result = self.drive(client, history).await;
+
+        match &result {
+            Ok(()) => {
+                publish(
+                    client,
+                    AGENT_TURN_COMPLETED,
+                    json!({ "conversation_id": self.conversation_id }),
+                )
+                .await?;
+            },
+            Err(error) => {
+                let _ = publish(
+                    client,
+                    AGENT_TURN_FAILED,
+                    json!({
+                        "conversation_id": self.conversation_id,
+                        "error": error.to_string(),
+                    }),
+                )
+                .await;
+            },
+        }
+        result
+    }
+
+    /// The inference/tool loop, until the model stops calling tools.
+    async fn drive(
+        &self,
+        client: &mut WsClient,
+        history: &mut Vec<Message>,
+    ) -> Result<(), AgentError> {
+        let tools = vec![shell_tool()];
+        let mut inference = InferenceClient::connect(self.socket, self.token).await?;
+        loop {
+            let request = InferenceRequest {
+                messages: request_messages(history),
+                tools: tools.clone(),
+            };
+            let deltas = inference.complete(&request).await?;
+            let (text, calls) = fold_deltas(deltas)?;
+
+            if text.is_empty() && calls.is_empty() {
+                return Ok(());
+            }
+            let message = if calls.is_empty() {
+                Message::assistant(text)
+            } else {
+                Message::with_tool_calls(text, calls.clone())
+            };
+            publish(
+                client,
+                AGENT_MESSAGE,
+                message_data(self.conversation_id, &message),
+            )
+            .await?;
+            history.push(message);
+
+            if calls.is_empty() {
+                return Ok(());
+            }
+            for call in calls {
+                let outcome = run_tool(&call, self.workdir, self.limits).await;
+                publish(
+                    client,
+                    AGENT_TOOL_RESULT,
+                    tool_result_data(self.conversation_id, &call, &outcome),
+                )
+                .await?;
+                history.push(Message::tool(call.id, outcome.content));
+            }
+        }
+    }
+}
+
+/// The arguments of the `shell` tool.
+#[derive(Debug, Deserialize)]
+struct ShellArguments {
+    command: String,
+}
+
+/// The result of one tool command.
+struct ToolOutcome {
+    content: String,
+    exit_code: Option<i32>,
+    timed_out: bool,
+}
+
+/// The model's tool description for the shell.
+fn shell_tool() -> ToolSpec {
+    ToolSpec {
+        name: String::from("shell"),
+        description: String::from(
+            "Run a bash command in the workspace directory and return its combined \
+             stdout and stderr and exit code.",
+        ),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The bash command line to run.",
+                },
+            },
+            "required": ["command"],
+        }),
+    }
+}
+
+/// Builds the request messages: the system instruction followed by `history`.
+fn request_messages(history: &[Message]) -> Vec<Message> {
+    let mut messages = Vec::with_capacity(history.len() + 1);
+    messages.push(Message::system(SYSTEM_PROMPT));
+    messages.extend_from_slice(history);
+    messages
+}
+
+/// Folds a response stream into the accumulated text and complete tool calls.
+///
+/// # Errors
+///
+/// Returns [`AgentError::Provider`] if the stream ends with a [`Delta::Error`].
+fn fold_deltas(deltas: Vec<Delta>) -> Result<(String, Vec<ToolCall>), AgentError> {
+    let mut text = String::new();
+    let mut calls = Vec::new();
+    for delta in deltas {
+        match delta {
+            Delta::Text { text: fragment } => text.push_str(&fragment),
+            Delta::ToolCall {
+                id,
+                name,
+                arguments,
+            } => calls.push(ToolCall {
+                id,
+                name,
+                arguments,
+            }),
+            Delta::Error { message } => return Err(AgentError::Provider(message)),
+            Delta::Done { .. } => {},
+        }
+    }
+    Ok((text, calls))
+}
+
+/// The event data for a finalized assistant message.
+fn message_data(
+    conversation_id: &str,
+    message: &Message,
+) -> serde_json::Value {
+    json!({
+        "conversation_id": conversation_id,
+        "content": message.content,
+        "tool_calls": message.tool_calls,
+    })
+}
+
+/// The event data for a tool result.
+fn tool_result_data(
+    conversation_id: &str,
+    call: &ToolCall,
+    outcome: &ToolOutcome,
+) -> serde_json::Value {
+    json!({
+        "conversation_id": conversation_id,
+        "tool_call_id": call.id,
+        "content": outcome.content,
+        "exit_code": outcome.exit_code,
+        "timed_out": outcome.timed_out,
+    })
+}
+
+/// Publishes a `CloudEvents` message to the daemon.
+async fn publish(
+    client: &mut WsClient,
+    r#type: &str,
+    data: serde_json::Value,
+) -> Result<(), AgentError> {
+    client.send(&Event::new(r#type, data)).await?;
+    Ok(())
+}
+
+/// Runs one tool call.
+async fn run_tool(
+    call: &ToolCall,
+    workdir: &Path,
+    limits: ShellLimits,
+) -> ToolOutcome {
+    let arguments = match serde_json::from_str::<ShellArguments>(&call.arguments) {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            return ToolOutcome {
+                content: format!("invalid tool arguments: {error}"),
+                exit_code: None,
+                timed_out: false,
+            };
+        },
+    };
+    run_shell(&arguments.command, workdir, limits).await
+}
+
+/// Runs `command` with `bash -c` in `workdir`, enforcing the limits.
+///
+/// Output is read with a hard cap so a runaway command cannot exhaust memory:
+/// once either stream reaches the cap the child is killed and the output is
+/// marked truncated.
+async fn run_shell(
+    command: &str,
+    workdir: &Path,
+    limits: ShellLimits,
+) -> ToolOutcome {
+    let mut child = match Command::new("bash")
+        .arg("-c")
+        .arg(command)
+        .current_dir(workdir)
+        .kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            return ToolOutcome {
+                content: format!("failed to run the command: {error}"),
+                exit_code: None,
+                timed_out: false,
+            };
+        },
+    };
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let cap = limits.max_output_bytes;
+
+    let completed = timeout(limits.timeout, async move {
+        let (stdout, stderr) = tokio::join!(read_capped(stdout, cap), read_capped(stderr, cap));
+        let (stdout, stdout_capped) = stdout;
+        let (stderr, stderr_capped) = stderr;
+        let capped = stdout_capped || stderr_capped;
+        let exit_code = if capped {
+            let _ = child.kill().await;
+            None
+        } else {
+            child.wait().await.ok().and_then(|status| status.code())
+        };
+        (stdout, stderr, exit_code, capped)
+    })
+    .await;
+
+    match completed {
+        Ok((stdout, stderr, exit_code, capped)) => {
+            let mut combined = String::from_utf8_lossy(&stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&stderr);
+            if !stderr.is_empty() {
+                if !combined.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(&stderr);
+            }
+            if capped {
+                combined.push_str("\n[output truncated]");
+            }
+            let status = exit_code.map_or_else(|| String::from("signal"), |code| code.to_string());
+            ToolOutcome {
+                content: format!("exit code: {status}\n{combined}"),
+                exit_code,
+                timed_out: false,
+            }
+        },
+        Err(_) => ToolOutcome {
+            content: format!("timed out after {}s", limits.timeout.as_secs()),
+            exit_code: None,
+            timed_out: true,
+        },
+    }
+}
+
+/// Reads a child stream up to `cap` bytes, reporting whether the cap was hit.
+///
+/// One extra byte is read so a stream exactly at the cap is not reported as
+/// truncated.
+async fn read_capped(
+    stream: Option<impl AsyncRead + Unpin>,
+    cap: usize,
+) -> (Vec<u8>, bool) {
+    let Some(stream) = stream else {
+        return (Vec::new(), false);
+    };
+    let mut reader = stream.take((cap as u64).saturating_add(1));
+    let mut buffer = Vec::new();
+    if reader.read_to_end(&mut buffer).await.is_err() {
+        return (buffer, false);
+    }
+    if buffer.len() > cap {
+        buffer.truncate(cap);
+        return (buffer, true);
+    }
+    (buffer, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Agent, ShellLimits, fold_deltas, request_messages, run_shell};
+    use crate::conversation::Conversation;
+    use crate::error::AgentError;
+    use crate::projection::SqliteProjection;
+    use agentd_events::Event;
+    use agentd_inference::{Delta, Message, ToolCall};
+    use serde_json::json;
+    use std::time::Duration;
+
+    fn agent() -> (tempfile::TempDir, Agent) {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let projection = SqliteProjection::<Conversation>::open(dir.path().join("node.db"))
+            .expect("projection should open");
+        let agent = Agent::new(
+            "/tmp/agentd-agent-test.sock",
+            projection,
+            "c1",
+            dir.path(),
+            "urn:test:agent",
+            "token",
+        );
+        (dir, agent)
+    }
+
+    #[test]
+    fn request_messages_prepends_the_system_prompt() {
+        let messages = request_messages(&[Message::user("hello")]);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, agentd_inference::Role::System);
+        assert_eq!(messages[1], Message::user("hello"));
+    }
+
+    #[test]
+    fn fold_deltas_accumulates_text_and_tool_calls() {
+        let (text, calls) = fold_deltas(vec![
+            Delta::Text {
+                text: String::from("I will run "),
+            },
+            Delta::Text {
+                text: String::from("ls."),
+            },
+            Delta::ToolCall {
+                id: String::from("call-1"),
+                name: String::from("shell"),
+                arguments: String::from(r#"{"command":"ls"}"#),
+            },
+            Delta::Done {
+                finish_reason: Some(String::from("tool_calls")),
+            },
+        ])
+        .expect("folding should succeed");
+
+        assert_eq!(text, "I will run ls.");
+        assert_eq!(
+            calls,
+            vec![ToolCall {
+                id: String::from("call-1"),
+                name: String::from("shell"),
+                arguments: String::from(r#"{"command":"ls"}"#),
+            }]
+        );
+    }
+
+    #[test]
+    fn fold_deltas_surfaces_a_provider_error() {
+        let error = fold_deltas(vec![Delta::Error {
+            message: String::from("boom"),
+        }])
+        .expect_err("a provider error should surface");
+
+        assert!(matches!(error, AgentError::Provider(message) if message == "boom"));
+    }
+
+    #[tokio::test]
+    async fn run_shell_captures_output_and_exit_codes() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+
+        let ok = run_shell("echo hello", dir.path(), ShellLimits::default()).await;
+        assert_eq!(ok.exit_code, Some(0));
+        assert!(ok.content.contains("hello"));
+        assert!(!ok.timed_out);
+
+        let bad = run_shell("exit 3", dir.path(), ShellLimits::default()).await;
+        assert_eq!(bad.exit_code, Some(3));
+    }
+
+    #[tokio::test]
+    async fn run_shell_bounds_its_output() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let limits = ShellLimits {
+            max_output_bytes: 64,
+            ..ShellLimits::default()
+        };
+
+        let outcome = run_shell("yes hello | head -c 100000", dir.path(), limits).await;
+
+        assert!(outcome.content.ends_with("[output truncated]"));
+        assert!(outcome.content.len() < 200);
+    }
+
+    #[tokio::test]
+    async fn run_shell_times_out() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let limits = ShellLimits {
+            timeout: Duration::from_millis(100),
+            ..ShellLimits::default()
+        };
+
+        let outcome = run_shell("sleep 5", dir.path(), limits).await;
+
+        assert!(outcome.timed_out);
+        assert_eq!(outcome.exit_code, None);
+    }
+
+    #[test]
+    fn an_inbox_for_another_conversation_does_not_trigger() {
+        let (_dir, mut agent) = agent();
+        let wire = agentd_events::WireMessage {
+            seq: Some(1),
+            event: Event::new(
+                crate::conversation::AGENT_INBOX,
+                json!({ "conversation_id": "other", "content": "hi" }),
+            ),
+        };
+
+        assert!(
+            !agent.handle(wire).expect("handle should succeed"),
+            "an inbox for another conversation must not start a turn"
+        );
+    }
+
+    #[test]
+    fn an_inbox_for_this_conversation_triggers() {
+        let (_dir, mut agent) = agent();
+        let wire = agentd_events::WireMessage {
+            seq: Some(1),
+            event: Event::new(
+                crate::conversation::AGENT_INBOX,
+                json!({ "conversation_id": "c1", "content": "hi" }),
+            ),
+        };
+
+        assert!(agent.handle(wire).expect("handle should succeed"));
+        assert_eq!(agent.projection().applied_seq(), 1);
+    }
+
+    #[test]
+    fn a_non_agent_event_advances_the_checkpoint_without_triggering() {
+        let (_dir, mut agent) = agent();
+        let wire = agentd_events::WireMessage {
+            seq: Some(7),
+            event: Event::new("task.submitted", json!({})),
+        };
+
+        assert!(!agent.handle(wire).expect("handle should succeed"));
+        assert_eq!(agent.projection().applied_seq(), 7);
+    }
+
+    #[test]
+    fn a_generated_shell_tool_is_well_formed() {
+        let tool = super::shell_tool();
+        assert_eq!(tool.name, "shell");
+        assert_eq!(tool.parameters["required"], json!(["command"]));
+    }
+}

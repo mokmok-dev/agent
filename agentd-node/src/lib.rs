@@ -41,13 +41,23 @@
 //! # }
 //! ```
 
+mod agent;
 mod client;
+mod conversation;
+mod error;
 mod filter;
 mod node;
 mod projection;
 
+pub use agent::{Agent, ShellLimits};
 pub use agentd_events::{Event, LogEntry, Projection, Seq, WireMessage};
+pub use agentd_inference::{Delta, Message, Role, ToolCall, ToolSpec};
 pub use client::{ClientError, WsClient};
+pub use conversation::{
+    AGENT_INBOX, AGENT_MESSAGE, AGENT_TOOL_RESULT, AGENT_TURN_COMPLETED, AGENT_TURN_FAILED,
+    AGENT_TURN_STARTED, Conversation,
+};
+pub use error::AgentError;
 pub use filter::{Interest, TypePrefixes};
 pub use node::{Node, NodeError};
 pub use projection::{SqliteError, SqliteProjection, SqliteReducer};
