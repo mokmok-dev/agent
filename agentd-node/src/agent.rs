@@ -17,7 +17,10 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use agentd_events::{Event, LogEntry, Seq, WireMessage};
-use agentd_inference::{Delta, InferenceClient, InferenceRequest, Message, ToolCall, ToolSpec};
+use agentd_inference::{
+    Delta, InferenceClient, InferenceRequest, Message, Role, ToolCall, ToolSpec,
+};
+use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -88,7 +91,7 @@ impl Default for ShellLimits {
 pub struct Agent {
     socket: PathBuf,
     source: String,
-    token: String,
+    token: SecretString,
     conversation_id: String,
     workdir: PathBuf,
     limits: ShellLimits,
@@ -104,6 +107,9 @@ pub struct Agent {
 
 impl Agent {
     /// Creates an agent for `conversation_id` that works in `workdir`.
+    ///
+    /// `token` accepts a `&str` or a `String`; a `&String` must be written
+    /// `token.as_str()`.
     #[must_use]
     pub fn new(
         socket: impl Into<PathBuf>,
@@ -111,7 +117,7 @@ impl Agent {
         conversation_id: impl Into<String>,
         workdir: impl Into<PathBuf>,
         source: impl Into<String>,
-        token: impl Into<String>,
+        token: impl Into<SecretString>,
     ) -> Self {
         Self {
             socket: socket.into(),
@@ -183,7 +189,7 @@ impl Agent {
             }
 
             let from = self.projection.applied_seq().saturating_add(1);
-            match WsClient::connect(&self.socket, Some(from), &self.token).await {
+            match WsClient::connect(&self.socket, Some(from), self.token.expose_secret()).await {
                 Ok(mut client) => {
                     let received = self.session(&mut client, &mut shutdown).await?;
                     if received {
@@ -320,9 +326,9 @@ impl Agent {
             return Ok(None);
         };
         let pending = match message.role {
-            agentd_inference::Role::User | agentd_inference::Role::Tool => true,
-            agentd_inference::Role::Assistant => !message.tool_calls.is_empty(),
-            agentd_inference::Role::System => false,
+            Role::User | Role::Tool => true,
+            Role::Assistant => !message.tool_calls.is_empty(),
+            Role::System => false,
         };
         if pending && seq > self.last_answered {
             self.last_answered = seq;
@@ -338,7 +344,7 @@ impl Agent {
 /// future holding the agent, whose projection is not `Sync`.
 struct Turn<'a> {
     socket: &'a Path,
-    token: &'a str,
+    token: &'a SecretString,
     workdir: &'a Path,
     limits: ShellLimits,
     inference_timeout: Duration,
@@ -394,7 +400,8 @@ impl Turn<'_> {
         history: &mut Vec<Message>,
     ) -> Result<(), AgentError> {
         let tools = vec![shell_tool()];
-        let mut inference = InferenceClient::connect(self.socket, self.token).await?;
+        let mut inference =
+            InferenceClient::connect(self.socket, self.token.expose_secret()).await?;
         let mut rounds = 0;
         loop {
             rounds += 1;
@@ -411,20 +418,22 @@ impl Turn<'_> {
                 messages = request.messages.len(),
                 "requesting inference"
             );
-            let deltas = match timeout(self.inference_timeout, inference.complete(&request)).await {
-                Ok(result) => result?,
-                Err(_) => return Err(AgentError::InferenceTimeout(self.inference_timeout)),
+            let Ok(deltas) = timeout(self.inference_timeout, inference.complete(&request)).await
+            else {
+                return Err(AgentError::InferenceTimeout(self.inference_timeout));
             };
+            let deltas = deltas?;
             tracing::debug!(round = rounds, "inference responded");
             let (text, calls) = fold_deltas(deltas)?;
 
             if text.is_empty() && calls.is_empty() {
                 return Ok(());
             }
-            let message = if calls.is_empty() {
-                Message::assistant(text)
+            let has_calls = !calls.is_empty();
+            let message = if has_calls {
+                Message::with_tool_calls(text, calls)
             } else {
-                Message::with_tool_calls(text, calls.clone())
+                Message::assistant(text)
             };
             publish(
                 client,
@@ -432,22 +441,25 @@ impl Turn<'_> {
                 message_data(self.conversation_id, &message),
             )
             .await?;
-            history.push(message);
 
-            if calls.is_empty() {
-                return Ok(());
-            }
-            for call in calls {
+            let mut results = Vec::with_capacity(message.tool_calls.len());
+            for call in &message.tool_calls {
                 tracing::debug!(tool = %call.name, "running a tool");
-                let outcome = run_tool(&call, self.workdir, self.limits).await;
+                let outcome = run_tool(call, self.workdir, self.limits).await;
                 tracing::debug!(tool = %call.name, timed_out = outcome.timed_out, "the tool finished");
                 publish(
                     client,
                     AGENT_TOOL_RESULT,
-                    tool_result_data(self.conversation_id, &call, &outcome),
+                    tool_result_data(self.conversation_id, call, &outcome),
                 )
                 .await?;
-                history.push(Message::tool(call.id, outcome.content));
+                results.push(Message::tool(call.id.clone(), outcome.content));
+            }
+            history.push(message);
+            history.extend(results);
+
+            if !has_calls {
+                return Ok(());
             }
         }
     }
@@ -460,6 +472,7 @@ struct ShellArguments {
 }
 
 /// The result of one tool command.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ToolOutcome {
     content: String,
     exit_code: Option<i32>,
@@ -627,31 +640,30 @@ async fn run_shell(
     })
     .await;
 
-    match completed {
-        Ok((stdout, stderr, exit_code, capped)) => {
-            let mut combined = String::from_utf8_lossy(&stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&stderr);
-            if !stderr.is_empty() {
-                if !combined.is_empty() {
-                    combined.push('\n');
-                }
-                combined.push_str(&stderr);
-            }
-            if capped {
-                combined.push_str("\n[output truncated]");
-            }
-            let status = exit_code.map_or_else(|| String::from("signal"), |code| code.to_string());
-            ToolOutcome {
-                content: format!("exit code: {status}\n{combined}"),
-                exit_code,
-                timed_out: false,
-            }
-        },
-        Err(_) => ToolOutcome {
-            content: format!("timed out after {}s", limits.timeout.as_secs()),
+    let Ok((stdout, stderr, exit_code, capped)) = completed else {
+        let seconds = limits.timeout.as_secs();
+        return ToolOutcome {
+            content: format!("timed out after {seconds}s"),
             exit_code: None,
             timed_out: true,
-        },
+        };
+    };
+    let mut combined = String::from_utf8_lossy(&stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr);
+    if !stderr.is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(&stderr);
+    }
+    if capped {
+        combined.push_str("\n[output truncated]");
+    }
+    let status = exit_code.map_or_else(|| String::from("signal"), |code| code.to_string());
+    ToolOutcome {
+        content: format!("exit code: {status}\n{combined}"),
+        exit_code,
+        timed_out: false,
     }
 }
 
@@ -669,7 +681,7 @@ async fn read_capped(
     let mut reader = stream.take((cap as u64).saturating_add(1));
     let mut buffer = Vec::new();
     if reader.read_to_end(&mut buffer).await.is_err() {
-        return (buffer, false);
+        return (buffer, true);
     }
     if buffer.len() > cap {
         buffer.truncate(cap);

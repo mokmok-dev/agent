@@ -7,6 +7,7 @@
 
 use agentd_events::{Event, Seq, WireMessage};
 use futures_util::{SinkExt, StreamExt};
+use secrecy::zeroize::Zeroizing;
 use std::path::Path;
 use thiserror::Error;
 use tokio::net::UnixStream;
@@ -66,7 +67,7 @@ impl WsClient {
         let mut request = url.as_str().into_client_request()?;
         request.headers_mut().insert(
             "authorization",
-            format!("Bearer {token}")
+            Zeroizing::new(format!("Bearer {token}"))
                 .parse()
                 .map_err(|_| ClientError::Token)?,
         );
@@ -106,7 +107,7 @@ impl WsClient {
     ///
     /// # Errors
     ///
-    /// Returns [`ClientError::Decode`] if the event cannot be serialized and
+    /// Returns [`ClientError::Encode`] if the event cannot be serialized and
     /// [`ClientError::WebSocket`] if the frame cannot be sent.
     pub async fn send(
         &mut self,

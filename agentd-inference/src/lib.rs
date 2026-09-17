@@ -28,4 +28,7 @@ pub use config::{ConfigError, ModelRoute, ProviderConfig, ProviderKind, Provider
 pub use provider::{FakeProvider, InferenceStream, Provider, ProviderError};
 #[cfg(feature = "providers")]
 pub use registry::ProviderRegistry;
+/// Re-exported so consumers can name [`SecretString`](secrecy::SecretString) and
+/// [`ExposeSecret`](secrecy::ExposeSecret) without a direct `secrecy` dependency.
+pub use secrecy;
 pub use wire::{Delta, InferenceRequest, Message, Role, ToolCall, ToolSpec};

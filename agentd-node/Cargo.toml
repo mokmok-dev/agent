@@ -9,6 +9,7 @@ agentd-inference = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 futures-util = { workspace = true }
 rusqlite = { workspace = true }
+secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

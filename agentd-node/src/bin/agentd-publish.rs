@@ -10,7 +10,9 @@
 use agentd_events::Event;
 use agentd_node::{Conversation, SqliteProjection, WsClient, session_key};
 use clap::Parser;
+use secrecy::zeroize::Zeroizing;
 use serde_json::{Value, json};
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
@@ -50,10 +52,6 @@ struct Args {
     /// The event `data` as JSON (required without `--inbox`).
     #[arg(long)]
     data: Option<String>,
-    /// The `source` identity to send; the daemon overwrites it with the
-    /// authenticated principal's.
-    #[arg(long, default_value = "urn:mokmokd:user")]
-    source: String,
 }
 
 /// The default workspace: the process's current directory.
@@ -101,24 +99,27 @@ enum RunError {
 }
 
 /// Resolves the event to publish: an inbox shorthand or a raw event.
-fn resolve_event(args: &Args) -> Result<(String, Value), RunError> {
+fn resolve_event(args: &Args) -> Result<(&str, Value), RunError> {
     if let Some(content) = &args.inbox {
-        let conversation = if let Some(conversation) = &args.conversation {
-            conversation.clone()
+        let conversation: Cow<'_, str> = if let Some(conversation) = &args.conversation {
+            Cow::Borrowed(conversation)
         } else {
             let projection =
                 SqliteProjection::<Conversation>::open(&args.db).map_err(RunError::Projection)?;
-            Conversation::latest_session(projection.connection(), &session_key(&args.workdir))
-                .map_err(RunError::Projection)?
-                .ok_or(RunError::NoSession)?
+            let key = session_key(&args.workdir);
+            Cow::Owned(
+                Conversation::latest_session(projection.connection(), &key)
+                    .map_err(RunError::Projection)?
+                    .ok_or(RunError::NoSession)?,
+            )
         };
         return Ok((
-            String::from("agent.inbox"),
+            "agent.inbox",
             json!({ "conversation_id": conversation, "content": content }),
         ));
     }
     match (&args.r#type, &args.data) {
-        (Some(r#type), Some(data)) => Ok((r#type.clone(), serde_json::from_str(data)?)),
+        (Some(r#type), Some(data)) => Ok((r#type.as_str(), serde_json::from_str(data)?)),
         _ => Err(RunError::MissingEvent),
     }
 }
@@ -126,7 +127,7 @@ fn resolve_event(args: &Args) -> Result<(String, Value), RunError> {
 async fn run() -> Result<(), RunError> {
     let args = Args::parse();
     let (r#type, data) = resolve_event(&args)?;
-    let token = std::fs::read_to_string(&args.token_file)?;
+    let token = Zeroizing::new(std::fs::read_to_string(&args.token_file)?);
     let event = Event::new(r#type, data);
     let mut client = WsClient::connect(&args.socket, None, token.trim()).await?;
     client.send(&event).await?;
@@ -144,10 +145,13 @@ async fn run() -> Result<(), RunError> {
             return Err(RunError::Timeout);
         };
         if wire.event.r#type.starts_with("error.") {
-            let detail = wire.event.data["error"]
-                .as_str()
+            let detail = wire
+                .event
+                .data
+                .get("error")
+                .and_then(Value::as_str)
                 .unwrap_or(&wire.event.r#type)
-                .to_string();
+                .to_owned();
             return Err(RunError::Rejected(detail));
         }
         if wire.event.id == event.id {

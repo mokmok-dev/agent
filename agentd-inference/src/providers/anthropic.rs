@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::{Value, json};
 
 use super::sse::SseParser;
@@ -30,19 +31,19 @@ const DEFAULT_MAX_TOKENS: u32 = 8192;
 pub struct AnthropicProvider {
     client: reqwest::Client,
     base_url: String,
-    api_key: Option<String>,
+    api_key: Option<SecretString>,
 }
 
 impl AnthropicProvider {
     /// Creates a provider for `base_url` authenticating with `api_key`.
     #[must_use]
     pub fn new(
-        base_url: Option<String>,
-        api_key: Option<String>,
+        base_url: Option<&str>,
+        api_key: Option<SecretString>,
     ) -> Self {
         Self {
             client: reqwest::Client::new(),
-            base_url: base_url.unwrap_or_else(|| String::from(DEFAULT_BASE_URL)),
+            base_url: base_url.unwrap_or(DEFAULT_BASE_URL).to_owned(),
             api_key,
         }
     }
@@ -61,7 +62,7 @@ impl Provider for AnthropicProvider {
         };
         let (system, messages) = anthropic_messages(&request.messages);
         let mut body = json!({
-            "model": request.model.clone().unwrap_or_default(),
+            "model": request.model.as_deref().unwrap_or_default(),
             "max_tokens": DEFAULT_MAX_TOKENS,
             "messages": messages,
             "stream": true,
@@ -77,7 +78,7 @@ impl Provider for AnthropicProvider {
         let response = self
             .client
             .post(url)
-            .header("x-api-key", api_key)
+            .header("x-api-key", api_key.expose_secret())
             .header("anthropic-version", API_VERSION)
             .json(&body)
             .send()
@@ -260,7 +261,7 @@ impl PartialCall {
 /// Consecutive tool results are merged into one user turn, as the API requires
 /// all of a turn's tool results to follow the assistant message together.
 fn anthropic_messages(messages: &[Message]) -> (String, Vec<Value>) {
-    let mut system = Vec::new();
+    let mut system = String::new();
     let mut turns: Vec<Value> = Vec::new();
     let mut tool_results: Vec<Value> = Vec::new();
     for message in messages {
@@ -274,14 +275,19 @@ fn anthropic_messages(messages: &[Message]) -> (String, Vec<Value>) {
         }
         flush_tool_results(&mut tool_results, &mut turns);
         match message.role {
-            Role::System => system.push(message.content.clone()),
+            Role::System => {
+                if !system.is_empty() {
+                    system.push_str("\n\n");
+                }
+                system.push_str(&message.content);
+            },
             Role::User => turns.push(json!({ "role": "user", "content": message.content })),
             Role::Assistant => turns.push(assistant_turn(message)),
             Role::Tool => {},
         }
     }
     flush_tool_results(&mut tool_results, &mut turns);
-    (system.join("\n\n"), turns)
+    (system, turns)
 }
 
 /// Appends any pending tool results as one user turn.
@@ -331,10 +337,18 @@ fn anthropic_tools(tools: &[ToolSpec]) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{anthropic_messages, anthropic_tools, parse_stream};
+    use super::{AnthropicProvider, anthropic_messages, anthropic_tools, parse_stream};
     use crate::wire::{Delta, Message, ToolCall, ToolSpec};
     use futures_util::StreamExt;
     use serde_json::json;
+
+    #[test]
+    fn debug_redacts_the_api_key() {
+        let provider =
+            AnthropicProvider::new(Some("https://example.test"), Some("sk-secret".into()));
+
+        assert!(!format!("{provider:?}").contains("sk-secret"));
+    }
 
     /// Wraps SSE records into a one-chunk byte stream.
     fn stream_of(records: &str) -> Vec<Result<Vec<u8>, std::io::Error>> {

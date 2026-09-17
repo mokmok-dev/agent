@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::{Value, json};
 
 use super::sse::SseParser;
@@ -23,19 +24,19 @@ const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub struct OpenAiProvider {
     client: reqwest::Client,
     base_url: String,
-    api_key: Option<String>,
+    api_key: Option<SecretString>,
 }
 
 impl OpenAiProvider {
     /// Creates a provider for `base_url` authenticating with `api_key`.
     #[must_use]
     pub fn new(
-        base_url: Option<String>,
-        api_key: Option<String>,
+        base_url: Option<&str>,
+        api_key: Option<SecretString>,
     ) -> Self {
         Self {
             client: reqwest::Client::new(),
-            base_url: base_url.unwrap_or_else(|| String::from(DEFAULT_BASE_URL)),
+            base_url: base_url.unwrap_or(DEFAULT_BASE_URL).to_owned(),
             api_key,
         }
     }
@@ -48,7 +49,7 @@ impl Provider for OpenAiProvider {
         request: InferenceRequest,
     ) -> Result<InferenceStream, ProviderError> {
         let mut body = json!({
-            "model": request.model.clone().unwrap_or_default(),
+            "model": request.model.as_deref().unwrap_or_default(),
             "messages": openai_messages(&request.messages),
             "stream": true,
         });
@@ -59,7 +60,7 @@ impl Provider for OpenAiProvider {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let mut builder = self.client.post(url).json(&body);
         if let Some(key) = &self.api_key {
-            builder = builder.bearer_auth(key);
+            builder = builder.bearer_auth(key.expose_secret());
         }
         let response = builder.send().await.map_err(|error| {
             ProviderError::Failed(format!("the request to the provider failed: {error}"))
@@ -265,10 +266,17 @@ fn openai_tools(tools: &[ToolSpec]) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{openai_messages, openai_tools, parse_stream};
+    use super::{OpenAiProvider, openai_messages, openai_tools, parse_stream};
     use crate::wire::{Delta, Message, ToolCall, ToolSpec};
     use futures_util::StreamExt;
     use serde_json::json;
+
+    #[test]
+    fn debug_redacts_the_api_key() {
+        let provider = OpenAiProvider::new(Some("https://example.test"), Some("sk-secret".into()));
+
+        assert!(!format!("{provider:?}").contains("sk-secret"));
+    }
 
     /// Wraps SSE `data:` records into a one-chunk byte stream.
     fn stream_of(records: &str) -> Vec<Result<Vec<u8>, std::io::Error>> {

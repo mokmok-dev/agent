@@ -8,6 +8,7 @@ use agentd_events::LogEntry;
 use agentd_node::{Node, SqliteError, SqliteProjection, SqliteReducer, TypePrefixes};
 use clap::Parser;
 use rusqlite::{Connection, Transaction};
+use secrecy::zeroize::Zeroizing;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::sync::watch;
@@ -69,8 +70,8 @@ impl SqliteReducer for EventCounts {
 /// Errors returned by the binary.
 #[derive(Debug, Error)]
 enum RunError {
-    /// Removing the old projection failed.
-    #[error("failed to remove the projection: {0}")]
+    /// Removing the old projection or reading the token failed.
+    #[error(transparent)]
     Io(#[from] std::io::Error),
     /// Opening the projection failed.
     #[error("failed to open the projection: {0}")]
@@ -89,7 +90,7 @@ async fn run() -> Result<(), RunError> {
 
     let projection = SqliteProjection::<EventCounts>::open(&args.db)?;
     let interest = TypePrefixes::new(args.type_prefixes);
-    let token = std::fs::read_to_string(&args.token_file)?;
+    let token = Zeroizing::new(std::fs::read_to_string(&args.token_file)?);
     let mut node = Node::new(args.socket, projection, interest, args.source, token.trim());
 
     let (sender, shutdown) = watch::channel(false);
@@ -105,13 +106,10 @@ async fn run() -> Result<(), RunError> {
 
 /// Removes the projection file and the sidecars SQLite may leave behind.
 fn remove_projection(path: &Path) -> Result<(), std::io::Error> {
-    for candidate in [
-        path.to_path_buf(),
-        PathBuf::from(format!("{}-wal", path.display())),
-        PathBuf::from(format!("{}-shm", path.display())),
-        PathBuf::from(format!("{}-journal", path.display())),
-    ] {
-        match std::fs::remove_file(&candidate) {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut candidate = path.as_os_str().to_os_string();
+        candidate.push(suffix);
+        match std::fs::remove_file(PathBuf::from(candidate)) {
             Ok(()) => {},
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
             Err(error) => return Err(error),

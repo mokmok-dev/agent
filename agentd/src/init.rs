@@ -12,7 +12,9 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
+use secrecy::zeroize::Zeroizing;
+use secrecy::{ExposeSecret as _, SecretString};
+use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -47,8 +49,8 @@ const PROVIDERS_TEMPLATE: &str = r#"{
 pub struct ClientToken {
     /// The client's role, e.g. `agent`.
     pub name: &'static str,
-    /// The bearer secret.
-    pub secret: String,
+    /// The bearer secret, zeroized on drop and redacted from `Debug`.
+    pub secret: SecretString,
     /// The mode-`0600` file holding only this secret.
     pub path: PathBuf,
 }
@@ -87,6 +89,20 @@ pub enum InitError {
     Json(#[from] serde_json::Error),
 }
 
+/// The on-disk token file shape written by [`init`].
+#[derive(Serialize)]
+struct TokenFileWire<'a> {
+    tokens: Vec<TokenEntryWire<'a>>,
+}
+
+/// One entry of the on-disk token file written by [`init`].
+#[derive(Serialize)]
+struct TokenEntryWire<'a> {
+    secret: &'a str,
+    claims: &'a [&'a str],
+    source: &'a str,
+}
+
 /// The clients [`init`] generates and the claims each is granted.
 const CLIENTS: &[(&str, &[&str], &str)] = &[
     ("user", &["read", "publish"], "urn:mokmokd:user"),
@@ -112,13 +128,11 @@ pub fn init(
     dir: &Path,
     force: bool,
 ) -> Result<Initialized, InitError> {
-    if dir.exists() {
-        if is_shared_directory(dir) {
-            return Err(InitError::InsecureDirectory(dir.to_path_buf()));
-        }
-    } else {
+    if !dir.exists() {
         std::fs::create_dir_all(dir)?;
         set_mode(dir, 0o700)?;
+    } else if is_shared_directory(dir) {
+        return Err(InitError::InsecureDirectory(dir.to_path_buf()));
     }
 
     let tokens_path = dir.join(TOKEN_FILE);
@@ -126,44 +140,39 @@ pub fn init(
         return Err(InitError::Exists(tokens_path));
     }
 
-    let mut clients = Vec::with_capacity(CLIENTS.len());
-    for (name, _, _) in CLIENTS {
-        clients.push(ClientToken {
+    let clients: Vec<ClientToken> = CLIENTS
+        .iter()
+        .map(|(name, _, _)| ClientToken {
             name,
             secret: generate_secret(),
             path: dir.join(format!("{name}.token")),
-        });
-    }
-
-    let entries: Vec<serde_json::Value> = CLIENTS
-        .iter()
-        .zip(&clients)
-        .map(|((_, claims, source), client)| {
-            json!({
-                "secret": client.secret,
-                "claims": claims,
-                "source": source,
-            })
         })
         .collect();
 
-    write_private(
-        &tokens_path,
-        &serde_json::to_string_pretty(&json!({ "tokens": entries }))?,
-    )?;
+    let encoded = Zeroizing::new(serde_json::to_string_pretty(&TokenFileWire {
+        tokens: CLIENTS
+            .iter()
+            .copied()
+            .zip(&clients)
+            .map(|((_, claims, source), client)| TokenEntryWire {
+                secret: client.secret.expose_secret(),
+                claims,
+                source,
+            })
+            .collect(),
+    })?);
+    write_private(&tokens_path, &encoded)?;
     for client in &clients {
-        write_private(&client.path, &client.secret)?;
+        write_private(&client.path, client.secret.expose_secret())?;
     }
 
     // The provider config is a template the operator edits, so an existing one
     // is never overwritten, even with `--force`.
     let providers_path = dir.join(PROVIDERS_FILE);
-    let providers_created = if providers_path.exists() {
-        false
-    } else {
+    let providers_created = !providers_path.exists();
+    if providers_created {
         write_private(&providers_path, PROVIDERS_TEMPLATE)?;
-        true
-    };
+    }
 
     Ok(Initialized {
         config_dir: dir.to_path_buf(),
@@ -175,8 +184,12 @@ pub fn init(
 }
 
 /// Generates a 256-bit bearer secret as hex.
-fn generate_secret() -> String {
-    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+fn generate_secret() -> SecretString {
+    SecretString::from(format!(
+        "{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    ))
 }
 
 /// Writes `contents` to `path`, creating it mode `0600`.
@@ -209,6 +222,7 @@ mod tests {
     use agentd_inference::ProvidersConfig;
     use axum::http::HeaderMap;
     use axum::http::header::AUTHORIZATION;
+    use secrecy::ExposeSecret as _;
 
     /// Builds headers carrying `secret` as a bearer token.
     fn headers(secret: &str) -> HeaderMap {
@@ -242,20 +256,20 @@ mod tests {
         // The file the store loads grants each client its claims.
         let store = TokenStore::load(&result.tokens_path).expect("token file should load");
         let agent = store
-            .authorize(&headers(&result.clients[1].secret))
+            .authorize(&headers(result.clients[1].secret.expose_secret()))
             .expect("agent token should authorize");
         assert!(agent.has(Claim::Infer));
         assert!(!agent.has(Claim::Authority));
 
         let admin = store
-            .authorize(&headers(&result.clients[2].secret))
+            .authorize(&headers(result.clients[2].secret.expose_secret()))
             .expect("admin token should authorize");
         assert!(admin.has(Claim::Authority));
 
         // Each single-secret file holds exactly that secret.
         for client in &result.clients {
             let contents = std::fs::read_to_string(&client.path).expect("client file");
-            assert_eq!(contents, client.secret);
+            assert_eq!(contents, client.secret.expose_secret());
         }
     }
 
@@ -306,10 +320,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let result = init(dir.path(), false).expect("init should succeed");
 
-        let mut secrets: Vec<&str> = result.clients.iter().map(|c| c.secret.as_str()).collect();
+        let mut secrets: Vec<&str> = result
+            .clients
+            .iter()
+            .map(|client| client.secret.expose_secret())
+            .collect();
         secrets.sort_unstable();
         secrets.dedup();
         assert_eq!(secrets.len(), result.clients.len());
-        assert_eq!(result.clients[0].secret.len(), 64);
+        assert_eq!(result.clients[0].secret.expose_secret().len(), 64);
     }
 }
