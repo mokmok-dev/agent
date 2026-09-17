@@ -139,7 +139,8 @@ impl ConfinedProcessExecutor {
     /// # Errors
     ///
     /// Fails closed with [`SandboxError::UnsupportedPlatform`] when neither a
-    /// trusted `bwrap` nor the Landlock helper is available, and
+    /// trusted `bwrap` nor the Landlock helper is available,
+    /// [`SandboxError::Policy`] when the policy fails validation, and
     /// [`SandboxError::InvalidPolicy`] for an unusable workdir or path entry.
     pub fn new(policy: &Policy) -> Result<Self, SandboxError> {
         Self::build(policy, None)
@@ -177,27 +178,18 @@ impl ConfinedProcessExecutor {
         policy: &Policy,
         forced: Option<ForcedBackend>,
     ) -> Result<Self, SandboxError> {
-        policy
-            .validate()
-            .map_err(|error| SandboxError::InvalidPolicy(error.to_string()))?;
+        policy.validate()?;
         let workdir = process::validate_workdir(&policy.shell.workdir, &policy.fs)?;
         let path_dirs = process::system_path_dirs();
         let path_env = process::join_path(&path_dirs)?;
         let scratch = process::create_scratch()?;
-        let resolved = match resolve_entries(&policy.fs, &workdir, &scratch, &path_dirs) {
-            Ok(resolved) => resolved,
-            Err(error) => {
+        let resolved =
+            resolve_entries(&policy.fs, &workdir, &scratch, &path_dirs).inspect_err(|_| {
                 let _ = fs::remove_dir_all(&scratch);
-                return Err(error);
-            },
-        };
-        let backend = match select_backend(policy, forced, &resolved, &scratch) {
-            Ok(backend) => backend,
-            Err(error) => {
-                let _ = fs::remove_dir_all(&scratch);
-                return Err(error);
-            },
-        };
+            })?;
+        let backend = select_backend(policy, forced, &resolved, &scratch).inspect_err(|_| {
+            let _ = fs::remove_dir_all(&scratch);
+        })?;
         let env = policy
             .shell
             .env
@@ -228,7 +220,11 @@ impl ConfinedProcessExecutor {
             Backend::Bubblewrap(bwrap) => self.bubblewrap_command(bwrap, command),
             Backend::Landlock { helper, spec_path } => {
                 let mut std_command = std::process::Command::new(helper);
-                std_command.arg(spec_path).arg(BASH).arg("-c").arg(command);
+                std_command
+                    .arg(spec_path)
+                    .arg(process::BASH)
+                    .arg("-c")
+                    .arg(command);
                 std_command
             },
         };
@@ -414,22 +410,16 @@ fn granted_paths(
     resolved: &Resolved,
     scratch: &Path,
 ) -> Vec<PathBuf> {
-    let mut granted: Vec<PathBuf> = Vec::new();
-    for path in SYSTEM_ROOTS
+    let mut granted: Vec<PathBuf> = SYSTEM_ROOTS
         .iter()
         .copied()
         .chain(DEVICES.iter().copied())
         .chain(["/proc"])
-    {
-        if let Ok(canonical) = PathBuf::from(path).canonicalize() {
-            granted.push(canonical);
-        }
-    }
+        .filter_map(|path| PathBuf::from(path).canonicalize().ok())
+        .collect();
     granted.extend(resolved.reads.iter().cloned());
     granted.extend(resolved.writes.iter().cloned());
-    if let Ok(canonical) = scratch.canonicalize() {
-        granted.push(canonical);
-    }
+    granted.extend(scratch.canonicalize());
     granted.sort();
     granted.dedup();
     granted
@@ -452,18 +442,14 @@ fn build_spec(
         push_existing(&mut paths, PathBuf::from(device), PathAccess::Write);
     }
     push_existing(&mut paths, PathBuf::from("/proc"), PathAccess::Read);
-    for read in &resolved.reads {
-        paths.push(PathRule {
-            path: read.clone(),
-            access: PathAccess::Read,
-        });
-    }
-    for write in &resolved.writes {
-        paths.push(PathRule {
-            path: write.clone(),
-            access: PathAccess::Write,
-        });
-    }
+    paths.extend(resolved.reads.iter().cloned().map(|path| PathRule {
+        path,
+        access: PathAccess::Read,
+    }));
+    paths.extend(resolved.writes.iter().cloned().map(|path| PathRule {
+        path,
+        access: PathAccess::Write,
+    }));
     paths.push(PathRule {
         path: scratch.to_path_buf(),
         access: PathAccess::Write,
@@ -504,23 +490,20 @@ fn find_on_path(
         })
         .unwrap_or_default();
     let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
+    std::env::split_paths(&path).find_map(|dir| {
         let candidate = dir.join(name);
         if !is_executable(&candidate) {
-            continue;
+            return None;
         }
-        let Ok(canonical) = candidate.canonicalize() else {
-            continue;
-        };
+        let canonical = candidate.canonicalize().ok()?;
         if workspace_roots
             .iter()
             .any(|root| canonical.starts_with(root))
         {
-            continue;
+            return None;
         }
-        return Some(candidate);
-    }
-    None
+        Some(candidate)
+    })
 }
 
 /// Finds the Landlock helper: the `AGENTD_SANDBOX_HELPER` override, else on
@@ -610,14 +593,13 @@ fn resolve_entries(
     if let Ok(canonical) = scratch.canonicalize() {
         needed.push(("the scratch directory", canonical));
     }
-    for dir in path_dirs {
-        if let Ok(canonical) = dir.canonicalize() {
-            needed.push(("an executable directory", canonical));
-        }
-    }
-    for root in &writes {
-        needed.push(("a write root", root.clone()));
-    }
+    needed.extend(
+        path_dirs
+            .iter()
+            .filter_map(|dir| dir.canonicalize().ok())
+            .map(|canonical| ("an executable directory", canonical)),
+    );
+    needed.extend(writes.iter().cloned().map(|root| ("a write root", root)));
 
     let mut denies: Vec<Deny> = Vec::new();
     for entry in &fs_policy.entries {
@@ -663,15 +645,11 @@ fn resolve_entries(
     denies.sort_by(|left, right| left.path.cmp(&right.path));
     denies.dedup_by(|left, right| left.path == right.path);
 
-    let mut protected: Vec<PathBuf> = Vec::new();
-    for root in &writes {
-        for name in &fs_policy.protected {
-            let candidate = root.join(name);
-            if candidate.exists() {
-                protected.push(candidate);
-            }
-        }
-    }
+    let mut protected: Vec<PathBuf> = writes
+        .iter()
+        .flat_map(|root| fs_policy.protected.iter().map(move |name| root.join(name)))
+        .filter(|candidate| candidate.exists())
+        .collect();
     protected.sort();
     protected.dedup();
     Ok(Resolved {

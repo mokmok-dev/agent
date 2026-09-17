@@ -68,9 +68,7 @@ impl Policy {
 /// break the line, so either could inject a clause or split the profile; a
 /// policy carrying one is rejected rather than rendered.
 fn profile_safe(text: &str) -> bool {
-    !text
-        .chars()
-        .any(|character| character == '"' || character.is_control())
+    !text.contains('"') && !text.chars().any(char::is_control)
 }
 
 /// A policy input that fails closed.

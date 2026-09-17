@@ -43,21 +43,25 @@ impl SseParser {
         &mut self,
         chunk: &[u8],
     ) -> Result<Vec<SseEvent>, ProviderError> {
-        self.buffer.extend_from_slice(chunk);
-        if self.buffer.len() > MAX_BUFFER {
+        if self.buffer.len().saturating_add(chunk.len()) > MAX_BUFFER {
             return Err(ProviderError::Failed(format!(
                 "the provider sent more than {MAX_BUFFER} bytes without an event boundary"
             )));
         }
+        self.buffer.extend_from_slice(chunk);
+        let mut buffer = std::mem::take(&mut self.buffer);
         let mut events = Vec::new();
-        while let Some(newline) = self.buffer.iter().position(|&byte| byte == b'\n') {
-            let mut line: Vec<u8> = self.buffer.drain(..=newline).collect();
-            line.pop();
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
-            self.line(std::str::from_utf8(&line).unwrap_or(""), &mut events);
+        let mut start = 0;
+        while let Some(newline) = buffer[start..].iter().position(|&byte| byte == b'\n') {
+            let end = start + newline;
+            let line = buffer[start..end]
+                .strip_suffix(b"\r")
+                .unwrap_or_else(|| &buffer[start..end]);
+            self.line(std::str::from_utf8(line).unwrap_or(""), &mut events);
+            start = end + 1;
         }
+        buffer.drain(..start);
+        self.buffer = buffer;
         Ok(events)
     }
 
@@ -115,7 +119,7 @@ impl SseParser {
 
 #[cfg(test)]
 mod tests {
-    use super::{SseEvent, SseParser};
+    use super::{MAX_BUFFER, SseEvent, SseParser};
 
     fn event(
         event: Option<&str>,
@@ -169,5 +173,35 @@ mod tests {
 
         assert_eq!(parser.finish(), Some(event(None, "last")));
         assert_eq!(parser.finish(), None);
+    }
+
+    #[test]
+    fn retains_an_incomplete_line_across_chunks() {
+        let mut parser = SseParser::new();
+
+        assert!(
+            parser
+                .push(b"data: one\ndata: tw")
+                .expect("push")
+                .is_empty()
+        );
+        let events = parser.push(b"o\n\n").expect("push should succeed");
+
+        assert_eq!(events, vec![event(None, "one\ntwo")]);
+    }
+
+    #[test]
+    fn rejects_a_buffer_that_exceeds_the_cap() {
+        let mut parser = SseParser::new();
+
+        // A single chunk past the cap is refused before it is buffered.
+        let oversized = vec![b'a'; MAX_BUFFER + 1];
+        assert!(parser.push(&oversized).is_err());
+
+        // A parser that has already retained bytes refuses the next chunk that
+        // would cross the cap without a boundary.
+        let mut parser = SseParser::new();
+        assert!(parser.push(&vec![b'a'; MAX_BUFFER]).is_ok());
+        assert!(parser.push(b"b").is_err());
     }
 }

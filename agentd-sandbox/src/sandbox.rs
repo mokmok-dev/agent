@@ -49,8 +49,8 @@ impl Sandbox {
     ///
     /// # Errors
     ///
-    /// Fails closed with [`SandboxError::InvalidPolicy`] when the policy is
-    /// unusable and with [`SandboxError::UnsupportedPlatform`] when the
+    /// Fails closed with [`SandboxError::Policy`] when the policy fails
+    /// validation and with [`SandboxError::UnsupportedPlatform`] when the
     /// platform has no confinement layer (see
     /// [`ConfinedProcessExecutor`](crate::ConfinedProcessExecutor)).
     pub fn new(
@@ -58,9 +58,7 @@ impl Sandbox {
         log: EventLog,
         agent_id: impl Into<String>,
     ) -> Result<Self, SandboxError> {
-        policy
-            .validate()
-            .map_err(|error| SandboxError::InvalidPolicy(error.to_string()))?;
+        policy.validate()?;
         let executor = ConfinedProcessExecutor::new(policy)?;
         Ok(Self {
             id: Uuid::now_v7(),
@@ -76,17 +74,15 @@ impl Sandbox {
     ///
     /// # Errors
     ///
-    /// Fails closed with [`SandboxError::InvalidPolicy`] when the policy is
-    /// invalid.
+    /// Fails closed with [`SandboxError::Policy`] when the policy fails
+    /// validation.
     pub fn with_executor(
         policy: &Policy,
         log: EventLog,
         agent_id: impl Into<String>,
         executor: Arc<dyn Executor>,
     ) -> Result<Self, SandboxError> {
-        policy
-            .validate()
-            .map_err(|error| SandboxError::InvalidPolicy(error.to_string()))?;
+        policy.validate()?;
         Ok(Self {
             id: Uuid::now_v7(),
             agent_id: agent_id.into(),
@@ -141,26 +137,28 @@ impl Sandbox {
         let started = Instant::now();
         let result = self.executor.exec(command).await;
         if let Some(violation) = violation::classify_violation(&result) {
-            self.publish(violation::violation_event(
+            self.log
+                .publish(violation::violation_event(
+                    &sandbox_id,
+                    &request_id,
+                    &self.agent_id,
+                    command,
+                    &violation,
+                ))
+                .await?;
+        }
+        self.log
+            .publish(events::exec_completed(
                 &sandbox_id,
                 &request_id,
                 &self.agent_id,
                 command,
-                &violation,
+                result.exit_code,
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                result.stdout.len() as u64,
+                result.stderr.len() as u64,
             ))
             .await?;
-        }
-        self.publish(events::exec_completed(
-            &sandbox_id,
-            &request_id,
-            &self.agent_id,
-            command,
-            result.exit_code,
-            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            result.stdout.len() as u64,
-            result.stderr.len() as u64,
-        ))
-        .await?;
         Ok(result)
     }
 
@@ -190,14 +188,15 @@ impl Sandbox {
 
         let child = self.executor.spawn(command).await?;
         let session_id = Uuid::now_v7();
-        self.publish(events::session_started(
-            &sandbox_id,
-            &request_id,
-            &self.agent_id,
-            command,
-            &session_id.to_string(),
-        ))
-        .await?;
+        self.log
+            .publish(events::session_started(
+                &sandbox_id,
+                &request_id,
+                &self.agent_id,
+                command,
+                &session_id.to_string(),
+            ))
+            .await?;
         Ok(Session {
             id: session_id,
             pid: child.id(),
@@ -224,60 +223,55 @@ impl Sandbox {
     ) -> Result<bool, SandboxError> {
         match self.approval {
             Approval::Auto => {
-                self.publish(events::permission_requested(
-                    sandbox_id,
-                    request_id,
-                    &self.agent_id,
-                    command,
-                    DECISION_AUTO,
-                ))
-                .await?;
-                self.publish(events::permission_granted(
-                    sandbox_id,
-                    request_id,
-                    &self.agent_id,
-                    command,
-                ))
-                .await?;
+                self.log
+                    .publish(events::permission_requested(
+                        sandbox_id,
+                        request_id,
+                        &self.agent_id,
+                        command,
+                        DECISION_AUTO,
+                    ))
+                    .await?;
+                self.log
+                    .publish(events::permission_granted(
+                        sandbox_id,
+                        request_id,
+                        &self.agent_id,
+                        command,
+                    ))
+                    .await?;
                 Ok(true)
             },
             Approval::Required { timeout } => {
                 // Subscribe before publishing, so the approver's decision
                 // cannot be missed between the request and the wait.
                 let mut decisions = self.log.subscribe();
-                self.publish(events::permission_requested(
-                    sandbox_id,
-                    request_id,
-                    &self.agent_id,
-                    command,
-                    DECISION_PENDING,
-                ))
-                .await?;
+                self.log
+                    .publish(events::permission_requested(
+                        sandbox_id,
+                        request_id,
+                        &self.agent_id,
+                        command,
+                        DECISION_PENDING,
+                    ))
+                    .await?;
                 match await_decision(&mut decisions, request_id, timeout).await {
                     Decision::Granted => Ok(true),
                     Decision::Denied => Ok(false),
                     Decision::TimedOut => {
-                        self.publish(events::permission_denied(
-                            sandbox_id,
-                            request_id,
-                            &self.agent_id,
-                            command,
-                        ))
-                        .await?;
+                        self.log
+                            .publish(events::permission_denied(
+                                sandbox_id,
+                                request_id,
+                                &self.agent_id,
+                                command,
+                            ))
+                            .await?;
                         Ok(false)
                     },
                 }
             },
         }
-    }
-
-    /// Durably appends `event`, surfacing a failure as [`SandboxError::Publish`].
-    async fn publish(
-        &self,
-        event: agentd_events::Event,
-    ) -> Result<(), SandboxError> {
-        self.log.publish(event).await?;
-        Ok(())
     }
 }
 
@@ -298,7 +292,7 @@ pub struct Session {
     subject: String,
     started: Instant,
     /// Keeps the executor (and its profile and scratch) alive for the child.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "the field is a keepalive, never read")]
     keepalive: Arc<dyn Executor>,
 }
 
@@ -360,7 +354,9 @@ impl Session {
         let status = self.child.wait().await?;
         let exit_code = status.code().unwrap_or_else(|| {
             use std::os::unix::process::ExitStatusExt as _;
-            status.signal().map_or(126, |signal| 128 + signal)
+            status
+                .signal()
+                .map_or(crate::process::EXIT_CANNOT_EXECUTE, |signal| 128 + signal)
         });
         self.log
             .publish(events::session_exited(
@@ -880,7 +876,7 @@ mod tests {
                 "coder-1",
                 RecordingExecutor::new()
             ),
-            Err(SandboxError::InvalidPolicy(_))
+            Err(SandboxError::Policy(_))
         ));
     }
 }

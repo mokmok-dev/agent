@@ -529,13 +529,10 @@ mod tests {
         assert_eq!(log.publish(first.clone()).await.expect("publish"), 1);
         assert_eq!(log.publish(second.clone()).await.expect("publish"), 2);
 
+        assert_eq!(subscriber.recv().await, Ok(LogEntry::new(1, first.clone())));
         assert_eq!(
-            subscriber.recv().await.ok().as_ref(),
-            Some(&LogEntry::new(1, first.clone()))
-        );
-        assert_eq!(
-            subscriber.recv().await.ok().as_ref(),
-            Some(&LogEntry::new(2, second.clone()))
+            subscriber.recv().await,
+            Ok(LogEntry::new(2, second.clone()))
         );
         assert_eq!(read_all(&log), [first, second]);
     }

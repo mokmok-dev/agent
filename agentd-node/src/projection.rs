@@ -139,7 +139,10 @@ where
     ///
     /// This mirrors [`Projection::apply`], so it takes the entry by value and
     /// the projection is usable without importing the trait.
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "mirrors the Projection trait method so callers need no import"
+    )]
     pub fn apply(
         &mut self,
         recorded: LogEntry,
@@ -229,7 +232,10 @@ fn write_checkpoint(
 }
 
 /// Converts a log position to a SQLite integer.
-fn seq_to_sql(seq: Seq) -> rusqlite::Result<i64> {
+///
+/// Shared with reducers that store a position, so an overflowing position is
+/// rejected the same way everywhere.
+pub fn seq_to_sql(seq: Seq) -> rusqlite::Result<i64> {
     i64::try_from(seq)
         .map_err(|_| rusqlite::Error::ToSqlConversionFailure(Box::new(SeqOutOfRange(seq))))
 }

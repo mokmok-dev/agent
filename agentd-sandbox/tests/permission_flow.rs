@@ -6,7 +6,10 @@
 //! the workspace `allow-*-in-tests` clippy configuration cannot see integration
 //! test files, so it is replicated here.
 
-#![allow(clippy::expect_used, clippy::panic)]
+#![expect(
+    clippy::expect_used,
+    reason = "integration tests use expect for setup and assertions"
+)]
 
 use agentd_events::{EventLog, LogEntry};
 use agentd_sandbox::{

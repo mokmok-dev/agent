@@ -11,7 +11,6 @@ use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -42,6 +41,9 @@ pub const SYSTEM_BIN_DIRS: &[&str] = &[
     "/opt/homebrew/bin",
 ];
 
+/// The shell a confined command runs under, like every backend's `-c` wrapper.
+pub const BASH: &str = "/bin/bash";
+
 /// A refusal result for a command that never ran.
 #[must_use]
 pub fn cannot_execute(message: &str) -> ExecResult {
@@ -59,11 +61,10 @@ pub fn cannot_execute(message: &str) -> ExecResult {
 /// only wires stdio, runs, and maps the outcome to an [`ExecResult`] with the
 /// documented exit conventions.
 pub async fn run(
-    std_command: std::process::Command,
+    mut std_command: std::process::Command,
     wall_clock: Duration,
     max_output_bytes: u64,
 ) -> ExecResult {
-    let mut std_command = std_command;
     std_command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -77,24 +78,24 @@ pub async fn run(
     };
     let pid = child.id();
 
-    let stdout_data = &mut Vec::new();
-    let stderr_data = &mut Vec::new();
-    let remaining = Arc::new(AtomicU64::new(max_output_bytes));
-    let truncated = Arc::new(AtomicBool::new(false));
+    let mut stdout_data = Vec::new();
+    let mut stderr_data = Vec::new();
+    let remaining = AtomicU64::new(max_output_bytes);
+    let truncated = AtomicBool::new(false);
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
     let wait = async {
         let stdout_state = Capture {
-            data: stdout_data,
-            remaining: remaining.clone(),
-            truncated: truncated.clone(),
+            data: &mut stdout_data,
+            remaining: &remaining,
+            truncated: &truncated,
             pid,
         };
         let stderr_state = Capture {
-            data: stderr_data,
-            remaining: remaining.clone(),
-            truncated: truncated.clone(),
+            data: &mut stderr_data,
+            remaining: &remaining,
+            truncated: &truncated,
             pid,
         };
         let (stdout_read, stderr_read) = tokio::join!(
@@ -134,8 +135,8 @@ pub async fn run(
         exit_code = exit_code.max(SIGKILL_EXIT);
     }
 
-    let stdout = String::from_utf8_lossy(stdout_data).into_owned();
-    let mut stderr = String::from_utf8_lossy(stderr_data).into_owned();
+    let stdout = String::from_utf8_lossy(&stdout_data).into_owned();
+    let mut stderr = String::from_utf8_lossy(&stderr_data).into_owned();
     if timed_out {
         stderr.push_str("\n[agentd-sandbox] command exceeded the wall-clock timeout");
     }
@@ -157,8 +158,7 @@ pub async fn run(
 /// # Errors
 ///
 /// Returns [`SpawnError::Io`] when the process cannot be started.
-pub fn spawn(std_command: std::process::Command) -> Result<tokio::process::Child, SpawnError> {
-    let mut std_command = std_command;
+pub fn spawn(mut std_command: std::process::Command) -> Result<tokio::process::Child, SpawnError> {
     std_command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -183,8 +183,8 @@ pub fn kill_group(pid: Option<u32>) {
 /// pipe forever.
 struct Capture<'a> {
     data: &'a mut Vec<u8>,
-    remaining: Arc<AtomicU64>,
-    truncated: Arc<AtomicBool>,
+    remaining: &'a AtomicU64,
+    truncated: &'a AtomicBool,
     pid: Option<u32>,
 }
 

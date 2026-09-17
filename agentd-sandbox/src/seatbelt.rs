@@ -33,14 +33,11 @@ use std::time::Duration;
 use crate::error::SandboxError;
 use crate::executor::{ExecResult, SpawnError};
 use crate::policy::{Access, FsPolicy, Policy};
-use crate::process;
+use crate::process::{self, BASH};
 
 /// The Seatbelt front-end. Unconfined itself: it applies the profile to its
 /// child.
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-
-/// The shell the command runs under.
-const BASH: &str = "/bin/bash";
 
 /// The macOS layer-1 executor: renders a Seatbelt profile from the policy at
 /// construction and spawns commands under it.
@@ -85,15 +82,14 @@ impl ConfinedProcessExecutor {
     ///
     /// Fails closed with [`SandboxError::UnsupportedPlatform`] when
     /// `sandbox-exec` is unavailable, [`SandboxError::InvalidPolicy`] for an
-    /// unusable workdir or path entry, and [`SandboxError::Io`] when the
-    /// scratch directory or profile cannot be written.
+    /// unusable workdir or path entry, [`SandboxError::Policy`] when the policy
+    /// fails validation, and [`SandboxError::Io`] when the scratch directory or
+    /// profile cannot be written.
     pub fn new(policy: &Policy) -> Result<Self, SandboxError> {
         // Validate here as well as in `Sandbox::new`: this constructor is
         // public, and an unrepresentable path must fail closed rather than
         // inject a profile clause.
-        policy
-            .validate()
-            .map_err(|error| SandboxError::InvalidPolicy(error.to_string()))?;
+        policy.validate()?;
         if fs::metadata(SANDBOX_EXEC).is_err() {
             return Err(SandboxError::UnsupportedPlatform(
                 "sandbox-exec is not available",
@@ -105,13 +101,10 @@ impl ConfinedProcessExecutor {
 
         // The scratch directory now exists, so every later failure must remove
         // it rather than leak a directory per rejected policy.
-        let (profile_path, path_env) = match prepare(policy, &workdir, &path_dirs, &scratch) {
-            Ok(prepared) => prepared,
-            Err(error) => {
+        let (profile_path, path_env) = prepare(policy, &workdir, &path_dirs, &scratch)
+            .inspect_err(|_| {
                 let _ = fs::remove_dir_all(&scratch);
-                return Err(error);
-            },
-        };
+            })?;
 
         let env = policy
             .shell
@@ -177,19 +170,19 @@ impl ConfinedProcessExecutor {
 /// in the profile and dropping it would leave a weaker sandbox than the
 /// operator asked for.
 fn writable_hosts(fs_policy: &FsPolicy) -> Result<Vec<PathBuf>, SandboxError> {
-    let mut writable = Vec::new();
-    for entry in &fs_policy.entries {
-        if entry.access != Access::Write {
-            continue;
-        }
-        let canonical = entry.path.canonicalize().map_err(|error| {
-            SandboxError::InvalidPolicy(format!(
-                "write entry {:?} is not accessible: {error}",
-                entry.path.display().to_string()
-            ))
-        })?;
-        writable.push(canonical);
-    }
+    let mut writable: Vec<PathBuf> = fs_policy
+        .entries
+        .iter()
+        .filter(|entry| entry.access == Access::Write)
+        .map(|entry| {
+            entry.path.canonicalize().map_err(|error| {
+                SandboxError::InvalidPolicy(format!(
+                    "write entry {:?} is not accessible: {error}",
+                    entry.path.display().to_string()
+                ))
+            })
+        })
+        .collect::<Result<_, _>>()?;
     writable.sort();
     writable.dedup();
     Ok(writable)
@@ -280,10 +273,10 @@ fn prepare(
     scratch: &Path,
 ) -> Result<(PathBuf, String), SandboxError> {
     let deny = validate_deny(&policy.fs, workdir, path_dirs, scratch)?;
-    writable_hosts(&policy.fs)?;
+    let writable = writable_hosts(&policy.fs)?;
     let path_env = process::join_path(path_dirs)?;
 
-    let profile = render_profile(policy, scratch, &deny);
+    let profile = render_profile(policy, scratch, &deny, &writable);
     let profile_path = scratch.join("profile.sb");
     fs::write(&profile_path, profile)?;
     Ok((profile_path, path_env))
@@ -386,8 +379,8 @@ fn render_profile(
     policy: &Policy,
     scratch: &Path,
     deny: &[PathBuf],
+    writable: &[PathBuf],
 ) -> String {
-    let writable = writable_hosts(&policy.fs).unwrap_or_default();
     let mut lines = vec![
         String::from("(version 1)"),
         String::from("(deny default)"),
@@ -493,6 +486,16 @@ mod tests {
         ConfinedProcessExecutor::new(policy).expect("a valid policy builds an executor")
     }
 
+    /// Renders a profile from `policy`, resolving the writable hosts as
+    /// `prepare` does.
+    fn render(
+        policy: &Policy,
+        deny: &[PathBuf],
+    ) -> String {
+        let writable = writable_hosts(&policy.fs).expect("writable hosts resolve");
+        render_profile(policy, Path::new("/tmp/scratch"), deny, &writable)
+    }
+
     /// The Nix build sandbox is itself a Seatbelt sandbox and refuses to nest
     /// `sandbox-exec`, so the spawn tests cannot run there. They still run on
     /// developer machines, where the confinement is real.
@@ -544,7 +547,7 @@ mod tests {
         };
         assert!(validate_workdir(&policy.shell.workdir, &policy.fs).is_ok());
 
-        let profile = render_profile(&policy, Path::new("/tmp/scratch"), &[]);
+        let profile = render(&policy, &[]);
 
         assert!(profile.starts_with("(version 1)\n(deny default)"));
         assert!(profile.contains("(allow process-fork)"));
@@ -581,7 +584,7 @@ mod tests {
             ..workdir_policy(&host)
         };
 
-        let profile = render_profile(&policy, Path::new("/tmp/scratch"), &[]);
+        let profile = render(&policy, &[]);
 
         let pattern = format!(
             "(allow network-outbound (remote unix-socket (regex #\"^.*{}$\")))",
@@ -610,7 +613,7 @@ mod tests {
         let write_root = dir.path().canonicalize().expect("canonical tempdir");
         let policy = workdir_policy(&write_root);
 
-        let profile = render_profile(&policy, Path::new("/tmp/scratch"), &[]);
+        let profile = render(&policy, &[]);
 
         let root = regex_escape(&write_root.display().to_string());
         assert!(
@@ -661,7 +664,7 @@ mod tests {
         )
         .expect("valid deny");
 
-        let profile = render_profile(&policy, Path::new("/tmp/scratch"), &deny);
+        let profile = render(&policy, &deny);
 
         let deny_line = profile
             .lines()
@@ -833,7 +836,7 @@ mod tests {
         )
         .expect("a deny nested in a write root narrows and must be allowed");
 
-        let profile = render_profile(&policy, Path::new("/tmp/scratch"), &deny);
+        let profile = render(&policy, &deny);
         let canonical = env_file.canonicalize().expect("canonical env file");
         assert!(
             profile.contains(&format!(
@@ -846,7 +849,7 @@ mod tests {
 
     #[test]
     fn no_denial_line_when_nothing_is_denied() {
-        let profile = render_profile(&Policy::default(), Path::new("/tmp/scratch"), &[]);
+        let profile = render(&Policy::default(), &[]);
 
         assert!(
             !profile.contains("(deny file-read-data"),
@@ -983,7 +986,8 @@ mod tests {
         let scratch = TempDir::new().expect("scratch");
         let policy = workdir_policy(&work.path().canonicalize().expect("canonical"));
         let deny = vec![secret_dir.path().canonicalize().expect("canonical secret")];
-        let profile = render_profile(&policy, scratch.path(), &deny);
+        let writable = writable_hosts(&policy.fs).expect("writable hosts resolve");
+        let profile = render_profile(&policy, scratch.path(), &deny, &writable);
         let path = scratch.path().join("parse-check.sb");
         std::fs::write(&path, &profile).expect("write profile");
 
