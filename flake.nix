@@ -82,6 +82,8 @@
               skills
               rustToolchain
               sccache
+              nodejs_22
+              pnpm
             ];
 
             shellHook = ''
