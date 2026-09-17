@@ -79,6 +79,7 @@
             inputsFrom = [ config.pre-commit.devShell ];
 
             packages = with pkgs; [
+              skills
               rustToolchain
               sccache
             ];
