@@ -416,8 +416,8 @@ fn render_profile(
     // Protected metadata is carved out of the write roots, and the roots
     // themselves cannot be renamed or unlinked. Both are denials emitted after
     // the grants; in Seatbelt a deny overrides any matching allow.
-    lines.extend(protected_denials(&writable, &policy.fs.protected));
-    lines.extend(root_unlink_denials(&writable));
+    lines.extend(protected_denials(writable, &policy.fs.protected));
+    lines.extend(root_unlink_denials(writable));
 
     // Read denials are emitted last and are the only layer that can withhold a
     // host file from a spawned binary, because reads are otherwise granted at
