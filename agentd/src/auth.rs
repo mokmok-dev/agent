@@ -19,6 +19,8 @@ use std::path::Path;
 
 use axum::http::HeaderMap;
 use axum::http::header::AUTHORIZATION;
+use secrecy::zeroize::Zeroizing;
+use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize};
 use thiserror::Error as ThisError;
 
@@ -76,10 +78,14 @@ impl Principal {
 }
 
 /// A token together with what it grants.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// Equality is deliberately not implemented: `SecretString` is not `PartialEq`,
+/// and comparing secrets directly is a footgun. A token is only ever matched
+/// through [`TokenStore::authorize`], which compares in constant time.
+#[derive(Clone)]
 pub struct Token {
-    /// The bearer secret.
-    pub secret: String,
+    /// The bearer secret, zeroized on drop and redacted from `Debug`.
+    pub secret: SecretString,
     /// The capability the secret confers.
     pub principal: Principal,
 }
@@ -145,18 +151,17 @@ impl TokenStore {
     /// Returns [`AuthError::Io`], [`AuthError::Parse`], or
     /// [`AuthError::Permissions`].
     pub fn load(path: &Path) -> Result<Self, AuthError> {
-        let metadata = std::fs::metadata(path)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
+            let metadata = std::fs::metadata(path)?;
             let mode = metadata.permissions().mode() & 0o777;
             if mode & 0o077 != 0 {
                 return Err(AuthError::Permissions(path.to_path_buf(), mode));
             }
         }
-        let _ = metadata;
 
-        let contents = std::fs::read_to_string(path)?;
+        let contents = Zeroizing::new(std::fs::read_to_string(path)?);
         let file: TokenFile = serde_json::from_str(&contents)?;
         Ok(Self {
             tokens: file
@@ -187,18 +192,18 @@ impl TokenStore {
         // the position of a match is not observable through timing.
         let mut matched: Option<&Principal> = None;
         for candidate in &self.tokens {
-            if constant_time_eq(candidate.secret.as_bytes(), token.as_bytes()) {
+            if constant_time_eq(
+                candidate.secret.expose_secret().as_bytes(),
+                token.as_bytes(),
+            ) {
                 matched = Some(&candidate.principal);
             }
         }
-        let principal = matched.ok_or(AuthError::UnknownToken)?;
-        if !principal.has(Claim::Read)
-            && !principal.has(Claim::Publish)
-            && !principal.has(Claim::Infer)
-        {
+        let matched = matched.ok_or(AuthError::UnknownToken)?;
+        if !matched.has(Claim::Read) && !matched.has(Claim::Publish) && !matched.has(Claim::Infer) {
             return Err(AuthError::NoAccess);
         }
-        Ok(principal.clone())
+        Ok(matched.clone())
     }
 }
 
@@ -229,7 +234,7 @@ struct TokenFile {
 /// One entry of the on-disk token file.
 #[derive(Debug, Deserialize)]
 struct TokenFileEntry {
-    secret: String,
+    secret: SecretString,
     claims: Vec<Claim>,
     source: String,
 }
@@ -253,11 +258,11 @@ mod tests {
     fn store() -> TokenStore {
         TokenStore::new(vec![
             Token {
-                secret: String::from("read-secret"),
+                secret: "read-secret".into(),
                 principal: Principal::new("urn:test:reader", [Claim::Read]),
             },
             Token {
-                secret: String::from("authority-secret"),
+                secret: "authority-secret".into(),
                 principal: Principal::new(
                     "urn:test:approver",
                     [Claim::Read, Claim::Publish, Claim::Authority],
@@ -287,11 +292,16 @@ mod tests {
     #[test]
     fn token_debug_redacts_the_secret() {
         let token = Token {
-            secret: String::from("super-secret"),
+            secret: "super-secret".into(),
             principal: Principal::new("urn:test", [Claim::Read]),
         };
 
         assert!(!format!("{token:?}").contains("super-secret"));
+    }
+
+    #[test]
+    fn the_token_store_debug_redacts_every_secret() {
+        assert!(!format!("{:?}", store()).contains("authority-secret"));
     }
 
     #[test]
@@ -324,7 +334,7 @@ mod tests {
     #[test]
     fn a_token_without_read_or_publish_is_refused() {
         let store = TokenStore::new(vec![Token {
-            secret: String::from("nothing"),
+            secret: "nothing".into(),
             principal: Principal::new("urn:test:none", []),
         }]);
 

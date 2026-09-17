@@ -3,16 +3,24 @@
 use agentd_events::LogError;
 use thiserror::Error as ThisError;
 
+use crate::policy::PolicyError;
+
 /// Errors from constructing a sandbox and its confinement layers.
 ///
 /// Construction fails closed: any invalid policy input aborts before
 /// anything can run under it.
 #[derive(Debug, ThisError)]
+#[non_exhaustive]
 pub enum SandboxError {
-    /// The policy is malformed: invalid glob patterns, mount points, or host
-    /// directories.
+    /// The policy is malformed: a path entry the confinement backend cannot
+    /// express (an unresolvable write root, a deny that covers a needed path,
+    /// an unusable workdir).
     #[error("invalid sandbox policy: {0}")]
     InvalidPolicy(String),
+    /// The policy failed its own structural validation, so it is malformed
+    /// independent of the platform.
+    #[error(transparent)]
+    Policy(#[from] PolicyError),
     /// The confinement executor does not exist for the current platform; the
     /// sandbox refuses to run commands without OS confinement.
     #[error("sandbox commands are not supported on this platform: {0}")]

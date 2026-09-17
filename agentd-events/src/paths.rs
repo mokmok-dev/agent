@@ -96,6 +96,7 @@ fn env_path(variable: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{config_dir, data_dir, default_log, default_socket, default_tokens, runtime_dir};
+    use std::ffi::OsStr;
 
     #[test]
     fn defaults_are_absolute_and_named() {
@@ -104,15 +105,15 @@ mod tests {
         assert!(runtime_dir().is_absolute());
 
         assert_eq!(
-            default_socket().file_name().and_then(|name| name.to_str()),
+            default_socket().file_name().and_then(OsStr::to_str),
             Some("agentd.sock")
         );
         assert_eq!(
-            default_log().file_name().and_then(|name| name.to_str()),
+            default_log().file_name().and_then(OsStr::to_str),
             Some("events.jsonl")
         );
         assert_eq!(
-            default_tokens().file_name().and_then(|name| name.to_str()),
+            default_tokens().file_name().and_then(OsStr::to_str),
             Some("tokens.json")
         );
     }

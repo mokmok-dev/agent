@@ -25,7 +25,7 @@ use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetA
 use serde::{Deserialize, Serialize};
 
 /// The filesystem confinement the helper applies.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Spec {
     /// The path rules, evaluated as an allowlist.
@@ -33,7 +33,7 @@ pub(crate) struct Spec {
 }
 
 /// One Landlock path rule.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PathRule {
     /// The absolute host path.
@@ -43,7 +43,7 @@ pub(crate) struct PathRule {
 }
 
 /// The access a [`PathRule`] grants.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PathAccess {
     /// Read files and list directories.
@@ -115,9 +115,7 @@ pub(crate) fn confine(
         serde_json::from_slice(&raw).map_err(|error| format!("cannot parse the spec: {error}"))?;
     apply_landlock(&spec.paths)?;
     apply_seccomp(BLOCKED_SYSCALLS)?;
-    let (program, args) = command
-        .split_first()
-        .ok_or_else(|| String::from("no command to run"))?;
+    let (program, args) = command.split_first().ok_or("no command to run")?;
     let error = std::process::Command::new(program).args(args).exec();
     Err(format!(
         "cannot execute {}: {error}",
@@ -188,7 +186,7 @@ fn apply_seccomp(blocked: &[i64]) -> Result<(), String> {
     let filter: BpfProgram = SeccompFilter::new(
         rules,
         SeccompAction::Allow,
-        SeccompAction::Errno(u32::try_from(libc::EPERM).unwrap_or(1)),
+        SeccompAction::Errno(libc::EPERM.unsigned_abs()),
         arch,
     )
     .map_err(|error| format!("cannot build the seccomp filter: {error}"))?

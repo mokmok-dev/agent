@@ -93,7 +93,10 @@ pub fn permission_denied(
 /// Builds a `sandbox.exec.completed` event.
 ///
 /// The argument count is the event contract; a struct would not shrink it.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the eight fields are the event contract, spelled out at the call site"
+)]
 #[must_use]
 pub fn exec_completed(
     sandbox_id: &str,

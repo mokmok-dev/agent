@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use futures_util::{SinkExt, StreamExt};
+use secrecy::zeroize::Zeroizing;
 use thiserror::Error;
 use tokio::net::UnixStream;
 use tokio_tungstenite::WebSocketStream;
@@ -63,7 +64,7 @@ impl InferenceClient {
         let mut request = "ws://localhost/inference".into_client_request()?;
         request.headers_mut().insert(
             "authorization",
-            format!("Bearer {token}")
+            Zeroizing::new(format!("Bearer {token}"))
                 .parse()
                 .map_err(|_| ClientError::Token)?,
         );

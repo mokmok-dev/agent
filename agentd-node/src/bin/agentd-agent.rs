@@ -10,6 +10,7 @@
 
 use agentd_node::{Agent, AgentError, Conversation, ShellLimits, SqliteProjection, session_key};
 use clap::Parser;
+use secrecy::zeroize::Zeroizing;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
@@ -111,13 +112,14 @@ async fn run() -> Result<(), RunError> {
     let conversation = match args.conversation {
         Some(conversation) => conversation,
         None if args.resume => {
-            Conversation::latest_session(projection.connection(), &session_key(&args.workdir))
+            let key = session_key(&args.workdir);
+            Conversation::latest_session(projection.connection(), &key)
                 .map_err(RunError::Projection)?
                 .ok_or(RunError::NoSession)?
         },
         None => Uuid::new_v4().to_string(),
     };
-    let token = std::fs::read_to_string(&args.token_file)?;
+    let token = Zeroizing::new(std::fs::read_to_string(&args.token_file)?);
     let limits = ShellLimits {
         timeout: Duration::from_secs(args.shell_timeout_secs),
         max_output_bytes: args.max_output_bytes,
@@ -148,13 +150,10 @@ async fn run() -> Result<(), RunError> {
 
 /// Removes the projection file and the sidecars SQLite may leave behind.
 fn remove_projection(path: &Path) -> Result<(), std::io::Error> {
-    for candidate in [
-        path.to_path_buf(),
-        PathBuf::from(format!("{}-wal", path.display())),
-        PathBuf::from(format!("{}-shm", path.display())),
-        PathBuf::from(format!("{}-journal", path.display())),
-    ] {
-        match std::fs::remove_file(&candidate) {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut candidate = path.as_os_str().to_os_string();
+        candidate.push(suffix);
+        match std::fs::remove_file(PathBuf::from(candidate)) {
             Ok(()) => {},
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
             Err(error) => return Err(error),

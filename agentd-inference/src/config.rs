@@ -10,6 +10,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use secrecy::SecretString;
+use secrecy::zeroize::Zeroizing;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -45,7 +47,7 @@ pub enum ConfigError {
 }
 
 /// The daemon's provider configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProvidersConfig {
     /// Providers by id.
@@ -60,7 +62,7 @@ pub struct ProvidersConfig {
 }
 
 /// One configured provider.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     /// The provider's wire protocol.
@@ -88,7 +90,7 @@ pub enum ProviderKind {
 }
 
 /// A model alias resolved to a concrete provider and model.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelRoute {
     /// The provider id to route to.
@@ -117,51 +119,58 @@ impl ProviderConfig {
     /// Resolves the provider's credential, if it has one.
     ///
     /// A local server (for example Ollama) is configured with neither field and
-    /// returns `None`.
+    /// returns `None`. The credential is wrapped in a [`SecretString`], so it is
+    /// zeroized on drop and redacted from `Debug`; read it with
+    /// `secrecy::ExposeSecret::expose_secret`.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError::Permissions`] if the secret file is accessible to
     /// other users and [`ConfigError::MissingEnv`] if the environment variable
     /// is not set.
-    pub fn credential(&self) -> Result<Option<String>, ConfigError> {
+    pub fn credential(&self) -> Result<Option<SecretString>, ConfigError> {
         if let Some(path) = &self.api_key_file {
             return Ok(Some(read_secret(path)?));
         }
         if let Some(name) = &self.api_key_env {
             let value = std::env::var(name).map_err(|_| ConfigError::MissingEnv(name.clone()))?;
-            return Ok(Some(value));
+            return Ok(Some(SecretString::from(value)));
         }
         Ok(None)
     }
 }
 
 /// Reads a secret file, refusing one readable or writable by other users.
-fn read_secret(path: &Path) -> Result<String, ConfigError> {
-    let metadata = std::fs::metadata(path).map_err(|source| ConfigError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+///
+/// The credential is wrapped so it is zeroized on drop; the parsed file
+/// contents are zeroized too.
+fn read_secret(path: &Path) -> Result<SecretString, ConfigError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
+        let metadata = std::fs::metadata(path).map_err(|source| ConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
         let mode = metadata.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
             return Err(ConfigError::Permissions(path.to_path_buf(), mode));
         }
     }
-    let _ = metadata;
-    std::fs::read_to_string(path)
-        .map(|secret| secret.trim().to_string())
-        .map_err(|source| ConfigError::Io {
-            path: path.to_path_buf(),
-            source,
-        })
+    let contents =
+        Zeroizing::new(
+            std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?,
+        );
+    Ok(SecretString::from(contents.trim().to_owned()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ConfigError, ProviderKind, ProvidersConfig};
+    use secrecy::ExposeSecret as _;
     use serde_json::json;
 
     #[test]
@@ -224,6 +233,9 @@ mod tests {
 
         file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .expect("chmod");
-        assert_eq!(super::read_secret(&path).expect("read"), "secret");
+        assert_eq!(
+            super::read_secret(&path).expect("read").expose_secret(),
+            "secret"
+        );
     }
 }

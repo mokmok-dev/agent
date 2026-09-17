@@ -84,7 +84,7 @@ impl super::SqliteReducer for Conversation {
                     conversation_id,
                     field(data, "workdir").unwrap_or_default(),
                     field(data, "model").unwrap_or_default(),
-                    i64::try_from(entry.seq).unwrap_or(i64::MAX),
+                    crate::projection::seq_to_sql(entry.seq)?,
                 ],
             )?;
             return Ok(());
@@ -100,13 +100,7 @@ impl super::SqliteReducer for Conversation {
                     .transpose()?;
                 (String::from("assistant"), tool_calls, None)
             },
-            AGENT_TOOL_RESULT => (
-                String::from("tool"),
-                None,
-                data.get("tool_call_id")
-                    .and_then(Value::as_str)
-                    .map(String::from),
-            ),
+            AGENT_TOOL_RESULT => (String::from("tool"), None, field(data, "tool_call_id")),
             _ => return Ok(()),
         };
         tx.execute(
@@ -114,7 +108,7 @@ impl super::SqliteReducer for Conversation {
              (seq, conversation_id, role, content, tool_calls, tool_call_id) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
-                i64::try_from(entry.seq).unwrap_or(i64::MAX),
+                crate::projection::seq_to_sql(entry.seq)?,
                 conversation_id,
                 role,
                 content,
@@ -149,12 +143,11 @@ impl Conversation {
                 row.get::<_, Option<String>>(3)?,
             ))
         })?;
-        let mut messages = Vec::new();
-        for row in rows {
+        rows.map(|row| {
             let (role, content, tool_calls, tool_call_id) = row?;
-            messages.push(decode_message(&role, content, tool_calls, tool_call_id)?);
-        }
-        Ok(messages)
+            decode_message(&role, content, tool_calls.as_deref(), tool_call_id)
+        })
+        .collect()
     }
 
     /// Reads the conversation's last message and its log position.
@@ -167,28 +160,27 @@ impl Conversation {
         conn: &Connection,
         conversation_id: &str,
     ) -> Result<Option<(Seq, Message)>, AgentError> {
-        let row = conn
-            .query_row(
-                "SELECT seq, role, content, tool_calls, tool_call_id FROM agent_messages \
-                 WHERE conversation_id = ?1 ORDER BY seq DESC LIMIT 1",
-                [conversation_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                    ))
-                },
-            )
+        let mut statement = conn.prepare_cached(
+            "SELECT seq, role, content, tool_calls, tool_call_id FROM agent_messages \
+             WHERE conversation_id = ?1 ORDER BY seq DESC LIMIT 1",
+        )?;
+        let row = statement
+            .query_row([conversation_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
             .optional()?;
         let Some((seq, role, content, tool_calls, tool_call_id)) = row else {
             return Ok(None);
         };
         let seq = u64::try_from(seq)
             .map_err(|_| AgentError::History(format!("the stored position {seq} is negative")))?;
-        let message = decode_message(&role, content, tool_calls, tool_call_id)?;
+        let message = decode_message(&role, content, tool_calls.as_deref(), tool_call_id)?;
         Ok(Some((seq, message)))
     }
 
@@ -226,18 +218,23 @@ pub fn session_key(workdir: &Path) -> String {
 fn decode_message(
     role: &str,
     content: String,
-    tool_calls: Option<String>,
+    tool_calls: Option<&str>,
     tool_call_id: Option<String>,
 ) -> Result<Message, AgentError> {
-    let calls: Vec<ToolCall> = match tool_calls {
-        Some(encoded) => serde_json::from_str(&encoded)?,
-        None => Vec::new(),
-    };
+    let calls: Vec<ToolCall> = tool_calls
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default();
     let message = match role {
         "user" => Message::user(content),
         "assistant" if calls.is_empty() => Message::assistant(content),
         "assistant" => Message::with_tool_calls(content, calls),
-        "tool" => Message::tool(tool_call_id.unwrap_or_default(), content),
+        "tool" => Message::tool(
+            tool_call_id.ok_or_else(|| {
+                AgentError::History(String::from("a tool message has no tool_call_id"))
+            })?,
+            content,
+        ),
         other => {
             return Err(AgentError::History(format!(
                 "unknown message role {other:?}"
@@ -248,11 +245,11 @@ fn decode_message(
 }
 
 /// Reads a string field from an event's data, if it is present and a string.
-fn field(
-    data: &Value,
+fn field<'a>(
+    data: &'a Value,
     name: &str,
-) -> Option<String> {
-    data.get(name).and_then(Value::as_str).map(String::from)
+) -> Option<&'a str> {
+    data.get(name).and_then(Value::as_str)
 }
 
 #[cfg(test)]

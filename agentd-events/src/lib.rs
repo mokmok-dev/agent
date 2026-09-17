@@ -97,7 +97,7 @@ pub struct Event {
     pub r#type: String,
     /// The `CloudEvents` `time` attribute as an RFC 3339 timestamp. Optional in
     /// the specification, so absent timestamps are tolerated.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub time: Option<String>,
     /// The `CloudEvents` `data` payload.
     #[serde(default)]
@@ -112,6 +112,7 @@ impl Event {
     /// The `time` attribute is left unset if the current time cannot be
     /// formatted as RFC 3339 (e.g. a system clock far outside the representable
     /// range); `time` is optional in the specification.
+    #[must_use]
     pub fn new(
         r#type: impl Into<String>,
         data: serde_json::Value,
@@ -158,14 +159,16 @@ impl Event {
         if self.specversion != SPEC_VERSION {
             return Err(InvalidEvent::SpecVersion);
         }
-        if self.r#type.trim().is_empty() || self.r#type.chars().any(char::is_whitespace) {
+        if self.r#type.is_empty() || self.r#type.chars().any(char::is_whitespace) {
             return Err(InvalidEvent::Type);
         }
         if uuid::Uuid::parse_str(&self.id).is_err() {
             return Err(InvalidEvent::Id);
         }
-        if let Some(time) = &self.time
-            && OffsetDateTime::parse(time, &Rfc3339).is_err()
+        if self
+            .time
+            .as_deref()
+            .is_some_and(|time| OffsetDateTime::parse(time, &Rfc3339).is_err())
         {
             return Err(InvalidEvent::Time);
         }
@@ -337,8 +340,8 @@ mod tests {
 
         bus.publish(recorded.clone());
 
-        assert_eq!(first.recv().await.ok().as_ref(), Some(&recorded));
-        assert_eq!(second.recv().await.ok().as_ref(), Some(&recorded));
+        assert_eq!(first.recv().await, Ok(recorded.clone()));
+        assert_eq!(second.recv().await, Ok(recorded));
     }
 
     #[tokio::test]
@@ -359,7 +362,7 @@ mod tests {
         let received = subscriber.recv().await;
 
         assert!(matches!(received, Err(RecvError::Lagged(1))));
-        assert_eq!(subscriber.recv().await.ok().as_ref(), Some(&second));
+        assert_eq!(subscriber.recv().await, Ok(second));
     }
 
     #[test]

@@ -7,7 +7,10 @@
 //! integration tests; the workspace `allow-*-in-tests` clippy configuration does
 //! not see integration test files, so it is replicated here.
 
-#![allow(clippy::expect_used, clippy::panic)]
+#![expect(
+    clippy::expect_used,
+    reason = "integration tests use expect for setup and assertions"
+)]
 
 use agentd::auth::{Claim, Principal, Token, TokenStore};
 use agentd::server;
@@ -33,14 +36,14 @@ const USER_TOKEN: &str = "user-secret";
 fn tokens() -> TokenStore {
     TokenStore::new(vec![
         Token {
-            secret: String::from(AGENT_TOKEN),
+            secret: AGENT_TOKEN.into(),
             principal: Principal::new(
                 "urn:test:agent",
                 [Claim::Read, Claim::Publish, Claim::Infer],
             ),
         },
         Token {
-            secret: String::from(USER_TOKEN),
+            secret: USER_TOKEN.into(),
             principal: Principal::new("urn:test:user", [Claim::Read, Claim::Publish]),
         },
     ])

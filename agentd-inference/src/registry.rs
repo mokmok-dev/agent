@@ -30,8 +30,8 @@ impl std::fmt::Debug for ProviderRegistry {
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         f.debug_struct("ProviderRegistry")
-            .field("providers", &self.providers.keys().collect::<Vec<_>>())
-            .field("models", &self.models.keys().collect::<Vec<_>>())
+            .field("providers", &format_args!("{:?}", self.providers.keys()))
+            .field("models", &format_args!("{:?}", self.models.keys()))
             .field("default_model", &self.default_model)
             .finish()
     }
@@ -43,23 +43,25 @@ impl ProviderRegistry {
     /// # Errors
     ///
     /// Returns [`ConfigError`] if a provider's credential cannot be resolved.
-    pub fn new(config: &ProvidersConfig) -> Result<Self, ConfigError> {
+    pub fn new(config: ProvidersConfig) -> Result<Self, ConfigError> {
         let mut providers = BTreeMap::new();
-        for (id, provider_config) in &config.providers {
-            providers.insert(id.clone(), providers::build(provider_config)?);
+        for (id, provider_config) in config.providers {
+            providers.insert(id, providers::build(&provider_config)?);
         }
-        for (model, route) in &config.models {
-            if !providers.contains_key(&route.provider) {
-                return Err(ConfigError::UnknownProvider {
-                    model: model.clone(),
-                    provider: route.provider.clone(),
-                });
-            }
+        if let Some((model, route)) = config
+            .models
+            .iter()
+            .find(|(_, route)| !providers.contains_key(&route.provider))
+        {
+            return Err(ConfigError::UnknownProvider {
+                model: model.clone(),
+                provider: route.provider.clone(),
+            });
         }
         Ok(Self {
             providers,
-            models: config.models.clone(),
-            default_model: config.default_model.clone(),
+            default_model: config.default_model,
+            models: config.models,
         })
     }
 
@@ -90,8 +92,8 @@ impl ProviderRegistry {
         {
             return Ok((provider, model.to_string()));
         }
-        if let Some((_id, provider)) = self.providers.iter().next()
-            && self.providers.len() == 1
+        if self.providers.len() == 1
+            && let Some((_, provider)) = self.providers.iter().next()
         {
             return Ok((provider, name.to_string()));
         }
@@ -132,7 +134,7 @@ mod tests {
         }))
         .expect("config should parse");
         // Providers are real adapters here; only resolution is exercised.
-        let mut registry = ProviderRegistry::new(&config).expect("registry should build");
+        let mut registry = ProviderRegistry::new(config).expect("registry should build");
         registry.providers.insert(
             String::from("primary"),
             std::sync::Arc::new(FakeProvider::default()),
@@ -178,7 +180,7 @@ mod tests {
             "providers": { "only": { "kind": "open_ai_compatible" } }
         }))
         .expect("config should parse");
-        let mut registry = ProviderRegistry::new(&config).expect("registry should build");
+        let mut registry = ProviderRegistry::new(config).expect("registry should build");
         registry.providers.insert(
             String::from("only"),
             std::sync::Arc::new(FakeProvider::default()),
@@ -202,7 +204,7 @@ mod tests {
         }))
         .expect("config should parse");
 
-        assert!(ProviderRegistry::new(&config).is_err());
+        assert!(ProviderRegistry::new(config).is_err());
     }
 
     #[test]

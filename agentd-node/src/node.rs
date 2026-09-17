@@ -9,6 +9,7 @@ use crate::client::WsClient;
 use crate::filter::Interest;
 use crate::projection::{SqliteProjection, SqliteReducer};
 use agentd_events::{LogEntry, Seq, WireMessage};
+use secrecy::{ExposeSecret as _, SecretString};
 use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
@@ -60,7 +61,7 @@ where
 {
     socket: PathBuf,
     source: String,
-    token: String,
+    token: SecretString,
     interest: F,
     projection: SqliteProjection<R>,
 }
@@ -72,12 +73,16 @@ where
 {
     /// Creates a node for `socket` with the given projection, interest, and
     /// stable `CloudEvents` `source` identity, authenticating with `token`.
+    ///
+    /// `token` accepts a `&str` or a `String`; a `&String` must be written
+    /// `token.as_str()`.
+    #[must_use]
     pub fn new(
         socket: impl Into<PathBuf>,
         projection: SqliteProjection<R>,
         interest: F,
         source: impl Into<String>,
-        token: impl Into<String>,
+        token: impl Into<SecretString>,
     ) -> Self {
         Self {
             socket: socket.into(),
@@ -128,7 +133,7 @@ where
             }
 
             let from = self.projection.applied_seq().saturating_add(1);
-            match WsClient::connect(&self.socket, Some(from), &self.token).await {
+            match WsClient::connect(&self.socket, Some(from), self.token.expose_secret()).await {
                 Ok(mut client) => {
                     let received = self.session(&mut client, &mut shutdown).await?;
                     if received {

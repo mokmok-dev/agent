@@ -18,11 +18,11 @@ pub fn build(config: &ProviderConfig) -> Result<Arc<dyn Provider>, ConfigError> 
     let credential = config.credential()?;
     let provider: Arc<dyn Provider> = match config.kind {
         ProviderKind::OpenAiCompatible => Arc::new(openai::OpenAiProvider::new(
-            config.base_url.clone(),
+            config.base_url.as_deref(),
             credential,
         )),
         ProviderKind::Anthropic => Arc::new(anthropic::AnthropicProvider::new(
-            config.base_url.clone(),
+            config.base_url.as_deref(),
             credential,
         )),
     };

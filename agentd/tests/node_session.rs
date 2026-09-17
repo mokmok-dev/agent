@@ -20,7 +20,7 @@ const NODE_TOKEN: &str = "node-secret";
 /// A token store granting read and publish.
 fn tokens() -> TokenStore {
     TokenStore::new(vec![Token {
-        secret: String::from(NODE_TOKEN),
+        secret: NODE_TOKEN.into(),
         principal: Principal::new("urn:test:node", [Claim::Read, Claim::Publish]),
     }])
 }
@@ -90,7 +90,7 @@ fn count(
 }
 
 /// Spawns a node that projects into `db` and returns its shutdown handle.
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used, reason = "the test helper's setup is infallible")]
 fn spawn_node(
     socket: &Path,
     db: &Path,

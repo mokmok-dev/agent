@@ -7,7 +7,7 @@
 //! in `src` do; the workspace `allow-*-in-tests` clippy configuration cannot
 //! see integration test files, so it is replicated here.
 
-#![allow(clippy::expect_used, clippy::panic)]
+#![expect(clippy::expect_used, clippy::panic)]
 
 use agentd::auth::{Claim, Principal, Token, TokenStore};
 use agentd::server::router;
@@ -30,7 +30,7 @@ const WRITER_TOKEN: &str = "writer-secret";
 /// A token store granting read and publish.
 fn tokens() -> TokenStore {
     TokenStore::new(vec![Token {
-        secret: String::from(WRITER_TOKEN),
+        secret: WRITER_TOKEN.into(),
         principal: Principal::new("urn:test:writer", [Claim::Read, Claim::Publish]),
     }])
 }

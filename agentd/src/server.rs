@@ -66,16 +66,15 @@ pub async fn run(
     tokens: TokenStore,
     provider: Arc<dyn Provider>,
 ) -> Result<(), ServerError> {
-    if let Some(parent) = socket.parent()
-        && !parent.as_os_str().is_empty()
+    if let Some(parent) = socket
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
     {
-        if parent.exists() {
-            if is_shared_directory(parent) {
-                return Err(ServerError::InsecureDirectory(parent.to_path_buf()));
-            }
-        } else {
+        if !parent.exists() {
             std::fs::create_dir_all(parent)?;
             set_mode(parent, 0o700)?;
+        } else if is_shared_directory(parent) {
+            return Err(ServerError::InsecureDirectory(parent.to_path_buf()));
         }
     }
 
@@ -129,11 +128,12 @@ pub(crate) fn set_mode(
 /// Whether a directory is writable by users other than its owner.
 ///
 /// A shared directory would let another local user unlink and replace the
-/// socket, so the daemon refuses to serve from one.
+/// socket, so the daemon refuses to serve from one. Group-writable directories
+/// count as shared, matching the token-file privacy check.
 #[cfg(unix)]
 pub(crate) fn is_shared_directory(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
-    std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o002 != 0)
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o022 != 0)
 }
 
 /// Whether a directory is writable by users other than its owner.
@@ -207,12 +207,9 @@ async fn events_handler(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    let principal = match tokens.authorize(&headers) {
-        Ok(principal) => principal,
-        Err(error) => {
-            tracing::debug!(%error, "rejected an unauthenticated event connection");
-            return StatusCode::UNAUTHORIZED.into_response();
-        },
+    let Ok(principal) = tokens.authorize(&headers) else {
+        tracing::debug!("rejected an unauthenticated event connection");
+        return StatusCode::UNAUTHORIZED.into_response();
     };
     upgrade.on_upgrade(move |socket| handle_events_socket(socket, log, principal, resume.from))
 }
@@ -230,12 +227,9 @@ async fn inference_handler(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    let principal = match tokens.authorize(&headers) {
-        Ok(principal) => principal,
-        Err(error) => {
-            tracing::debug!(%error, "rejected an unauthenticated inference connection");
-            return StatusCode::UNAUTHORIZED.into_response();
-        },
+    let Ok(principal) = tokens.authorize(&headers) else {
+        tracing::debug!("rejected an unauthenticated inference connection");
+        return StatusCode::UNAUTHORIZED.into_response();
     };
     if !principal.has(Claim::Infer) {
         tracing::debug!("a token without the inference claim attempted to use /inference");
@@ -345,8 +339,22 @@ async fn send_delta(
     sink: &mut SplitSink<WebSocket, Message>,
     delta: &Delta,
 ) -> Result<(), axum::Error> {
-    let Ok(text) = serde_json::to_string(delta) else {
-        tracing::warn!("failed to serialize an inference delta");
+    send_json(sink, delta, "inference.delta").await
+}
+
+/// Serializes `value` and sends it as a JSON text frame.
+///
+/// A value that cannot be serialized is logged and skipped.
+async fn send_json<T>(
+    sink: &mut SplitSink<WebSocket, Message>,
+    value: &T,
+    event_type: &str,
+) -> Result<(), axum::Error>
+where
+    T: serde::Serialize + Sync,
+{
+    let Ok(text) = serde_json::to_string(value) else {
+        tracing::warn!(event_type, "failed to serialize an outbound message");
         return Ok(());
     };
     sink.send(Message::Text(text.into())).await
@@ -554,21 +562,14 @@ async fn replay(
 ) -> Result<(), ReplayError> {
     let mut reader = log.read_from(from)?;
     loop {
-        let (returned, batch, done) = tokio::task::spawn_blocking(move || {
+        let (returned, batch) = tokio::task::spawn_blocking(move || {
             let mut batch = Vec::with_capacity(REPLAY_CHUNK);
-            let mut done = false;
-            for _ in 0..REPLAY_CHUNK {
-                if let Some(entry) = reader.next() {
-                    batch.push(entry);
-                } else {
-                    done = true;
-                    break;
-                }
-            }
-            (reader, batch, done)
+            batch.extend(reader.by_ref().take(REPLAY_CHUNK));
+            (reader, batch)
         })
         .await?;
         reader = returned;
+        let done = batch.len() < REPLAY_CHUNK;
 
         for entry in batch {
             let recorded = entry?;
@@ -621,11 +622,7 @@ async fn send_message(
     sink: &mut SplitSink<WebSocket, Message>,
     message: WireMessage,
 ) -> Result<(), axum::Error> {
-    let Ok(text) = serde_json::to_string(&message) else {
-        tracing::warn!(r#type = %message.event.r#type, "failed to serialize event");
-        return Ok(());
-    };
-    sink.send(Message::Text(text.into())).await
+    send_json(sink, &message, &message.event.r#type).await
 }
 
 #[cfg(test)]
@@ -659,22 +656,22 @@ mod tests {
     fn tokens() -> TokenStore {
         TokenStore::new(vec![
             Token {
-                secret: String::from(READ_TOKEN),
+                secret: READ_TOKEN.into(),
                 principal: Principal::new("urn:test:reader", [Claim::Read]),
             },
             Token {
-                secret: String::from(WRITE_TOKEN),
+                secret: WRITE_TOKEN.into(),
                 principal: Principal::new("urn:test:writer", [Claim::Read, Claim::Publish]),
             },
             Token {
-                secret: String::from(AUTHORITY_TOKEN),
+                secret: AUTHORITY_TOKEN.into(),
                 principal: Principal::new(
                     "urn:test:approver",
                     [Claim::Read, Claim::Publish, Claim::Authority],
                 ),
             },
             Token {
-                secret: String::from(INFER_TOKEN),
+                secret: INFER_TOKEN.into(),
                 principal: Principal::new(
                     "urn:test:agent",
                     [Claim::Read, Claim::Publish, Claim::Infer],

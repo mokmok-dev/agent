@@ -22,14 +22,13 @@
 //! process it did not spawn. See [`SessionManager::run`].
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use agentd_events::{Event, EventLog, LogEntry, LogError, Seq};
 use agentd_sandbox::{Policy, Sandbox, SandboxError};
 use serde_json::{Value, json};
 use thiserror::Error as ThisError;
-use tokio::sync::Mutex;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::watch;
 
@@ -92,6 +91,9 @@ pub struct SessionManager {
     agent_id: String,
     supervision: Supervision,
     /// The active sessions, by id, with the restart count of each.
+    ///
+    /// A `std` mutex is sufficient because no critical section awaits; keeping
+    /// it off the async mutex makes that invariant compiler-enforced.
     active: Arc<Mutex<BTreeMap<String, u32>>>,
 }
 
@@ -201,9 +203,13 @@ impl SessionManager {
         &self,
         through: Seq,
     ) -> Result<(), SessionError> {
-        for (session_id, _restarts) in active_after(self.log.read_from(1)?, through)? {
+        let reader = self.log.read_from(1)?;
+        let interrupted = tokio::task::spawn_blocking(move || active_after(reader, through))
+            .await
+            .map_err(|error| SessionError::Log(LogError::Io(std::io::Error::other(error))))??;
+        for session_id in interrupted.keys() {
             let event = session_failed(
-                &session_id,
+                session_id,
                 &self.agent_id,
                 "the daemon restarted while the session was active",
             );
@@ -212,6 +218,14 @@ impl SessionManager {
             }
         }
         Ok(())
+    }
+
+    /// Borrows the active-session map.
+    ///
+    /// A poisoned lock is recovered: the map is a plain counter, so a panic
+    /// while holding it cannot have left it inconsistent.
+    fn active(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, u32>> {
+        self.active.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Starts one supervised session for `request`.
@@ -235,7 +249,7 @@ impl SessionManager {
     /// Publishes the active sessions in response to `session.status.requested`.
     async fn report_status(&self) {
         let sessions: Vec<Value> = {
-            let active = self.active.lock().await;
+            let active = self.active();
             active
                 .iter()
                 .map(|(session_id, restarts)| {
@@ -257,10 +271,7 @@ impl SessionManager {
     ) {
         let mut restarts = 0_u32;
         loop {
-            self.active
-                .lock()
-                .await
-                .insert(session_id.clone(), restarts);
+            self.active().insert(session_id.clone(), restarts);
             let announcement = if restarts == 0 {
                 session_started(&session_id, &self.agent_id)
             } else {
@@ -268,7 +279,7 @@ impl SessionManager {
             };
             if let Err(error) = self.log.publish(announcement).await {
                 tracing::error!(%error, "failed to record session start");
-                self.active.lock().await.remove(&session_id);
+                self.active().remove(&session_id);
                 return;
             }
 
@@ -278,7 +289,7 @@ impl SessionManager {
                 Err(error) => {
                     let event = session_failed(&session_id, &self.agent_id, &error.to_string());
                     let _ = self.log.publish(event).await;
-                    self.active.lock().await.remove(&session_id);
+                    self.active().remove(&session_id);
                     return;
                 },
             };
@@ -294,7 +305,7 @@ impl SessionManager {
                 continue;
             }
 
-            self.active.lock().await.remove(&session_id);
+            self.active().remove(&session_id);
             let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let event = match outcome {
                 Outcome::Exited(Ok(exit_code)) => {

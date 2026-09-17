@@ -3,6 +3,7 @@ use agentd::server;
 use agentd_events::log::{self, EventLog};
 use agentd_inference::{FakeProvider, Provider, ProviderRegistry, ProvidersConfig};
 use clap::{Parser, Subcommand};
+use secrecy::ExposeSecret as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "sandbox")]
@@ -123,16 +124,18 @@ fn start_session_manager(
 ) -> Result<(), RunError> {
     let mut policy: agentd_sandbox::Policy =
         serde_json::from_str(&std::fs::read_to_string(&options.policy_path)?)?;
-    if !policy.network.unix_sockets.contains(&options.socket) {
-        policy.network.unix_sockets.push(options.socket.clone());
+    let SessionOptions {
+        command,
+        agent_id,
+        supervision,
+        socket,
+        ..
+    } = options;
+    if !policy.network.unix_sockets.contains(&socket) {
+        policy.network.unix_sockets.push(socket);
     }
-    let manager = agentd::session::SessionManager::new(
-        log.clone(),
-        &policy,
-        options.command,
-        options.agent_id,
-    )?
-    .with_supervision(options.supervision);
+    let manager = agentd::session::SessionManager::new(log.clone(), &policy, command, agent_id)?
+        .with_supervision(supervision);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
         if let Err(error) = manager.run(shutdown_rx).await {
@@ -186,9 +189,7 @@ async fn run() -> Result<(), RunError> {
 
             #[cfg(feature = "sandbox")]
             if let Some(command) = session_command.as_deref() {
-                let policy_path = sandbox_policy
-                    .clone()
-                    .ok_or(RunError::MissingSandboxPolicy)?;
+                let policy_path = sandbox_policy.ok_or(RunError::MissingSandboxPolicy)?;
                 let supervision = agentd::session::Supervision {
                     max_restarts: session_max_restarts,
                     restart_backoff: Duration::from_secs(1),
@@ -199,23 +200,26 @@ async fn run() -> Result<(), RunError> {
                     SessionOptions {
                         command: command.to_string(),
                         policy_path,
-                        agent_id: session_agent_id.clone(),
+                        agent_id: session_agent_id,
                         supervision,
                         socket: socket.clone(),
                     },
                 )?;
             }
             #[cfg(not(feature = "sandbox"))]
-            if session_command.is_some() {
-                tracing::warn!("--session-command ignored: this build lacks the `sandbox` feature");
+            {
+                if session_command.is_some() {
+                    tracing::warn!(
+                        "--session-command ignored: this build lacks the `sandbox` feature"
+                    );
+                }
+                let _ = (
+                    sandbox_policy,
+                    session_agent_id,
+                    session_max_restarts,
+                    session_lifetime_secs,
+                );
             }
-            let _ = (
-                session_command,
-                sandbox_policy,
-                session_agent_id,
-                session_max_restarts,
-                session_lifetime_secs,
-            );
 
             let providers_config = providers_config.or_else(|| {
                 let default = agentd_events::paths::default_providers();
@@ -224,24 +228,19 @@ async fn run() -> Result<(), RunError> {
             let provider: Arc<dyn Provider> = match providers_config {
                 Some(path) => {
                     let config = ProvidersConfig::load(&path)?;
-                    Arc::new(ProviderRegistry::new(&config)?)
+                    Arc::new(ProviderRegistry::new(config)?)
                 },
                 None => Arc::new(FakeProvider::default()),
             };
-            let () = server::run(socket, log, tokens, provider)
+            server::run(socket, log, tokens, provider)
                 .await
-                .map_err(RunError::Serve)?;
-            Ok(())
+                .map_err(RunError::Serve)
         },
         Command::VerifyLog { log_path } => {
             let path = log_path.unwrap_or_else(agentd_events::paths::default_log);
-            match agentd_events::verify_chain(&path) {
-                Ok(count) => {
-                    tracing::info!(count, path = %path.display(), "hash chain verified");
-                    Ok(())
-                },
-                Err(error) => Err(RunError::Log(error)),
-            }
+            let count = agentd_events::verify_chain(&path).map_err(RunError::Log)?;
+            tracing::info!(count, path = %path.display(), "hash chain verified");
+            Ok(())
         },
         Command::Init { config_dir, force } => {
             let config_dir = config_dir.unwrap_or_else(agentd_events::paths::config_dir);
@@ -271,7 +270,7 @@ fn print_initialized(initialized: &agentd::init::Initialized) {
         println!(
             "    {}: {}  ({})",
             client.name,
-            client.secret,
+            client.secret.expose_secret(),
             client.path.display()
         );
     }

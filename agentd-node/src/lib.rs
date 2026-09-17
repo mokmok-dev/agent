@@ -62,3 +62,6 @@ pub use filter::{Interest, TypePrefixes};
 pub use node::{Node, NodeError};
 pub use projection::{SqliteError, SqliteProjection, SqliteReducer};
 pub use rusqlite;
+/// Re-exported so consumers can name [`SecretString`](secrecy::SecretString) and
+/// [`ExposeSecret`](secrecy::ExposeSecret) without a direct `secrecy` dependency.
+pub use secrecy;
