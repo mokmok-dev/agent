@@ -78,16 +78,22 @@
           devShells.default = pkgs.mkShell {
             inputsFrom = [ config.pre-commit.devShell ];
 
-            packages = with pkgs; [
-              skills
-              rustToolchain
-              sccache
-              nodejs_22
-              pnpm
-            ];
+            packages =
+              with pkgs;
+              [
+                skills
+                rustToolchain
+                sccache
+                nodejs_22
+                pnpm
+              ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ mold ];
 
             shellHook = ''
               export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
+            ''
+            + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+              export RUSTFLAGS="''${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-fuse-ld=mold"
             '';
           };
 
