@@ -144,7 +144,7 @@ pub fn violation_event(
     sandbox_id: &str,
     request_id: &str,
     agent_id: &str,
-    subject: &str,
+    command: &str,
     violation: &Violation,
 ) -> Event {
     let r#type = match violation.kind {
@@ -157,7 +157,7 @@ pub fn violation_event(
         "agent_id": agent_id,
         "resource": RESOURCE_SHELL,
         "action": ACTION_EXEC,
-        "subject": subject,
+        "command": command,
         "kind": violation.kind.as_str(),
         "reason": violation.reason.as_str(),
         "output": violation.output,

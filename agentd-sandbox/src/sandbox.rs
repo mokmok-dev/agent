@@ -205,7 +205,7 @@ impl Sandbox {
             sandbox_id,
             request_id,
             agent_id: self.agent_id.clone(),
-            subject: command.to_string(),
+            command: command.to_string(),
             started: Instant::now(),
             // The executor owns the profile and scratch the child runs under;
             // holding it keeps them alive for the session's lifetime.
@@ -289,7 +289,7 @@ pub struct SandboxedProcess {
     sandbox_id: String,
     request_id: String,
     agent_id: String,
-    subject: String,
+    command: String,
     started: Instant,
     /// Keeps the executor (and its profile and scratch) alive for the child.
     #[expect(dead_code, reason = "the field is a keepalive, never read")]
@@ -364,7 +364,7 @@ impl SandboxedProcess {
                 &self.sandbox_id,
                 &self.request_id,
                 &self.agent_id,
-                &self.subject,
+                &self.command,
                 &self.id.to_string(),
                 exit_code,
                 u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -382,7 +382,7 @@ impl std::fmt::Debug for SandboxedProcess {
         formatter
             .debug_struct("SandboxedProcess")
             .field("id", &self.id)
-            .field("subject", &self.subject)
+            .field("command", &self.command)
             .finish_non_exhaustive()
     }
 }
@@ -610,7 +610,7 @@ mod tests {
         for event in &events {
             assert_eq!(event.data["sandbox_id"], sandbox.id().to_string());
             assert_eq!(event.data["request_id"], request_id);
-            assert_eq!(event.data["subject"], "cargo test --workspace");
+            assert_eq!(event.data["command"], "cargo test --workspace");
         }
         assert_eq!(events[2].data["exit_code"], 0);
     }
@@ -634,11 +634,11 @@ mod tests {
                 {
                     let sandbox_id = event.data["sandbox_id"].as_str().unwrap_or_default();
                     let agent_id = event.data["agent_id"].as_str().unwrap_or_default();
-                    let subject = event.data["subject"].as_str().unwrap_or_default();
+                    let command = event.data["command"].as_str().unwrap_or_default();
                     let reply = if decision == "grant" {
-                        crate::events::permission_granted(sandbox_id, request_id, agent_id, subject)
+                        crate::events::permission_granted(sandbox_id, request_id, agent_id, command)
                     } else {
-                        crate::events::permission_denied(sandbox_id, request_id, agent_id, subject)
+                        crate::events::permission_denied(sandbox_id, request_id, agent_id, command)
                     };
                     let _ = publisher.publish(reply).await;
                     return;

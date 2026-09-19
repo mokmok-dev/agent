@@ -33,7 +33,7 @@ fn permission_data(
     sandbox_id: &str,
     request_id: &str,
     agent_id: &str,
-    subject: &str,
+    command: &str,
     decision: &str,
 ) -> serde_json::Value {
     json!({
@@ -42,7 +42,7 @@ fn permission_data(
         "agent_id": agent_id,
         "resource": RESOURCE_SHELL,
         "action": ACTION_EXEC,
-        "subject": subject,
+        "command": command,
         "decision": decision,
     })
 }
@@ -53,12 +53,12 @@ pub fn permission_requested(
     sandbox_id: &str,
     request_id: &str,
     agent_id: &str,
-    subject: &str,
+    command: &str,
     decision: &str,
 ) -> Event {
     Event::new(
         PERMISSION_REQUESTED,
-        permission_data(sandbox_id, request_id, agent_id, subject, decision),
+        permission_data(sandbox_id, request_id, agent_id, command, decision),
     )
 }
 
@@ -68,11 +68,11 @@ pub fn permission_granted(
     sandbox_id: &str,
     request_id: &str,
     agent_id: &str,
-    subject: &str,
+    command: &str,
 ) -> Event {
     Event::new(
         PERMISSION_GRANTED,
-        permission_data(sandbox_id, request_id, agent_id, subject, "granted"),
+        permission_data(sandbox_id, request_id, agent_id, command, "granted"),
     )
 }
 
@@ -82,11 +82,11 @@ pub fn permission_denied(
     sandbox_id: &str,
     request_id: &str,
     agent_id: &str,
-    subject: &str,
+    command: &str,
 ) -> Event {
     Event::new(
         PERMISSION_DENIED,
-        permission_data(sandbox_id, request_id, agent_id, subject, "denied"),
+        permission_data(sandbox_id, request_id, agent_id, command, "denied"),
     )
 }
 
@@ -102,7 +102,7 @@ pub fn exec_completed(
     sandbox_id: &str,
     request_id: &str,
     agent_id: &str,
-    subject: &str,
+    command: &str,
     exit_code: i32,
     duration_ms: u64,
     stdout_bytes: u64,
@@ -114,7 +114,7 @@ pub fn exec_completed(
         "agent_id": agent_id,
         "resource": RESOURCE_SHELL,
         "action": ACTION_EXEC,
-        "subject": subject,
+        "command": command,
         "exit_code": exit_code,
         "duration_ms": duration_ms,
         "stdout_bytes": stdout_bytes,
@@ -129,7 +129,7 @@ pub fn session_started(
     sandbox_id: &str,
     request_id: &str,
     agent_id: &str,
-    subject: &str,
+    command: &str,
     session_id: &str,
 ) -> Event {
     let data = json!({
@@ -139,7 +139,7 @@ pub fn session_started(
         "agent_id": agent_id,
         "resource": RESOURCE_SHELL,
         "action": ACTION_EXEC,
-        "subject": subject,
+        "command": command,
     });
     Event::new(SESSION_STARTED, data)
 }
@@ -150,7 +150,7 @@ pub fn session_exited(
     sandbox_id: &str,
     request_id: &str,
     agent_id: &str,
-    subject: &str,
+    command: &str,
     session_id: &str,
     exit_code: i32,
     duration_ms: u64,
@@ -162,7 +162,7 @@ pub fn session_exited(
         "agent_id": agent_id,
         "resource": RESOURCE_SHELL,
         "action": ACTION_EXEC,
-        "subject": subject,
+        "command": command,
         "exit_code": exit_code,
         "duration_ms": duration_ms,
     });
@@ -194,7 +194,7 @@ mod tests {
                 "agent_id": "coder-1",
                 "resource": RESOURCE_SHELL,
                 "action": ACTION_EXEC,
-                "subject": "cargo test",
+                "command": "cargo test",
                 "decision": DECISION_AUTO,
             })
         );
@@ -224,7 +224,7 @@ mod tests {
                 "agent_id": "coder-1",
                 "resource": RESOURCE_SHELL,
                 "action": ACTION_EXEC,
-                "subject": "ls",
+                "command": "ls",
                 "exit_code": 0,
                 "duration_ms": 12,
                 "stdout_bytes": 32,
