@@ -52,6 +52,7 @@ flowchart LR
 | Inference endpoint | `agentd`        | Model gateway on the same Unix socket, behind the `infer` claim; streams transient deltas that are never logged (see [inference](inference.md)). |
 | `Provider`         | `agentd-inference` | Provider-neutral completion trait; the daemon ships a deterministic `FakeProvider`.                              |
 | Agent node         | `agentd-node`   | Node specialization that runs the agent loop: reacts to `agent.inbox`, infers, runs the shell tool, publishes (see [inference](inference.md)). |
+| Session manager    | `agentd`        | Supervises third-party tools as confined children and, through a per-protocol `Bridge`, gives them a CloudEvents face (see [session](session.md)). |
 
 ## Event model
 

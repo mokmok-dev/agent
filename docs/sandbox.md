@@ -289,7 +289,8 @@ inherit it, per-command `sandbox.permission.*` events are not emitted for a
 session — its lifecycle events are the audit trail.
 
 The daemon's session manager (`agentd::session`, behind the `sandbox` feature)
-drives this from the log: a `session.requested` event starts the *configured*
+drives this from the log; its unit and the protocol-conversion layer on top of
+it are specified in [session](session.md). A `session.requested` event starts the *configured*
 node command (never a command carried in the event), and its lifecycle is
 reported as `session.started`/`exited`/`failed`. Supervision is opt-in: a
 session may be restarted up to `max_restarts` times when it exits non-zero
