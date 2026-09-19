@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use agentd_events::{Event, EventLog, LogEntry};
 use base64::Engine as _;
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader,
@@ -23,6 +24,14 @@ use tokio::net::{TcpListener, TcpStream, UnixListener};
 use tokio::sync::Semaphore;
 
 use agentd_sandbox::HostPort;
+
+/// A client asks to reach a `host:port` that the static allowlist does not name.
+/// Reserved to daemon-authority publishers, so an agent cannot approve itself.
+pub const EGRESS_REQUESTED: &str = "session.egress.requested";
+/// An approver's grant for an [`EGRESS_REQUESTED`], correlated by `request_id`.
+pub const EGRESS_GRANTED: &str = "session.egress.granted";
+/// An approver's denial for an [`EGRESS_REQUESTED`], correlated by `request_id`.
+pub const EGRESS_DENIED: &str = "session.egress.denied";
 
 /// The largest request head (request line plus headers) the proxy reads before
 /// rejecting a connection. Bounds a pre-authentication client's memory.
@@ -36,23 +45,70 @@ const MAX_CONNECTIONS: usize = 256;
 pub const FORWARD_PORT: u16 = 31_828;
 
 /// The proxy allowlist: the `host:port` destinations a tunnel may open.
-#[derive(Clone, Debug, Default)]
+///
+/// A destination on the static allowlist is granted immediately. Anything else
+/// is, when an approver is configured, put to the human: a
+/// [`EGRESS_REQUESTED`] event goes on the log and the proxy waits for a matching
+/// [`EGRESS_GRANTED`]/[`EGRESS_DENIED`] under the same `request_id`. With no
+/// approver the unknown destination is denied. This is the safe way to let an
+/// agent ask for a host the operator did not pre-author, because the tunnel is
+/// the *only* egress path (the sandbox runs in a private network namespace), so
+/// the request cannot be bypassed.
+#[derive(Clone)]
 pub struct Egress {
     allowed: Arc<Vec<HostPort>>,
+    /// The log to ask on, and the timeout to wait for a decision; `None` denies
+    /// unknown hosts outright.
+    approver: Option<(EventLog, Duration)>,
+}
+
+impl std::fmt::Debug for Egress {
+    fn fmt(
+        &self,
+        formatter: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        formatter
+            .debug_struct("Egress")
+            .field("allowed", &self.allowed)
+            .field("has_approver", &self.approver.is_some())
+            .finish()
+    }
+}
+
+impl Default for Egress {
+    fn default() -> Self {
+        Self {
+            allowed: Arc::new(Vec::new()),
+            approver: None,
+        }
+    }
 }
 
 impl Egress {
-    /// Builds an allowlist from `destinations`.
+    /// Builds a static allowlist; a destination not on it is denied.
     #[must_use]
     pub fn new(destinations: Vec<HostPort>) -> Self {
         Self {
             allowed: Arc::new(destinations),
+            approver: None,
         }
     }
 
-    /// Whether a tunnel to `host:port` is permitted.
+    /// Adds an approver: a destination not on the static allowlist is put to the
+    /// log and waited on for `timeout`, then denied if no decision arrives.
     #[must_use]
-    pub fn allows(
+    pub fn with_approver(
+        mut self,
+        log: EventLog,
+        timeout: Duration,
+    ) -> Self {
+        self.approver = Some((log, timeout));
+        self
+    }
+
+    /// Whether a tunnel to `host:port` is on the static allowlist.
+    #[must_use]
+    fn listed(
         &self,
         host: &str,
         port: u16,
@@ -60,6 +116,98 @@ impl Egress {
         self.allowed.iter().any(|destination| {
             destination.port == port && destination.host.eq_ignore_ascii_case(host)
         })
+    }
+
+    /// Whether a tunnel to `host:port` is permitted, asking an approver when it
+    /// is not on the static allowlist.
+    async fn allows(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> bool {
+        if self.listed(host, port) {
+            return true;
+        }
+        let Some((log, timeout)) = &self.approver else {
+            return false;
+        };
+        self.ask(log, host, port, *timeout).await
+    }
+
+    /// Publishes a request and waits for a decision, denying on timeout.
+    async fn ask(
+        &self,
+        log: &EventLog,
+        host: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> bool {
+        // Subscribe before publishing, so a fast decision is not missed.
+        let mut decisions = log.subscribe();
+        let request_id = uuid::Uuid::now_v7().to_string();
+        let event = Event::new(
+            EGRESS_REQUESTED,
+            serde_json::json!({ "request_id": request_id, "host": host, "port": port }),
+        );
+        if let Err(error) = log.publish(event).await {
+            tracing::error!(%error, "failed to record an egress request");
+            return false;
+        }
+        if await_egress_decision(&mut decisions, &request_id, timeout).await {
+            return true;
+        }
+        // Record the denial (a timeout, or the approver's own denial is already
+        // in the log).
+        let denied = Event::new(
+            EGRESS_DENIED,
+            serde_json::json!({
+                "request_id": request_id,
+                "host": host,
+                "port": port,
+                "reason": "no approval within the timeout",
+            }),
+        );
+        if let Err(error) = log.publish(denied).await {
+            tracing::error!(%error, "failed to record an egress denial");
+        }
+        false
+    }
+}
+
+/// Waits for a decision on `request_id`: the same shape as the sandbox approval
+/// (`check` for the exact id, ignore unrelated events, a lagged subscriber keeps
+/// waiting, the bus closing or the timeout is a denial).
+async fn await_egress_decision(
+    receiver: &mut tokio::sync::broadcast::Receiver<LogEntry>,
+    request_id: &str,
+    timeout: Duration,
+) -> bool {
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            () = &mut deadline => return false,
+            incoming = receiver.recv() => match incoming {
+                Ok(recorded) => {
+                    let event = recorded.event;
+                    let matches = event
+                        .data
+                        .get("request_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(request_id);
+                    if !matches {
+                        continue;
+                    }
+                    match event.r#type.as_str() {
+                        EGRESS_GRANTED => return true,
+                        EGRESS_DENIED => return false,
+                        _ => {},
+                    }
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+            },
+        }
     }
 }
 
@@ -274,7 +422,7 @@ where
         )
         .await;
     }
-    if !egress.allows(&host, port) {
+    if !egress.allows(&host, port).await {
         tracing::warn!(%host, %port, "the proxy refused an egress destination");
         return reply(&mut client_write, 403, "Forbidden").await;
     }
@@ -432,10 +580,86 @@ fn parse_authority(authority: &str) -> Option<(String, u16)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Egress, Proxy, basic_authorization, parse_connect};
+    use super::{EGRESS_DENIED, EGRESS_GRANTED, Egress, Proxy, basic_authorization, parse_connect};
+    use agentd_events::{Event, EventLog};
     use agentd_sandbox::HostPort;
+    use serde_json::json;
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
+
+    #[tokio::test]
+    async fn an_unlisted_destination_is_denied_without_an_approver() {
+        let egress = Egress::default();
+        assert!(!egress.allows("evil.example.com", 443).await);
+    }
+
+    #[tokio::test]
+    async fn an_approver_can_grant_an_unlisted_destination() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = EventLog::open(dir.path().join("events.jsonl")).expect("log");
+        let egress = Egress::default().with_approver(log.clone(), Duration::from_secs(5));
+
+        // An approver grants the request when it sees it.
+        let mut events = log.subscribe();
+        let decider = tokio::spawn(async move {
+            while let Ok(entry) = events.recv().await {
+                if entry.event.r#type == super::EGRESS_REQUESTED {
+                    let request_id = entry.event.data["request_id"].clone();
+                    log.publish(Event::new(
+                        EGRESS_GRANTED,
+                        json!({ "request_id": request_id }),
+                    ))
+                    .await
+                    .expect("grant");
+                    return;
+                }
+            }
+        });
+
+        assert!(egress.allows("api.example.com", 443).await);
+        decider.await.expect("decider joins");
+    }
+
+    #[tokio::test]
+    async fn a_denied_destination_stays_denied() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = EventLog::open(dir.path().join("events.jsonl")).expect("log");
+        let egress = Egress::default().with_approver(log.clone(), Duration::from_secs(5));
+
+        let mut events = log.subscribe();
+        let decider = tokio::spawn(async move {
+            while let Ok(entry) = events.recv().await {
+                if entry.event.r#type == super::EGRESS_REQUESTED {
+                    let request_id = entry.event.data["request_id"].clone();
+                    log.publish(Event::new(
+                        EGRESS_DENIED,
+                        json!({ "request_id": request_id }),
+                    ))
+                    .await
+                    .expect("deny");
+                    return;
+                }
+            }
+        });
+
+        assert!(!egress.allows("evil.example.com", 443).await);
+        decider.await.expect("decider joins");
+    }
+
+    #[tokio::test]
+    async fn a_listed_destination_never_asks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = EventLog::open(dir.path().join("events.jsonl")).expect("log");
+        // A zero timeout: a listed destination must not consult the approver.
+        let egress = Egress::new(vec![HostPort {
+            host: String::from("api.example.com"),
+            port: 443,
+        }])
+        .with_approver(log, Duration::from_millis(1));
+
+        assert!(egress.allows("api.example.com", 443).await);
+    }
 
     #[test]
     fn only_allowlisted_destinations_pass() {
@@ -444,11 +668,11 @@ mod tests {
             port: 443,
         }]);
 
-        assert!(egress.allows("api.example.com", 443));
-        assert!(egress.allows("API.EXAMPLE.COM", 443));
-        assert!(!egress.allows("api.example.com", 80));
-        assert!(!egress.allows("evil.example.com", 443));
-        assert!(!Egress::default().allows("api.example.com", 443));
+        assert!(egress.listed("api.example.com", 443));
+        assert!(egress.listed("API.EXAMPLE.COM", 443));
+        assert!(!egress.listed("api.example.com", 80));
+        assert!(!egress.listed("evil.example.com", 443));
+        assert!(!Egress::default().listed("api.example.com", 443));
     }
 
     #[test]

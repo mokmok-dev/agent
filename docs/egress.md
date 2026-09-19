@@ -272,6 +272,27 @@ honours them; this was verified by observing its `CONNECT openrouter.ai:443`.
   inside a private network namespace with no IP route, reaching the model only
   through the mounted socket.
 
+## Approval for unlisted destinations
+
+A static allowlist is authored by the operator before the session runs. When an
+agent must reach a host the operator did not pre-author, the proxy can put the
+request to an approver instead of denying it:
+
+1. A `CONNECT host:port` not on the allowlist publishes `session.egress.requested`
+   with a `request_id`, and the proxy waits.
+2. An approver — any client with the `authority` claim — publishes
+   `session.egress.granted` / `session.egress.denied` with the same `request_id`.
+3. A grant opens the tunnel; a denial, or no decision within
+   `--session-egress-approval-secs`, answers `403`.
+
+The `session.*` type is reserved to authority publishers, so an agent cannot
+approve its own egress — the same guarantee the sandbox makes for its permission
+events (see [sandbox](sandbox.md#permission-and-violation-events)). Because the
+tunnel is the *only* egress path (a private network namespace with no route), an
+unlisted destination cannot be reached by bypassing the request, so the detection
+is complete. Approval is opt-in; without `--session-egress-approval-secs` an
+unlisted destination is denied outright, to avoid prompt fatigue.
+
 ## Implementation status
 
 Implemented: the `loopback`/`proxy`/`HostPort` policy fields with validation;
@@ -280,13 +301,18 @@ the Seatbelt loopback and proxy clauses; the bubblewrap private namespace; the
 forwarder** (`agentd-egress-forward`) that bridges loopback to the mounted
 socket; the Landlock helper's `NetPort` rules as the fallback for a loopback-TCP
 proxy; the model-driven backend selection, which fails closed without the
-required binary; and the `--session-egress host:port` / `--session-loopback`
-flags with the `NO_PROXY` injection.
+required binary; the **egress approval flow** (`session.egress.requested` /
+`granted` / `denied`, correlated by `request_id`, timeout denies); and the
+`--session-egress host:port` / `--session-egress-approval-secs SECS` /
+`--session-loopback` flags with the `NO_PROXY` injection.
 
 Verified end to end:
 
 - The proxy tunnels bytes to an allowed destination over both transports,
   refuses a denied one, and refuses a missing or wrong credential (`proxy.rs`).
+- An unlisted destination is denied with no approver, granted when an approver
+  grants it, kept denied when the approver denies it, and a listed destination
+  never consults the approver (`proxy.rs`).
 - In one `bwrap --unshare-all` namespace, external egress is `Network is
   unreachable` while the forwarder's loopback port reaches the mounted socket
   (`forward.rs` and a live run).
@@ -296,8 +322,6 @@ Verified end to end:
   latter inside the same no-egress namespace, reaching the model only through
   the socket.
 
-Not built: a private namespace with a veth to the host proxy (which would
-remove the ephemeral-range gap without enumerating ports, but unprivileged
-bubblewrap cannot create a veth), TLS-terminating credential injection, and a
-per-provider base-URL rewrite. The default policy still denies egress entirely;
-a session opts in with `--session-egress`.
+Not built: a private namespace with a veth to the host proxy (unprivileged
+bubblewrap cannot create one; the Unix-socket model removes the need),
+TLS-terminating credential injection, and a per-provider base-URL rewrite.

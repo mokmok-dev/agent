@@ -94,6 +94,14 @@ struct ServeArgs {
     /// cannot be combined with `--session-egress`.
     #[arg(long = "session-loopback")]
     session_loopback: bool,
+    /// Ask an approver (an authority client) before tunnelling to a `host:port`
+    /// that is not on a static `--session-egress` rule. The request is a
+    /// `session.egress.requested` event, granted or denied by a
+    /// `session.egress.granted`/`denied` under the same id; no decision within
+    /// this many seconds denies. Without this flag unknown destinations are
+    /// denied outright.
+    #[arg(long = "session-egress-approval-secs", value_name = "SECS")]
+    session_egress_approval_secs: Option<u64>,
     /// Restart a crashed session up to this many times.
     #[arg(long, default_value_t = 0)]
     session_max_restarts: u32,
@@ -205,8 +213,11 @@ struct SessionOptions {
     supervision: agentd::session::Supervision,
     bridge: Option<BridgeKind>,
     /// The `host:port` destinations the session's proxy may tunnel to. Empty
-    /// leaves egress denied.
+    /// leaves egress denied (unless approval is enabled).
     egress: Vec<agentd_sandbox::HostPort>,
+    /// How long to wait for an approver before denying a destination that is not
+    /// on the static allowlist. `None` denies unknown destinations outright.
+    egress_approval: Option<Duration>,
     /// Whether the session may use loopback freely (an ACP agent's internal
     /// HTTP server).
     loopback: bool,
@@ -229,6 +240,7 @@ fn start_session_manager(
         supervision,
         bridge,
         egress,
+        egress_approval,
         loopback,
         socket,
         ..
@@ -245,17 +257,20 @@ fn start_session_manager(
     // private network namespace with no IP route, and a Unix socket is a
     // filesystem object that crosses the namespace, so the child reaches the
     // proxy through its forwarder without any egress channel existing.
-    let proxy = if egress.is_empty() {
+    // A proxy exists when there is a static allowlist or an approver to consult;
+    // with neither, egress is denied outright.
+    let proxy = if egress.is_empty() && egress_approval.is_none() {
         None
     } else {
         let proxy_socket =
             std::env::temp_dir().join(format!("agentd-egress-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&proxy_socket);
-        let proxy = agentd::proxy::Proxy::start_unix(
-            &proxy_socket,
-            agentd::proxy::Egress::new(egress.clone()),
-        )
-        .map_err(RunError::Proxy)?;
+        let mut egress_config = agentd::proxy::Egress::new(egress.clone());
+        if let Some(timeout) = egress_approval {
+            egress_config = egress_config.with_approver(log.clone(), timeout);
+        }
+        let proxy = agentd::proxy::Proxy::start_unix(&proxy_socket, egress_config)
+            .map_err(RunError::Proxy)?;
         // The URL carries the proxy's per-session credential; a client sends it
         // as `Proxy-Authorization` so a different local process cannot reuse the
         // tunnel. On the Unix transport the URL names the child's forwarder port.
@@ -331,6 +346,7 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
         session_agent_id,
         session_egress,
         session_loopback,
+        session_egress_approval_secs,
         session_max_restarts,
         session_lifetime_secs,
         session_bridge,
@@ -364,6 +380,7 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
                 supervision,
                 bridge: session_bridge,
                 egress,
+                egress_approval: session_egress_approval_secs.map(Duration::from_secs),
                 loopback: session_loopback,
                 socket: socket.clone(),
             },
@@ -391,6 +408,7 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
             session_bridge,
             session_egress,
             session_loopback,
+            session_egress_approval_secs,
         );
     }
 

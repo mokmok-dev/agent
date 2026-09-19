@@ -17,29 +17,69 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread;
 
-/// Runs the forwarder: listen on `127.0.0.1:<port>` and bridge to `socket`.
+/// Runs the forwarder as a standalone bridge: listen on `127.0.0.1:<port>` and
+/// forward to `socket`, until the process is killed.
 ///
 /// # Errors
 ///
-/// Returns an I/O error if the loopback port cannot be bound or the Unix socket
-/// cannot be reached.
+/// Returns an I/O error if the loopback port cannot be bound.
 pub fn run(
     port: u16,
     socket: &Path,
 ) -> io::Result<()> {
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))?;
-    for client in listener.incoming() {
-        let Ok(client) = client else {
-            continue;
-        };
-        let socket = socket.to_path_buf();
-        thread::spawn(move || {
-            if let Err(error) = bridge(client, &socket) {
-                eprintln!("[agentd-egress-forward] {error}");
-            }
-        });
-    }
+    accept_loop(listener, socket.to_path_buf());
+    // Serve until the process is killed.
+    thread::park();
     Ok(())
+}
+
+/// Runs `command` under the forwarder.
+///
+/// The listener is bridged in a background thread and the command runs to
+/// completion, so every connection the command makes to `127.0.0.1:<port>`
+/// reaches the proxy on the other end of `socket`. Returns the command's exit
+/// code.
+///
+/// # Errors
+///
+/// Returns an I/O error if the port cannot be bound or the command cannot be
+/// spawned.
+pub fn run_command(
+    port: u16,
+    socket: &Path,
+    command: &[String],
+) -> io::Result<i32> {
+    let Some((program, args)) = command.split_first() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "no command to run",
+        ));
+    };
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))?;
+    accept_loop(listener, socket.to_path_buf());
+    let status = std::process::Command::new(program).args(args).status()?;
+    Ok(status.code().unwrap_or(1))
+}
+
+/// Spawns the accept thread; it forwards every loopback connection to `socket`.
+fn accept_loop(
+    listener: TcpListener,
+    socket: PathBuf,
+) {
+    thread::spawn(move || {
+        for client in listener.incoming() {
+            let Ok(client) = client else {
+                continue;
+            };
+            let socket = socket.clone();
+            thread::spawn(move || {
+                if let Err(error) = bridge(client, &socket) {
+                    eprintln!("[agentd-egress-forward] {error}");
+                }
+            });
+        }
+    });
 }
 
 /// Bridges one loopback connection to the Unix socket, copying both ways.
@@ -62,14 +102,26 @@ fn bridge(
     Ok(())
 }
 
-/// Parses the forwarder's command line: `--port <port> --socket <path>`.
+/// The forwarder's command line: `--port <port> --socket <path> [-- command...]`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Invocation {
+    /// The loopback port the forwarder listens on.
+    pub port: u16,
+    /// The mounted proxy socket.
+    pub socket: PathBuf,
+    /// A command to run under the forwarder, if any.
+    pub command: Vec<String>,
+}
+
+/// Parses the forwarder's arguments.
 ///
 /// # Errors
 ///
 /// Returns a message when an argument is missing or malformed.
-pub fn parse_args(args: &[String]) -> Result<(u16, PathBuf), String> {
+pub fn parse_args(args: &[String]) -> Result<Invocation, String> {
     let mut port = None;
     let mut socket = None;
+    let mut command = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -80,18 +132,26 @@ pub fn parse_args(args: &[String]) -> Result<(u16, PathBuf), String> {
             "--socket" => {
                 socket = Some(PathBuf::from(iter.next().ok_or("--socket needs a value")?));
             },
+            "--" => {
+                command.extend(iter.by_ref().cloned());
+                break;
+            },
             other => return Err(format!("unknown argument {other}")),
         }
     }
     match (port, socket) {
-        (Some(port), Some(socket)) => Ok((port, socket)),
-        _ => Err("usage: agentd-egress-forward --port <port> --socket <path>".into()),
+        (Some(port), Some(socket)) => Ok(Invocation {
+            port,
+            socket,
+            command,
+        }),
+        _ => Err("usage: agentd-egress-forward --port <port> --socket <path> [-- cmd...]".into()),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_args, run};
+    use super::{Invocation, parse_args, run};
     use std::io::{Read as _, Write as _};
     use std::net::{Ipv4Addr, TcpStream};
     use std::os::unix::net::UnixListener;
@@ -129,16 +189,28 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_port_and_socket() {
+    fn parses_the_port_socket_and_command() {
         let args = vec![
             String::from("--port"),
             String::from("3128"),
             String::from("--socket"),
             String::from("/run/proxy.sock"),
+            String::from("--"),
+            String::from("bash"),
+            String::from("-c"),
+            String::from("echo hi"),
         ];
         assert_eq!(
             parse_args(&args),
-            Ok((3128, PathBuf::from("/run/proxy.sock")))
+            Ok(Invocation {
+                port: 3128,
+                socket: PathBuf::from("/run/proxy.sock"),
+                command: vec![
+                    String::from("bash"),
+                    String::from("-c"),
+                    String::from("echo hi")
+                ],
+            })
         );
     }
 
