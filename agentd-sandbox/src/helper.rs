@@ -20,7 +20,7 @@ use std::process::ExitCode;
 
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, PathBeneath, PathFd, Ruleset, RulesetAttr,
-    RulesetCreatedAttr,
+    RulesetCreatedAttr, RulesetStatus,
 };
 use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetArch};
 use serde::{Deserialize, Serialize};
@@ -133,14 +133,22 @@ pub(crate) fn confine(
 /// children.
 ///
 /// Filesystem access is allowlisted by the rules. Network access is *handled*
-/// but never allowed, so TCP bind and connect are denied outright; `AF_UNIX`
-/// sockets are filesystem objects and are unaffected. Network handling needs
-/// Landlock ABI v4 (Linux 6.7) and is best-effort: on an older kernel it is
-/// silently dropped and egress is not confined.
+/// but never allowed unless the spec names a port, so TCP bind and connect are
+/// denied by default; `AF_UNIX` sockets are filesystem objects and are
+/// unaffected.
+///
+/// # Errors
+///
+/// Network handling needs Landlock ABI v4 (Linux 6.7). On an older kernel the
+/// crate drops it silently and each `NetPort` rule becomes a no-op, so a spec
+/// that grants a network port would run **unfiltered**. When the spec asks for
+/// network access this fails closed instead ([`RulesetStatus::FullyEnforced`]
+/// is required), so the caller never runs with more network than the policy.
 fn apply_landlock(spec: &Spec) -> Result<(), String> {
     let abi = ABI::V1;
     let handled = AccessFs::from_all(abi);
     let net = AccessNet::from_all(ABI::V4);
+    let wants_network = spec.connect_port.is_some() || !spec.bind_ports.is_empty();
     let mut ruleset = Ruleset::default()
         .handle_access(handled)
         .and_then(|ruleset| ruleset.handle_access(net))
@@ -159,10 +167,10 @@ fn apply_landlock(spec: &Spec) -> Result<(), String> {
             .add_rule(PathBeneath::new(fd, access))
             .map_err(|error| format!("cannot add a rule for {:?}: {error}", rule.path.display()))?;
     }
-    // Network is handled but no port is allowed unless the policy names one, so
-    // TCP bind and connect stay denied by default. A port rule is port-only:
-    // Landlock has no host dimension, but the granted port is the daemon proxy
-    // bound on loopback, so no other host is a reachable egress channel.
+    // A port rule is port-only: Landlock has no host dimension, so granting
+    // port `P` permits connecting to `P` on any address, not only the daemon
+    // proxy on loopback (see `docs/egress.md`). With no port named, TCP stays
+    // denied.
     for port in &spec.bind_ports {
         ruleset = ruleset
             .add_rule(NetPort::new(*port, AccessNet::BindTcp))
@@ -173,9 +181,15 @@ fn apply_landlock(spec: &Spec) -> Result<(), String> {
             .add_rule(NetPort::new(port, AccessNet::ConnectTcp))
             .map_err(|error| format!("cannot allow connect on port {port}: {error}"))?;
     }
-    ruleset
+    let status = ruleset
         .restrict_self()
         .map_err(|error| format!("cannot enforce the Landlock ruleset: {error}"))?;
+    if wants_network && status.ruleset != RulesetStatus::FullyEnforced {
+        return Err(String::from(
+            "the kernel cannot enforce Landlock network rules (needs ABI v4, Linux 6.7); \
+             refusing to run with the requested network access unfiltered",
+        ));
+    }
     Ok(())
 }
 

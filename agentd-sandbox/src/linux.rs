@@ -363,6 +363,10 @@ fn select_backend(
     scratch: &Path,
 ) -> Result<Backend, SandboxError> {
     match forced {
+        // The test-only forced backend bypasses the network-grant guard on
+        // purpose: it exists to render bwrap args without bwrap installed. It
+        // must stay `#[cfg(test)]`, or a network policy would silently get an
+        // unfiltered namespace.
         Some(ForcedBackend::Bubblewrap(bwrap)) => Ok(Backend::Bubblewrap(bwrap)),
         Some(ForcedBackend::Landlock(helper)) => {
             landlock_backend(policy, &helper, resolved, scratch)
