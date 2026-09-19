@@ -51,6 +51,8 @@
 mod error;
 mod events;
 mod executor;
+#[cfg(unix)]
+pub mod forward;
 #[cfg(target_os = "linux")]
 pub mod helper;
 #[cfg(target_os = "linux")]
