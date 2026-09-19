@@ -20,7 +20,6 @@
 //! `--unshare-all` nor Landlock isolates them by path. See `docs/sandbox.md`.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -30,9 +29,6 @@ use crate::executor::{ExecResult, SpawnError};
 use crate::helper::{PathAccess, PathRule, Spec};
 use crate::policy::{Access, FsPolicy, Policy};
 use crate::process;
-
-/// The shell the command runs under.
-const BASH: &str = "/bin/bash";
 
 /// The bubblewrap binary looked up on `PATH`.
 const BWRAP: &str = "bwrap";
@@ -46,9 +42,19 @@ const HELPER_ENV: &str = "AGENTD_SANDBOX_HELPER";
 
 /// The host roots a confined shell and its binaries need, bound read-only and
 /// executable on Linux. `/bin` and `/lib` may be symlinks into `/usr`, which
-/// Landlock resolves.
+/// Landlock resolves. `/nix` and `/run/current-system` cover NixOS, where the
+/// shell and its shared libraries live in the store rather than under `/usr`.
 const SYSTEM_ROOTS: &[&str] = &[
-    "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/usr", "/etc",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    "/usr",
+    "/etc",
+    "/nix",
+    "/run/current-system",
 ];
 
 /// Character devices a command commonly needs, granted read-write.
@@ -63,6 +69,8 @@ pub struct ConfinedProcessExecutor {
     backend: Backend,
     scratch: PathBuf,
     workdir: PathBuf,
+    /// The shell the command runs under, resolved on this host.
+    shell: PathBuf,
     /// Read-write roots, for the bubblewrap backend.
     writes: Vec<PathBuf>,
     /// Read-only carve-outs inside a write root, for the bubblewrap backend.
@@ -183,13 +191,15 @@ impl ConfinedProcessExecutor {
         let path_dirs = process::system_path_dirs();
         let path_env = process::join_path(&path_dirs)?;
         let scratch = process::create_scratch()?;
+        let shell = process::resolve_shell(&policy.fs);
         let resolved =
             resolve_entries(&policy.fs, &workdir, &scratch, &path_dirs).inspect_err(|_| {
                 let _ = fs::remove_dir_all(&scratch);
             })?;
-        let backend = select_backend(policy, forced, &resolved, &scratch).inspect_err(|_| {
-            let _ = fs::remove_dir_all(&scratch);
-        })?;
+        let backend =
+            select_backend(policy, forced, &resolved, &scratch, &shell).inspect_err(|_| {
+                let _ = fs::remove_dir_all(&scratch);
+            })?;
         let env = policy
             .shell
             .env
@@ -200,6 +210,7 @@ impl ConfinedProcessExecutor {
             backend,
             scratch,
             workdir,
+            shell,
             writes: resolved.writes,
             protected: resolved.protected,
             denies: resolved.denies,
@@ -222,7 +233,7 @@ impl ConfinedProcessExecutor {
                 let mut std_command = std::process::Command::new(helper);
                 std_command
                     .arg(spec_path)
-                    .arg(process::BASH)
+                    .arg(&self.shell)
                     .arg("-c")
                     .arg(command);
                 std_command
@@ -295,7 +306,7 @@ impl ConfinedProcessExecutor {
             .arg("--chdir")
             .arg(&self.workdir)
             .arg("--")
-            .arg(BASH)
+            .arg(&self.shell)
             .arg("-c")
             .arg(command);
         std_command
@@ -361,6 +372,7 @@ fn select_backend(
     forced: Option<ForcedBackend>,
     resolved: &Resolved,
     scratch: &Path,
+    shell: &Path,
 ) -> Result<Backend, SandboxError> {
     match forced {
         // The test-only forced backend bypasses the network-grant guard on
@@ -369,7 +381,7 @@ fn select_backend(
         // unfiltered namespace.
         Some(ForcedBackend::Bubblewrap(bwrap)) => Ok(Backend::Bubblewrap(bwrap)),
         Some(ForcedBackend::Landlock(helper)) => {
-            landlock_backend(policy, &helper, resolved, scratch)
+            landlock_backend(policy, &helper, resolved, scratch, shell)
         },
         None => {
             if network_grants(policy) {
@@ -379,13 +391,13 @@ fn select_backend(
                          bubblewrap cannot filter by port and the helper is unavailable",
                     ))
                 })?;
-                return landlock_backend(policy, &helper, resolved, scratch);
+                return landlock_backend(policy, &helper, resolved, scratch, shell);
             }
             if let Some(bwrap) = find_on_path(BWRAP, Some(&policy.fs)) {
                 return Ok(Backend::Bubblewrap(bwrap));
             }
             let helper = find_helper(&policy.fs)?;
-            landlock_backend(policy, &helper, resolved, scratch)
+            landlock_backend(policy, &helper, resolved, scratch, shell)
         },
     }
 }
@@ -396,9 +408,10 @@ fn landlock_backend(
     helper: &Path,
     resolved: &Resolved,
     scratch: &Path,
+    shell: &Path,
 ) -> Result<Backend, SandboxError> {
-    ensure_denies_enforceable(resolved, scratch)?;
-    let spec = build_spec(policy, resolved, scratch);
+    ensure_denies_enforceable(resolved, scratch, shell)?;
+    let spec = build_spec(policy, resolved, scratch, shell);
     let spec_path = scratch.join("spec.json");
     fs::write(
         &spec_path,
@@ -421,8 +434,9 @@ fn landlock_backend(
 fn ensure_denies_enforceable(
     resolved: &Resolved,
     scratch: &Path,
+    shell: &Path,
 ) -> Result<(), SandboxError> {
-    let granted = granted_paths(resolved, scratch);
+    let granted = granted_roots(resolved, scratch, shell);
     for deny in &resolved.denies {
         if let Some(root) = granted.iter().find(|root| deny.path.starts_with(root)) {
             return Err(SandboxError::InvalidPolicy(format!(
@@ -435,39 +449,24 @@ fn ensure_denies_enforceable(
     Ok(())
 }
 
-/// The canonical paths the Landlock allowlist grants, for deny comparison.
-fn granted_paths(
-    resolved: &Resolved,
-    scratch: &Path,
-) -> Vec<PathBuf> {
-    let mut granted: Vec<PathBuf> = SYSTEM_ROOTS
-        .iter()
-        .copied()
-        .chain(DEVICES.iter().copied())
-        .chain(["/proc"])
-        .filter_map(|path| PathBuf::from(path).canonicalize().ok())
-        .collect();
-    granted.extend(resolved.reads.iter().cloned());
-    granted.extend(resolved.writes.iter().cloned());
-    granted.extend(scratch.canonicalize());
-    granted.sort();
-    granted.dedup();
-    granted
-}
-
-/// Renders the resolved policy into a Landlock spec.
+/// The unmerged path rules the policy grants, in a fixed order.
 ///
-/// System roots and devices a shell needs are granted; read entries are granted
-/// read-only; write roots and the scratch directory are granted read-write;
-/// `deny` entries are simply omitted, because Landlock cannot subtract.
-fn build_spec(
-    policy: &Policy,
+/// [`build_spec`] merges overlapping paths to the maximal access; this list is
+/// also the source [`granted_roots`] checks a `deny` against, so the two cannot
+/// drift (a `deny` under any granted root is unenforceable by Landlock).
+fn policy_rules(
     resolved: &Resolved,
     scratch: &Path,
-) -> Spec {
+    shell: &Path,
+) -> Vec<PathRule> {
     let mut paths: Vec<PathRule> = Vec::new();
     for root in SYSTEM_ROOTS {
         push_existing(&mut paths, PathBuf::from(root), PathAccess::ReadExecute);
+    }
+    // The resolved shell may live outside every system root (e.g. a per-user
+    // profile); grant its directory read-execute so the command can start.
+    if let Some(parent) = shell.parent() {
+        push_existing(&mut paths, parent.to_path_buf(), PathAccess::ReadExecute);
     }
     for device in DEVICES {
         push_existing(&mut paths, PathBuf::from(device), PathAccess::Write);
@@ -485,7 +484,40 @@ fn build_spec(
         path: scratch.to_path_buf(),
         access: PathAccess::Write,
     });
-    paths.sort_by(|left, right| left.path.cmp(&right.path));
+    paths
+}
+
+/// The canonical paths the Landlock allowlist grants, for deny comparison.
+fn granted_roots(
+    resolved: &Resolved,
+    scratch: &Path,
+    shell: &Path,
+) -> Vec<PathBuf> {
+    policy_rules(resolved, scratch, shell)
+        .into_iter()
+        .filter_map(|rule| rule.path.canonicalize().ok())
+        .collect()
+}
+
+/// Renders the resolved policy into a Landlock spec.
+///
+/// System roots and devices a shell needs are granted; read entries are granted
+/// read-only; write roots and the scratch directory are granted read-write;
+/// `deny` entries are simply omitted, because Landlock cannot subtract. Two
+/// rules on the same path merge to the *maximal* access, so a grant cannot
+/// silently weaken a write root that happens to hold the shell.
+fn build_spec(
+    policy: &Policy,
+    resolved: &Resolved,
+    scratch: &Path,
+    shell: &Path,
+) -> Spec {
+    let mut paths = policy_rules(resolved, scratch, shell);
+    paths.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| right.access.rank().cmp(&left.access.rank()))
+    });
     paths.dedup_by(|left, right| left.path == right.path);
     let mut bind_ports = policy.network.loopback_bind.clone();
     bind_ports.sort_unstable();
@@ -517,30 +549,15 @@ fn find_on_path(
     name: &str,
     fs_policy: Option<&FsPolicy>,
 ) -> Option<PathBuf> {
-    let workspace_roots: Vec<PathBuf> = fs_policy
-        .map(|policy| {
-            policy
-                .entries
-                .iter()
-                .filter(|entry| entry.access == Access::Write)
-                .filter_map(|entry| entry.path.canonicalize().ok())
-                .collect()
-        })
-        .unwrap_or_default();
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).find_map(|dir| {
         let candidate = dir.join(name);
-        if !is_executable(&candidate) {
+        if !process::is_executable(&candidate) {
             return None;
         }
-        let canonical = candidate.canonicalize().ok()?;
-        if workspace_roots
-            .iter()
-            .any(|root| canonical.starts_with(root))
-        {
-            return None;
-        }
-        Some(candidate)
+        let trusted =
+            fs_policy.is_none_or(|policy| process::is_outside_write_roots(&candidate, policy));
+        trusted.then_some(candidate)
     })
 }
 
@@ -549,7 +566,9 @@ fn find_on_path(
 fn find_helper(fs_policy: &FsPolicy) -> Result<PathBuf, SandboxError> {
     if let Some(configured) = std::env::var_os(HELPER_ENV) {
         let candidate = PathBuf::from(configured);
-        if is_executable(&candidate) && find_on_path_is_trusted(&candidate, fs_policy) {
+        if process::is_executable(&candidate)
+            && process::is_outside_write_roots(&candidate, fs_policy)
+        {
             return Ok(candidate);
         }
         return Err(SandboxError::UnsupportedPlatform(
@@ -559,28 +578,6 @@ fn find_helper(fs_policy: &FsPolicy) -> Result<PathBuf, SandboxError> {
     find_on_path(HELPER, Some(fs_policy)).ok_or(SandboxError::UnsupportedPlatform(
         "no confinement backend: bubblewrap and the `agentd-sandbox-helper` are both unavailable",
     ))
-}
-
-/// Whether `candidate` is outside every write root.
-fn find_on_path_is_trusted(
-    candidate: &Path,
-    fs_policy: &FsPolicy,
-) -> bool {
-    let Ok(canonical) = candidate.canonicalize() else {
-        return false;
-    };
-    !fs_policy
-        .entries
-        .iter()
-        .filter(|entry| entry.access == Access::Write)
-        .filter_map(|entry| entry.path.canonicalize().ok())
-        .any(|root| canonical.starts_with(root))
-}
-
-/// Whether `path` is a regular executable file.
-fn is_executable(path: &Path) -> bool {
-    fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 /// Resolves the write, read, protected, and deny entries into canonical paths.
@@ -702,7 +699,7 @@ fn resolve_entries(
 mod tests {
     use super::{BWRAP, Backend, ConfinedProcessExecutor, find_on_path};
     use crate::executor::Executor;
-    use crate::helper::{PathAccess, PathRule, Spec};
+    use crate::helper::{PathAccess, Spec};
     use crate::policy::{Access, EnvVar, FsEntry, FsPolicy, Policy, ShellPolicy};
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
@@ -1139,38 +1136,48 @@ mod tests {
     }
 
     #[test]
+    fn the_resolved_shell_is_executable() {
+        // A non-FHS host (NixOS) keeps its shell under `/nix/store`; resolution
+        // must find a runnable one rather than assume `/bin/bash`.
+        let shell = crate::process::resolve_shell(&FsPolicy::default());
+        assert!(
+            shell.is_file(),
+            "the resolved shell must exist: {}",
+            shell.display()
+        );
+    }
+
+    #[test]
+    fn the_executor_confines_on_a_non_fhs_host() {
+        // Regression guard: before shell resolution, the probe used `/bin/bash`,
+        // which NixOS lacks, so every Landlock test silently skipped. When the
+        // helper exists and the kernel can confine, the probe must now succeed.
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        // `landlock_executor` itself probes the kernel and returns `None` on a
+        // host it cannot confine, so `None` here is a skip, not a failure.
+        let Some(executor) = landlock_executor(&workdir_policy(&host)) else {
+            return;
+        };
+
+        let result = executor.blocking_exec("echo confined-ok");
+        assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+        assert!(result.stdout.contains("confined-ok"));
+    }
+
+    #[test]
     fn landlock_grants_only_the_named_connect_port() {
         if !helper_path().exists() {
             return;
         }
-        // The executor's probe uses `/bin/bash`, which some distributions lack
-        // (e.g. NixOS), so drive the helper directly with a hand-built spec to
-        // test the network filter itself rather than the FHS assumption.
-        let Some(shell) = find_on_path("bash", None) else {
+        // The connect probe uses bash's `/dev/tcp`; skip if the resolved shell
+        // is not bash, before starting a listener and its accept thread.
+        let resolved_is_bash = crate::process::resolve_shell(&FsPolicy::default())
+            .file_name()
+            .is_some_and(|name| name == "bash");
+        if !resolved_is_bash {
             return;
-        };
-        // Grant the shell's own store and the FHS system roots read-execute.
-        let mut paths: Vec<PathRule> = [
-            shell.parent().and_then(Path::parent),
-            Some(Path::new("/nix")),
-        ]
-        .into_iter()
-        .flatten()
-        .map(|path| PathRule {
-            path: path.to_path_buf(),
-            access: PathAccess::ReadExecute,
-        })
-        .collect();
-        for root in ["/usr", "/bin", "/lib", "/lib64", "/etc"] {
-            let path = PathBuf::from(root);
-            if path.exists() {
-                paths.push(PathRule {
-                    path,
-                    access: PathAccess::ReadExecute,
-                });
-            }
         }
-
         // A listener the confined command may reach only on its port.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let allowed_port = listener.local_addr().expect("addr").port();
@@ -1183,41 +1190,33 @@ mod tests {
         });
 
         let dir = TempDir::new().expect("tempdir");
-        let spec_path = dir.path().join("spec.json");
-        let spec = Spec {
-            paths,
-            bind_ports: Vec::new(),
-            connect_port: Some(allowed_port),
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        let mut policy = workdir_policy(&host);
+        policy.network.proxy = Some(crate::policy::Proxy {
+            port: allowed_port,
+            egress: Vec::new(),
+        });
+        let Some(executor) = landlock_executor(&policy) else {
+            return;
         };
-        std::fs::write(
-            &spec_path,
-            serde_json::to_vec(&spec).expect("serialize the spec"),
-        )
-        .expect("write the spec");
 
         let connect = |port: u16| {
-            std::process::Command::new(helper_path())
-                .arg(&spec_path)
-                .arg(&shell)
-                .arg("-c")
-                .arg(format!("exec 3<>/dev/tcp/127.0.0.1/{port} && echo open"))
-                .output()
-                .expect("the helper runs")
+            executor.blocking_exec(&format!("exec 3<>/dev/tcp/127.0.0.1/{port} && echo open"))
         };
 
         // The proxy port is reachable; a different loopback port is denied.
         let allowed = connect(allowed_port);
         assert!(
-            allowed.status.success() && String::from_utf8_lossy(&allowed.stdout).contains("open"),
+            allowed.exit_code == 0 && allowed.stdout.contains("open"),
             "the proxy port must be reachable: {}",
-            String::from_utf8_lossy(&allowed.stderr)
+            allowed.stderr
         );
 
         let denied = connect(deny_port);
-        assert!(
-            !denied.status.success(),
+        assert_ne!(
+            denied.exit_code, 0,
             "a port outside the policy must be denied: {}",
-            String::from_utf8_lossy(&denied.stdout)
+            denied.stdout
         );
     }
 

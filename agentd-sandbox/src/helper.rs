@@ -60,6 +60,18 @@ pub(crate) enum PathAccess {
     Write,
 }
 
+impl PathAccess {
+    /// A total order for merging two rules on the same path: a higher rank
+    /// grants strictly more, so the maximum wins.
+    pub(crate) const fn rank(self) -> u8 {
+        match self {
+            Self::Read => 0,
+            Self::ReadExecute => 1,
+            Self::Write => 2,
+        }
+    }
+}
+
 /// The syscalls the helper refuses with `EPERM`.
 ///
 /// This is a deny-list, a defence in depth on top of Landlock and the network

@@ -39,10 +39,67 @@ pub const SYSTEM_BIN_DIRS: &[&str] = &[
     "/usr/sbin",
     "/usr/local/bin",
     "/opt/homebrew/bin",
+    // NixOS puts the login shell and system tools here.
+    "/run/current-system/sw/bin",
 ];
 
-/// The shell a confined command runs under, like every backend's `-c` wrapper.
-pub const BASH: &str = "/bin/bash";
+/// The shell a confined command runs under when no better one is found.
+pub const FALLBACK_SHELL: &str = "/bin/bash";
+
+/// Resolves the shell a confined command runs under.
+///
+/// `bash` on `PATH`, then `/bin/bash`, then `/bin/sh`: a distribution may put its
+/// shell anywhere (NixOS keeps it under `/nix/store`), so a hard-coded path would
+/// fail to start even when a usable shell exists. The resolved path is
+/// canonicalized so the confinement profile grants the directory actually
+/// executed, and it is rejected when it sits inside a policy write root, so a
+/// repository cannot supply the shell that runs under the boundary (the same
+/// rule `find_on_path` applies to `bwrap` and the helper).
+///
+/// When nothing resolves it returns [`FALLBACK_SHELL`], which may not exist; the
+/// subsequent spawn then fails closed with a clear "cannot execute".
+///
+/// It deliberately does not consult `$SHELL`: the operator controls it, and a
+/// non-bash login shell (zsh, fish) would run the bash-syntax commands the tool
+/// assumes.
+#[must_use]
+pub fn resolve_shell(fs: &FsPolicy) -> PathBuf {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&path).map(|dir| dir.join("bash")));
+    }
+    candidates.push(PathBuf::from(FALLBACK_SHELL));
+    candidates.push(PathBuf::from("/bin/sh"));
+    candidates
+        .into_iter()
+        .filter(|candidate| is_executable(candidate) && is_outside_write_roots(candidate, fs))
+        .find_map(|candidate| candidate.canonicalize().ok())
+        // Nothing resolved: return the conventional path so the spawn fails with
+        // a clear "cannot execute" rather than a silently empty argument.
+        .unwrap_or_else(|| PathBuf::from(FALLBACK_SHELL))
+}
+
+/// Whether `path` is a regular executable file.
+pub fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+/// Whether `candidate` resolves outside every policy write root.
+pub fn is_outside_write_roots(
+    candidate: &Path,
+    fs: &FsPolicy,
+) -> bool {
+    let Ok(canonical) = candidate.canonicalize() else {
+        return false;
+    };
+    !fs.entries
+        .iter()
+        .filter(|entry| entry.access == Access::Write)
+        .filter_map(|entry| entry.path.canonicalize().ok())
+        .any(|root| canonical.starts_with(root))
+}
 
 /// A refusal result for a command that never ran.
 #[must_use]
@@ -291,4 +348,46 @@ pub fn join_path(path_dirs: &[PathBuf]) -> Result<String, SandboxError> {
         .map_err(|error| {
             SandboxError::InvalidPolicy(format!("confined PATH is malformed: {error}"))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_outside_write_roots, resolve_shell};
+    use crate::policy::{Access, FsEntry, FsPolicy};
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolve_shell_returns_an_existing_path() {
+        // Any host with a shell resolves one that exists.
+        let shell = resolve_shell(&FsPolicy::default());
+        assert!(
+            shell.is_file(),
+            "the resolved shell must exist: {}",
+            shell.display()
+        );
+    }
+
+    #[test]
+    fn resolve_shell_avoids_a_write_root() {
+        // A temporary working directory standing in for the workspace.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workdir = dir.path().canonicalize().expect("canonical");
+
+        // The behavior under test is the trust filter itself: a candidate under
+        // a write root is rejected; the same candidate outside it is not.
+        let policy = FsPolicy {
+            entries: vec![FsEntry {
+                path: workdir.clone(),
+                access: Access::Write,
+            }],
+            ..FsPolicy::default()
+        };
+        assert!(!is_outside_write_roots(&workdir.join("bash"), &policy));
+        // An existing path outside the write root is trusted. `/` exists on
+        // every host, and is not the write root.
+        assert!(is_outside_write_roots(
+            &PathBuf::from("/"),
+            &FsPolicy::default()
+        ));
+    }
 }

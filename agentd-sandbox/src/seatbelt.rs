@@ -33,7 +33,7 @@ use std::time::Duration;
 use crate::error::SandboxError;
 use crate::executor::{ExecResult, SpawnError};
 use crate::policy::{Access, FsPolicy, Policy};
-use crate::process::{self, BASH};
+use crate::process;
 
 /// The Seatbelt front-end. Unconfined itself: it applies the profile to its
 /// child.
@@ -48,6 +48,8 @@ pub struct ConfinedProcessExecutor {
     profile_path: PathBuf,
     scratch: PathBuf,
     workdir: PathBuf,
+    /// The shell the command runs under, resolved on this host.
+    shell: PathBuf,
     env: Vec<(String, String)>,
     path_env: String,
     timeout: Duration,
@@ -116,6 +118,7 @@ impl ConfinedProcessExecutor {
             profile_path,
             scratch,
             workdir,
+            shell: process::resolve_shell(&policy.fs),
             env,
             path_env,
             timeout: policy.limits.timeout,
@@ -134,7 +137,7 @@ impl ConfinedProcessExecutor {
         std_command
             .arg("-f")
             .arg(&self.profile_path)
-            .arg(BASH)
+            .arg(&self.shell)
             .arg("-c")
             .arg(command);
         std_command.env_clear();
