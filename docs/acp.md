@@ -189,13 +189,17 @@ A narrow host:port egress grant, the obvious fix, is **not achievable on Linux**
   host dimension. A host:port allowlist cannot be enforced.
 
 So the honest options are a blanket reopen (rejected: it discards the boundary)
-or the **managed-proxy model** the sandbox design already deferred
-(`docs/sandbox.md#stated-gaps`): a daemon-side proxy that speaks the provider API
-and holds the credentials, with the agent's base URL pointed at it over the
-granted Unix socket. That is a separate, opt-in layer with its own design and is
-**not built**. Until then, `AcpBridge` is exercised only against local or
-offline ACP agents, and this document is the record of why the network path is
-open.
+or a **managed proxy**. The latter is now designed in [egress](egress.md): the
+daemon runs a CONNECT proxy, the OS grants only the proxy's loopback port, and
+the proxy enforces a `host:port` allowlist. A session opts in with
+`--session-egress`. It is an opaque tunnel — no TLS termination and no
+credential injection — so the agent still holds its own provider key.
+
+Two things remain before a real agent runs confined: the agent must honour the
+injected proxy env (see the egress doc's stated gap), and starting an agent
+inside the sandbox still needs its own state directory and its loopback bind
+(`--session-loopback-bind`), plus the NixOS shell/roots portability fix. The
+example runs the agent unconfined until then.
 
 ## Testing strategy
 

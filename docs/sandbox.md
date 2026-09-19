@@ -54,10 +54,11 @@ Non-goals (stated honestly, per the Sheena precedent):
 - The sandbox is not a boundary for hostile native code. It confines the tool
   calls an agent *requests* against a configured policy.
 - **No general network allowlist.** Egress is denied outright, not filtered by
-  host; the only network grant is a per-path Unix socket the daemon itself
-  needs. A future non-daemon remote service would need the managed-proxy model
-  (codex's `network-proxy` + netns bridge) as a separate, opt-in layer; it is
-  not built now because the daemon-mediated path covers inference.
+  host; the only network grants are per-path Unix sockets the daemon itself
+  needs, plus the opt-in managed proxy in [egress](egress.md) (a loopback port
+  the daemon's CONNECT proxy listens on; the proxy, not the OS, enforces the
+  host allowlist). The OS still has no host/IP allowlist, because Linux cannot
+  enforce one.
 - **Cedar is not adopted.** A policy language was considered for the path rules
   and dropped: the rules are path lists with three access levels, and the layer-1
   profile is rendered from them directly. Revisit only if policies must be
