@@ -65,12 +65,6 @@ impl Policy {
                 }
             }
         }
-        if self.network.loopback && self.network.proxy.is_some() {
-            // Loopback is a private namespace and the proxy is a port filter on
-            // the shared network; a child cannot have both, so the policy is
-            // rejected rather than silently dropping one.
-            return Err(PolicyError::LoopbackAndProxy);
-        }
         Ok(())
     }
 }
@@ -106,12 +100,6 @@ pub enum PolicyError {
     /// An egress host must be a non-empty, profile-representable string.
     #[error("egress host {0:?} must be non-empty and representable in the profile")]
     InvalidEgressHost(String),
-    /// Loopback and the proxy cannot both be granted: they need different
-    /// network models.
-    #[error(
-        "loopback and proxy cannot both be granted: loopback needs a private network namespace, the proxy a shared one"
-    )]
-    LoopbackAndProxy,
 }
 
 /// Filesystem policy for the OS confinement profile.
@@ -165,14 +153,20 @@ pub enum Access {
 /// Network policy for the OS confinement profile.
 ///
 /// The default grants nothing. A named Unix domain socket is a local
-/// destination. The only IP grants are [`loopback`](NetworkPolicy::loopback) (a
+/// destination. The IP grants are [`loopback`](NetworkPolicy::loopback) (a
 /// command's own loopback server and client, e.g. an ACP agent's internal HTTP
 /// server) and [`proxy`](NetworkPolicy::proxy) (a single daemon-run CONNECT
-/// proxy). The two are **mutually exclusive**: loopback is served by a private
-/// network namespace and the proxy by a port-scoped filter on the shared
-/// network, and a policy cannot ask for both (see `docs/egress.md`). There is no
-/// general host/IP allowlist: Linux cannot enforce one, so the proxy enforces
-/// the egress allowlist.
+/// proxy). See `docs/egress.md` for the two models:
+///
+/// - **`loopback` alone** is served by a private network namespace: the command
+///   has loopback and *no* egress.
+/// - **`proxy`** is served by a port-scoped filter on the *shared* network: the
+///   command can reach the daemon's proxy and nothing else. Combining it with
+///   `loopback` also grants the command its own loopback server, which is what a
+///   networked ACP agent needs (its internal server plus the proxy).
+///
+/// There is no general host/IP allowlist: Linux cannot enforce one, so the proxy
+/// enforces the egress allowlist.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NetworkPolicy {
@@ -181,10 +175,10 @@ pub struct NetworkPolicy {
     /// use a path ending with this one (normally the same path string).
     pub unix_sockets: Vec<PathBuf>,
     /// Whether the command may use loopback TCP freely: bind a server of its own
-    /// and connect to it at whatever port it chose (an ACP agent starts an
-    /// internal HTTP server on an ephemeral port and talks to it). On Linux this
-    /// is a private network namespace, so loopback is reachable and no other
-    /// host is; on macOS it is a loopback-scoped Seatbelt grant.
+    /// and connect to it at whatever ephemeral port it chose (an ACP agent
+    /// starts an internal HTTP server on an ephemeral port and talks to it).
+    /// Alone this is a private network namespace; with a `proxy` it is the
+    /// shared network with the ephemeral range reachable.
     pub loopback: bool,
     /// The daemon's CONNECT proxy, when the command may reach the network
     /// through it. The OS grants the port; the proxy enforces the allowlist.
@@ -344,9 +338,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_loopback_with_proxy() {
-        // The two network models are exclusive: loopback needs a private
-        // namespace, the proxy a shared one.
+    fn validate_allows_loopback_with_proxy() {
+        // A networked ACP agent needs both its own loopback server and the
+        // daemon proxy, so the combination is valid.
         let both = Policy {
             network: NetworkPolicy {
                 loopback: true,
@@ -359,7 +353,7 @@ mod tests {
             ..Policy::default()
         };
 
-        assert_eq!(both.validate(), Err(PolicyError::LoopbackAndProxy));
+        assert_eq!(both.validate(), Ok(()));
     }
 
     #[test]

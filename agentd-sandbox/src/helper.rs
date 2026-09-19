@@ -31,10 +31,15 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct Spec {
     /// The path rules, evaluated as an allowlist.
     pub paths: Vec<PathRule>,
-    /// The single TCP port the command may connect to (the daemon proxy).
-    /// `None` denies all TCP connect, as before. Loopback needs no port here:
-    /// it is served by a private network namespace, not by this filter.
-    pub connect_port: Option<u16>,
+    /// The TCP ports the command may bind. `0` means the ephemeral range
+    /// (`/proc/sys/net/ipv4/ip_local_port_range`), which is the one form
+    /// Landlock gives a range for. Empty denies all TCP bind.
+    pub bind_ports: Vec<u16>,
+    /// The TCP ports the command may connect to. Landlock has no port-range
+    /// rule for connect (`0` covers bind only), so an ephemeral range is a long
+    /// list; the kernel accepts ~28k rules in a few milliseconds. Empty denies
+    /// all TCP connect.
+    pub connect_ports: Vec<u16>,
 }
 
 /// One Landlock path rule.
@@ -168,7 +173,8 @@ fn apply_landlock(spec: &Spec) -> Result<(), String> {
     // a port is granted does the handling need to be a hard requirement, so a
     // kernel without ABI v4 fails closed instead of silently ignoring it.
     let net = AccessNet::from_all(ABI::V4);
-    let level = if spec.connect_port.is_some() {
+    let wants_network = !spec.bind_ports.is_empty() || !spec.connect_ports.is_empty();
+    let level = if wants_network {
         CompatLevel::HardRequirement
     } else {
         CompatLevel::BestEffort
@@ -204,12 +210,16 @@ fn apply_landlock(spec: &Spec) -> Result<(), String> {
             .map_err(|error| format!("cannot add a rule for {:?}: {error}", rule.path.display()))?;
     }
     // A port rule is port-only: Landlock has no host dimension, so granting
-    // port `P` permits connecting to `P` on any address, not only the daemon
-    // proxy on loopback (see `docs/egress.md`). With no port named, TCP stays
-    // denied.
-    if let Some(port) = spec.connect_port {
+    // port `P` permits bind or connect on `P` on any address, not only loopback
+    // (see `docs/egress.md`). With no port named, TCP stays denied.
+    for port in &spec.bind_ports {
         ruleset = ruleset
-            .add_rule(NetPort::new(port, AccessNet::ConnectTcp))
+            .add_rule(NetPort::new(*port, AccessNet::BindTcp))
+            .map_err(|error| format!("cannot allow bind on port {port}: {error}"))?;
+    }
+    for port in &spec.connect_ports {
+        ruleset = ruleset
+            .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
             .map_err(|error| format!("cannot allow connect on port {port}: {error}"))?;
     }
     ruleset

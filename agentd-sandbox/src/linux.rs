@@ -352,20 +352,23 @@ enum ForcedBackend {
     Landlock(PathBuf),
 }
 
-/// Chooses the backend: a forced one, else `bwrap`, else the Landlock helper.
+/// Chooses the backend: a forced one, else the model the policy asks for.
 ///
-/// The two network models decide this:
+/// The network model decides this (see `docs/egress.md`):
 ///
-/// - **Loopback** needs a *private network namespace* (only loopback exists), so
-///   it must use the bubblewrap backend's `--unshare-all`; the Landlock fallback
-///   cannot express it and construction fails closed without `bwrap`.
-/// - **The proxy** needs the *shared* network with a single port open, so it
-///   must use the Landlock helper's `NetPort` filter; bubblewrap cannot filter
-///   by port. Construction fails closed without the helper.
+/// - **Loopback alone** is a *private network namespace*: only loopback exists,
+///   so there is no egress path at all. That is bubblewrap's `--unshare-all`;
+///   without `bwrap` construction fails closed.
+/// - **A proxy** needs the *shared* network with only the proxy port (and, if
+///   `loopback` is also granted, the ephemeral range for the command's own
+///   server) open. Only the Landlock helper can filter by port; without it
+///   construction fails closed.
 /// - Neither: prefer bubblewrap (namespaces plus mounts) and fall back to
 ///   Landlock for the filesystem and seccomp.
 ///
-/// `Policy::validate` rejects a policy that asks for both.
+/// `Policy::validate` allows `loopback` with `proxy`; that combination takes the
+/// shared network and the port filter, so it uses the helper (not a private
+/// namespace, which could not reach the host proxy).
 fn select_backend(
     policy: &Policy,
     forced: Option<ForcedBackend>,
@@ -382,7 +385,8 @@ fn select_backend(
             landlock_backend(policy, &helper, resolved, scratch, shell)
         },
         None => {
-            if policy.network.loopback {
+            let private_loopback = policy.network.loopback && policy.network.proxy.is_none();
+            if private_loopback {
                 return find_on_path(BWRAP, Some(&policy.fs))
                     .map(Backend::Bubblewrap)
                     .ok_or_else(|| {
@@ -527,11 +531,49 @@ fn build_spec(
             .then_with(|| right.access.rank().cmp(&left.access.rank()))
     });
     paths.dedup_by(|left, right| left.path == right.path);
+
+    // The port rules. With a proxy the network is shared, so a command that also
+    // needs loopback (an ACP agent's own server) gets the ephemeral range:
+    // bind via the one range form Landlock offers (`0`), connect via an explicit
+    // list (Landlock has no connect range). The proxy port is always connectable.
+    let proxy_port = policy.network.proxy.as_ref().map(|proxy| proxy.port);
+    let (bind_ports, connect_ports) = if proxy_port.is_some() {
+        let mut connect_ports = Vec::new();
+        if let Some(port) = proxy_port {
+            connect_ports.push(port);
+        }
+        let mut bind_ports = Vec::new();
+        if policy.network.loopback {
+            bind_ports.push(0);
+            connect_ports.extend(ephemeral_range());
+        }
+        connect_ports.sort_unstable();
+        connect_ports.dedup();
+        (bind_ports, connect_ports)
+    } else {
+        (Vec::new(), Vec::new())
+    };
     Spec {
         paths,
-        // Loopback is a private namespace, so no port rule is needed; only the
-        // proxy's port is filtered.
-        connect_port: policy.network.proxy.as_ref().map(|proxy| proxy.port),
+        bind_ports,
+        connect_ports,
+    }
+}
+
+/// The host's ephemeral port range, from `ip_local_port_range` (default
+/// 32768-60999).
+fn ephemeral_range() -> std::ops::RangeInclusive<u16> {
+    let fallback = 32768..=60999;
+    let Ok(text) = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range") else {
+        return fallback;
+    };
+    let mut parts = text.split_whitespace();
+    let (Some(low), Some(high)) = (parts.next(), parts.next()) else {
+        return fallback;
+    };
+    match (low.parse::<u16>(), high.parse::<u16>()) {
+        (Ok(low), Ok(high)) if low <= high => low..=high,
+        _ => fallback,
     }
 }
 
@@ -890,7 +932,7 @@ mod tests {
                 let spec: Spec =
                     serde_json::from_slice(&std::fs::read(spec_path).expect("the spec is written"))
                         .expect("the spec parses");
-                assert_eq!(spec.connect_port, Some(9000));
+                assert_eq!(spec.connect_ports, vec![9000]);
             },
             Err(crate::error::SandboxError::InvalidPolicy(message)) => {
                 assert!(
@@ -949,7 +991,34 @@ mod tests {
             serde_json::from_slice(&std::fs::read(spec_path).expect("the spec is written"))
                 .expect("the spec parses");
 
-        assert_eq!(spec.connect_port, Some(9000));
+        assert_eq!(spec.connect_ports, vec![9000]);
+    }
+
+    #[test]
+    fn loopback_with_a_proxy_opens_the_ephemeral_range() {
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        let mut policy = workdir_policy(&host);
+        policy.network.loopback = true;
+        policy.network.proxy = Some(crate::policy::Proxy {
+            port: 9000,
+            egress: Vec::new(),
+        });
+        let executor =
+            ConfinedProcessExecutor::with_landlock(&policy, helper_path()).expect("landlock spec");
+
+        let Backend::Landlock { spec_path, .. } = &executor.backend else {
+            panic!("the executor must use the Landlock backend");
+        };
+        let spec: Spec =
+            serde_json::from_slice(&std::fs::read(spec_path).expect("the spec is written"))
+                .expect("the spec parses");
+
+        // The proxy port and the whole ephemeral range are connectable, and the
+        // ephemeral range is bindable via the one range form Landlock offers.
+        assert_eq!(spec.connect_ports.first(), Some(&9000));
+        assert_eq!(spec.connect_ports.last(), Some(&60999));
+        assert_eq!(spec.bind_ports, vec![0]);
     }
 
     #[test]
