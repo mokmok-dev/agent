@@ -8,12 +8,22 @@
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine as _;
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 
 use agentd_sandbox::HostPort;
+
+/// The largest request head (request line plus headers) the proxy reads before
+/// rejecting a connection. Bounds a pre-authentication client's memory.
+const MAX_HEADER_BYTES: usize = 16 * 1024;
+/// How long a client has to send its request head before the proxy gives up.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// The most concurrent client connections the proxy serves.
+const MAX_CONNECTIONS: usize = 256;
 
 /// The proxy allowlist: the `host:port` destinations a tunnel may open.
 #[derive(Clone, Debug, Default)]
@@ -64,6 +74,7 @@ impl Proxy {
         let token = uuid::Uuid::now_v7().to_string();
         let expected = basic_authorization(&token);
         let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -72,9 +83,16 @@ impl Proxy {
                         let Ok((stream, _peer)) = accepted else {
                             return;
                         };
+                        // Cap concurrency: with no bound, a local peer could open
+                        // connections until the process runs out of descriptors.
+                        let Ok(permit) = permits.clone().try_acquire_owned() else {
+                            drop(stream);
+                            continue;
+                        };
                         let egress = egress.clone();
                         let expected = expected.clone();
                         tokio::spawn(async move {
+                            let _permit = permit;
                             if let Err(error) = serve(stream, &egress, &expected).await {
                                 tracing::debug!(%error, "a proxy connection ended");
                             }
@@ -113,6 +131,16 @@ impl Proxy {
     }
 }
 
+impl Drop for Proxy {
+    fn drop(&mut self) {
+        // An early return (e.g. building the session manager fails) drops the
+        // handle without `stop`; stop the accept task anyway so it does not
+        // outlive the caller's intent.
+        let _ = self.shutdown.send(true);
+        self.task.abort();
+    }
+}
+
 /// Serves one client: authenticate, parse `CONNECT`, enforce the allowlist, tunnel.
 async fn serve(
     client: TcpStream,
@@ -124,17 +152,27 @@ async fn serve(
     // the tunnel copies through it rather than the raw read half.
     let mut client_read = BufReader::new(read_half);
 
-    let mut request = String::new();
-    if client_read.read_line(&mut request).await? == 0 {
-        return Ok(());
-    }
-    let Some((host, port)) = parse_connect(&request) else {
+    // The whole head is read under one timeout and one size cap, so a
+    // pre-authentication client cannot stall the task or grow memory without
+    // bound.
+    let head = match tokio::time::timeout(HANDSHAKE_TIMEOUT, read_head(&mut client_read)).await {
+        Ok(Ok(head)) => head,
+        Ok(Err(error)) => return Err(error),
+        Err(_) => return reply(&mut client_write, 408, "Request Timeout").await,
+    };
+    let Some((host, port)) = parse_connect(head.request_line()) else {
         return reply(&mut client_write, 400, "Bad Request").await;
     };
     // Authenticate before revealing anything about the allowlist.
-    if read_authorization(&mut client_read).await?.as_deref() != Some(expected) {
+    if head.authorization() != Some(expected) {
         tracing::warn!(%host, %port, "the proxy refused an unauthenticated client");
-        return reply(&mut client_write, 407, "Proxy Authentication Required").await;
+        return reply_with(
+            &mut client_write,
+            407,
+            "Proxy Authentication Required",
+            "Proxy-Authenticate: Basic realm=\"agentd\"\r\n",
+        )
+        .await;
     }
     if !egress.allows(&host, port) {
         tracing::warn!(%host, %port, "the proxy refused an egress destination");
@@ -152,39 +190,76 @@ async fn serve(
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;
 
+    tunnel(client_read, client_write, upstream).await
+}
+
+/// Copies bytes in both directions until *both* end, honoring half-close: when
+/// one side finishes writing it shuts its counterpart down, and the other
+/// direction keeps flowing until it too ends.
+async fn tunnel(
+    client_read: impl AsyncBufRead + Unpin,
+    mut client_write: tokio::net::tcp::OwnedWriteHalf,
+    upstream: TcpStream,
+) -> io::Result<()> {
     let (mut upstream_read, mut upstream_write) = upstream.into_split();
-    let to_upstream = tokio::io::copy(&mut client_read, &mut upstream_write);
-    let to_client = tokio::io::copy(&mut upstream_read, &mut client_write);
-    // Whichever direction ends first tears the tunnel down.
-    tokio::select! {
-        _ = to_upstream => {},
-        _ = to_client => {},
-    }
+    let mut client_read = client_read;
+    let to_upstream = async {
+        let result = tokio::io::copy(&mut client_read, &mut upstream_write).await;
+        let _ = upstream_write.shutdown().await;
+        result
+    };
+    let to_client = async {
+        let result = tokio::io::copy(&mut upstream_read, &mut client_write).await;
+        let _ = client_write.shutdown().await;
+        result
+    };
+    let (upstream_done, client_done) = tokio::join!(to_upstream, to_client);
+    upstream_done?;
+    client_done?;
     Ok(())
 }
 
-/// Writes an empty HTTP response with `status`.
-async fn reply(
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
-    status: u16,
-    reason: &str,
-) -> io::Result<()> {
-    writer
-        .write_all(format!("HTTP/1.1 {status} {reason}\r\n\r\n").as_bytes())
-        .await
+/// The request head: the request line and the header lines, bounded in size.
+struct Head {
+    request_line: String,
+    authorization: Option<String>,
 }
 
-/// Reads the header lines after the request line and returns the
-/// `Proxy-Authorization` value, if any.
-async fn read_authorization(
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>
-) -> io::Result<Option<String>> {
+impl Head {
+    /// The `CONNECT host:port HTTP/1.1` request line.
+    fn request_line(&self) -> &str {
+        &self.request_line
+    }
+
+    /// The `Proxy-Authorization` value, if any.
+    fn authorization(&self) -> Option<&str> {
+        self.authorization.as_deref()
+    }
+}
+
+/// Reads the request head, failing if it exceeds [`MAX_HEADER_BYTES`].
+async fn read_head(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> io::Result<Head> {
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).await? == 0 {
+        return Ok(Head {
+            request_line,
+            authorization: None,
+        });
+    }
     let mut authorization = None;
     let mut header = String::new();
+    let mut total = request_line.len();
     loop {
         header.clear();
         if reader.read_line(&mut header).await? == 0 {
             break;
+        }
+        total += header.len();
+        if total > MAX_HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the request head exceeds the limit",
+            ));
         }
         let line = header.trim_end();
         if line.is_empty() {
@@ -196,7 +271,31 @@ async fn read_authorization(
             authorization = Some(value.trim().to_string());
         }
     }
-    Ok(authorization)
+    Ok(Head {
+        request_line,
+        authorization,
+    })
+}
+
+/// Writes an empty HTTP response with `status` and no extra headers.
+async fn reply(
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    status: u16,
+    reason: &str,
+) -> io::Result<()> {
+    reply_with(writer, status, reason, "").await
+}
+
+/// Writes an empty HTTP response with `status` and the given `extra` headers.
+async fn reply_with(
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    status: u16,
+    reason: &str,
+    extra: &str,
+) -> io::Result<()> {
+    writer
+        .write_all(format!("HTTP/1.1 {status} {reason}\r\n{extra}\r\n").as_bytes())
+        .await
 }
 
 /// The expected `Proxy-Authorization` header for `token` (`agentd:<token>`,
@@ -380,6 +479,45 @@ mod tests {
             status.starts_with("HTTP/1.1 407"),
             "an unauthenticated client must be refused: {status}"
         );
+        assert!(
+            status.contains("Proxy-Authenticate"),
+            "a 407 must advertise the scheme: {status}"
+        );
+
+        proxy.stop();
+    }
+
+    #[tokio::test]
+    async fn the_tunnel_survives_a_client_half_close() {
+        // The upstream answers only after it reads the request and sees EOF, so
+        // the client must be able to shut down its write side and still read the
+        // reply through the tunnel.
+        let server = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("server binds");
+        let server_port = server.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let (mut socket, _) = server.accept().await.expect("accept");
+            let mut buffer = [0_u8; 64];
+            let read = socket.read(&mut buffer).await.expect("read");
+            socket.write_all(&buffer[..read]).await.expect("write");
+        });
+        let proxy = Proxy::start(Egress::new(vec![HostPort {
+            host: String::from("127.0.0.1"),
+            port: server_port,
+        }]))
+        .await
+        .expect("proxy starts");
+
+        let (mut stream, status) = connect_through(&proxy, "127.0.0.1", server_port)
+            .await
+            .expect("connect");
+        assert!(status.starts_with("HTTP/1.1 200"), "status: {status}");
+        stream.write_all(b"ping").await.expect("write");
+        stream.shutdown().await.expect("half-close");
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.expect("read reply");
+        assert_eq!(response, b"ping", "the reply must survive the half-close");
 
         proxy.stop();
     }

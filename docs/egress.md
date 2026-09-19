@@ -116,11 +116,20 @@ IP grants; there is still no general host/IP allowlist in the OS profile.
 
 Notes and gaps:
 
-- **Landlock is port-only.** A connect grant for port `P` allows `P` on *any*
-  address, not just loopback, because Landlock has no host dimension. In
-  practice `P` is the proxy's port bound on `127.0.0.1`, so reaching it on a
-  remote address is not an egress channel; it is a stated imprecision, not a
-  grant.
+- **Landlock is port-only, and that port is reachable on any address.** A
+  connect grant for port `P` allows `P` on *any* address, not just the proxy on
+  loopback, because Landlock has no host dimension. The child learns `P` from
+  `HTTP_PROXY` and could connect to `P` on an arbitrary remote host. Per
+  session that is one port, not a general channel, but it is a narrower
+  arbitrary-egress path than "the proxy only" — a real limitation, not the
+  "mere imprecision" an earlier draft claimed. Closing it needs a net namespace
+  or seccomp on the connect address, which is not built.
+- **Landlock network rules need ABI v4 (Linux 6.7).** On an older kernel the
+  crate drops the handling silently and each `NetPort` rule becomes a no-op, so
+  a session that granted a port would run **unfiltered**. The helper therefore
+  fails closed when the spec asks for network but the ruleset is not
+  `FullyEnforced`, so an old kernel refuses the command rather than widening
+  it.
 - **bubblewrap cannot express a port filter, so a network grant forces the
   Landlock helper.** Keeping `--unshare-net` would make the grant unreachable;
   dropping it with no filter would be a blanket reopen. The implementation
@@ -137,6 +146,11 @@ Notes and gaps:
   FHS (`/bin/bash`, `/usr`, ...), so on a host where the interpreter lives in a
   store (`/nix/store`) the confinement probe fails before any network filtering
   is reached. That is a general portability gap, not specific to egress.
+- **`loopback_bind: 0` means different things per backend.** Landlock treats
+  port `0` as the kernel's ephemeral range, so an ACP agent's internal server
+  can pick any port. Seatbelt renders `localhost:0`, which matches nothing. A
+  cross-platform policy should name explicit ports, not `0`; the divergence is
+  documented, not unified.
 
 ## The proxy
 

@@ -158,6 +158,9 @@ fn parse_egress(raw: &[String]) -> Result<Vec<agentd_sandbox::HostPort>, RunErro
                     .ok_or_else(|| RunError::Egress(entry.clone()))?
             };
             let port = port.parse().map_err(|_| RunError::Egress(entry.clone()))?;
+            if host.is_empty() || port == 0 {
+                return Err(RunError::Egress(entry.clone()));
+            }
             Ok(agentd_sandbox::HostPort {
                 host: host.to_string(),
                 port,
@@ -232,8 +235,12 @@ async fn start_session_manager(
     if !policy.network.unix_sockets.contains(&socket) {
         policy.network.unix_sockets.push(socket);
     }
-    if !loopback_bind.is_empty() {
-        policy.network.loopback_bind = loopback_bind;
+    // Merge the CLI ports with any the policy file already declared, rather than
+    // discard the file's.
+    for port in loopback_bind {
+        if !policy.network.loopback_bind.contains(&port) {
+            policy.network.loopback_bind.push(port);
+        }
     }
     // With an egress allowlist, start the daemon's CONNECT proxy and point the
     // session at it: the OS then grants only the proxy port, and the proxy
