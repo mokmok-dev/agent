@@ -13,6 +13,8 @@ pub mod auth;
 #[cfg(feature = "sandbox")]
 pub mod bridge;
 pub mod init;
+#[cfg(feature = "sandbox")]
+pub mod proxy;
 pub mod server;
 #[cfg(feature = "sandbox")]
 pub mod session;

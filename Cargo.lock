@@ -12,6 +12,7 @@ dependencies = [
  "agentd-sandbox",
  "async-trait",
  "axum",
+ "base64",
  "clap",
  "futures-util",
  "rusqlite",

@@ -11,6 +11,7 @@ agentd-events = { workspace = true }
 agentd-inference = { workspace = true, features = ["providers"] }
 agentd-sandbox = { workspace = true, optional = true }
 axum = { workspace = true, features = ["tracing", "ws"] }
+base64 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 futures-util = { workspace = true }
 secrecy = { workspace = true }
