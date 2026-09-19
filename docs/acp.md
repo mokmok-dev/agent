@@ -227,5 +227,11 @@ Not built: `fs/*` and `terminal/*` client methods (capabilities are advertised
 false, so the agent does its own work; an unsupported request is answered
 `Method not found`), `session/load`/`resume`, and the **egress gap below** — an
 ACP agent that reaches a remote model provider cannot run under the sandbox yet.
-`AcpBridge` is exercised only against local or offline agents until the
-managed-proxy layer exists.
+
+Verified against a real agent: `agentd/examples/acp_handshake.rs` drives
+`opencode acp` through `AcpProtocol` and completes the handshake
+(`initialize` -> `session/update` -> `session/new`, then `session.acp.ready`).
+It runs the agent unconfined on purpose, and the reason is the gap below: under
+the sandbox the agent fails at startup on the platform's own state directory and
+on the loopback HTTP server it binds, before any model call. So the bridge is
+proven end to end; confinement of a networked agent is the open part.
