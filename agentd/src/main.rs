@@ -46,6 +46,11 @@ enum Command {
         /// The agent id recorded on session events.
         #[arg(long, default_value = "urn:mokmokd:session")]
         session_agent_id: String,
+        /// The protocol bridge for `--session-command`, so a third-party tool
+        /// that does not speak `CloudEvents` participates over its own stdio
+        /// protocol.
+        #[arg(long, value_enum)]
+        session_bridge: Option<BridgeKind>,
         /// Restart a crashed session up to this many times.
         #[arg(long, default_value_t = 0)]
         session_max_restarts: u32,
@@ -74,6 +79,14 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+}
+
+/// The protocol bridges a supervised session can speak.
+#[cfg(feature = "sandbox")]
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum BridgeKind {
+    /// The Model Context Protocol over stdio (newline-delimited JSON-RPC 2.0).
+    Mcp,
 }
 
 #[derive(Debug, Error)]
@@ -111,6 +124,7 @@ struct SessionOptions {
     policy_path: PathBuf,
     agent_id: String,
     supervision: agentd::session::Supervision,
+    bridge: Option<BridgeKind>,
     /// The daemon's own event socket, granted to the session's policy so the
     /// launched node can reach the daemon it is supervised by.
     socket: PathBuf,
@@ -128,6 +142,7 @@ fn start_session_manager(
         command,
         agent_id,
         supervision,
+        bridge,
         socket,
         ..
     } = options;
@@ -136,6 +151,12 @@ fn start_session_manager(
     }
     let manager = agentd::session::SessionManager::new(log.clone(), &policy, command, agent_id)?
         .with_supervision(supervision);
+    let manager = match bridge {
+        None => manager,
+        Some(BridgeKind::Mcp) => {
+            manager.with_bridge(Arc::new(agentd::bridge::McpBridge::default()))
+        },
+    };
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
         if let Err(error) = manager.run(shutdown_rx).await {
@@ -175,6 +196,7 @@ async fn run() -> Result<(), RunError> {
             session_agent_id,
             session_max_restarts,
             session_lifetime_secs,
+            session_bridge,
             providers_config,
         } => {
             let socket = socket.unwrap_or_else(agentd_events::paths::default_socket);
@@ -202,9 +224,14 @@ async fn run() -> Result<(), RunError> {
                         policy_path,
                         agent_id: session_agent_id,
                         supervision,
+                        bridge: session_bridge,
                         socket: socket.clone(),
                     },
                 )?;
+            }
+            #[cfg(feature = "sandbox")]
+            if session_command.is_none() && session_bridge.is_some() {
+                tracing::warn!("--session-bridge ignored: it requires --session-command");
             }
             #[cfg(not(feature = "sandbox"))]
             {
@@ -218,6 +245,7 @@ async fn run() -> Result<(), RunError> {
                     session_agent_id,
                     session_max_restarts,
                     session_lifetime_secs,
+                    session_bridge,
                 );
             }
 

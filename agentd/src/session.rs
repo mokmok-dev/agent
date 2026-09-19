@@ -26,11 +26,25 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use agentd_events::{Event, EventLog, LogEntry, LogError, Seq};
-use agentd_sandbox::{Policy, Sandbox, SandboxError};
+use agentd_sandbox::{Policy, Sandbox, SandboxError, SandboxedProcess};
 use serde_json::{Value, json};
 use thiserror::Error as ThisError;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
+
+use crate::bridge::{Bridge, session_subject};
+
+/// The largest protocol frame accepted from a bridged child before the frame is
+/// dropped and the stream resynchronizes at the next newline. The read is
+/// bounded, so an endless line cannot exhaust memory before the cap is checked.
+const MAX_FRAME_BYTES: usize = 64 * 1024;
+
+/// How long the uplink reader is given to flush buffered frames after the child
+/// exits, before it is aborted. A descendant that inherited the stdout write end
+/// would otherwise keep the stream from ending and hang the join.
+const FLUSH_GRACE: Duration = Duration::from_secs(2);
 
 /// A client requests that the daemon start a managed session. Reserved to
 /// daemon-authority publishers (see `docs/architecture.md`).
@@ -90,6 +104,9 @@ pub struct SessionManager {
     command: String,
     agent_id: String,
     supervision: Supervision,
+    /// The protocol bridge, when the configured command is a third-party tool
+    /// that does not speak `CloudEvents`. `None` supervises the process only.
+    bridge: Option<Arc<dyn Bridge>>,
     /// The active sessions, by id, with the restart count of each.
     ///
     /// A `std` mutex is sufficient because no critical section awaits; keeping
@@ -118,6 +135,7 @@ impl SessionManager {
             command: command.into(),
             agent_id,
             supervision: Supervision::default(),
+            bridge: None,
             active: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
@@ -137,6 +155,7 @@ impl SessionManager {
             command: command.into(),
             agent_id: agent_id.into(),
             supervision: Supervision::default(),
+            bridge: None,
             active: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -148,6 +167,17 @@ impl SessionManager {
         supervision: Supervision,
     ) -> Self {
         self.supervision = supervision;
+        self
+    }
+
+    /// Sets the protocol bridge, so the configured command's stdio is converted
+    /// to and from events.
+    #[must_use]
+    pub fn with_bridge(
+        mut self,
+        bridge: Arc<dyn Bridge>,
+    ) -> Self {
+        self.bridge = Some(bridge);
         self
     }
 
@@ -228,6 +258,21 @@ impl SessionManager {
         self.active.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Records `session_id` as active and returns a guard that removes it on
+    /// drop, so a panic unwinding `supervise` cannot leave a phantom session in
+    /// a status report.
+    fn track(
+        &self,
+        session_id: &str,
+        restarts: u32,
+    ) -> ActiveSession<'_> {
+        self.active().insert(session_id.to_string(), restarts);
+        ActiveSession {
+            manager: self,
+            session_id: session_id.to_string(),
+        }
+    }
+
     /// Starts one supervised session for `request`.
     ///
     /// Returns once the supervision task is spawned, so the run loop is not
@@ -271,7 +316,7 @@ impl SessionManager {
     ) {
         let mut restarts = 0_u32;
         loop {
-            self.active().insert(session_id.clone(), restarts);
+            let active = self.track(&session_id, restarts);
             let announcement = if restarts == 0 {
                 session_started(&session_id, &self.agent_id)
             } else {
@@ -279,21 +324,19 @@ impl SessionManager {
             };
             if let Err(error) = self.log.publish(announcement).await {
                 tracing::error!(%error, "failed to record session start");
-                self.active().remove(&session_id);
                 return;
             }
 
             let started = Instant::now();
-            let session = match self.sandbox.spawn(&self.command).await {
-                Ok(session) => session,
+            let process = match self.sandbox.spawn(&self.command).await {
+                Ok(process) => process,
                 Err(error) => {
                     let event = session_failed(&session_id, &self.agent_id, &error.to_string());
                     let _ = self.log.publish(event).await;
-                    self.active().remove(&session_id);
                     return;
                 },
             };
-            let outcome = self.wait_for(session).await;
+            let outcome = self.wait_for(&session_id, process).await;
 
             let restart = matches!(
                 &outcome,
@@ -305,7 +348,7 @@ impl SessionManager {
                 continue;
             }
 
-            self.active().remove(&session_id);
+            drop(active);
             let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let event = match outcome {
                 Outcome::Exited(Ok(exit_code)) => {
@@ -328,21 +371,348 @@ impl SessionManager {
     }
 
     /// Waits for the session to exit, or kills it when it outlives its
-    /// configured lifetime.
+    /// configured lifetime, driving the bridge while it runs.
     async fn wait_for(
         &self,
-        mut session: agentd_sandbox::SandboxedProcess,
+        session_id: &str,
+        mut process: SandboxedProcess,
     ) -> Outcome {
+        if let Some(bridge) = self.bridge.clone() {
+            return self.drive(session_id, &mut process, bridge).await;
+        }
+        // Without a bridge the process is a `CloudEvents` peer: its pipes are
+        // left untouched, so the previous behavior is unchanged.
         let Some(lifetime) = self.supervision.lifetime else {
-            return Outcome::Exited(session.wait().await);
+            return Outcome::Exited(process.wait().await);
         };
-        if let Ok(result) = tokio::time::timeout(lifetime, session.wait()).await {
+        if let Ok(result) = tokio::time::timeout(lifetime, process.wait()).await {
             return Outcome::Exited(result);
         }
-        if let Err(error) = session.kill().await {
+        if let Err(error) = process.kill().await {
             tracing::warn!(%error, "failed to kill an expired session");
         }
         Outcome::Lifetime
+    }
+
+    /// Runs a bridged session to exit, converting its stdio through the bridge
+    /// and killing it when it outlives its configured lifetime.
+    ///
+    /// The lifetime is handled here rather than by an outer timeout so the
+    /// spawned pipe tasks are always joined or aborted; an outer timeout would
+    /// drop this future and leak the watcher that feeds the child's stdin.
+    async fn drive(
+        &self,
+        session_id: &str,
+        process: &mut SandboxedProcess,
+        bridge: Arc<dyn Bridge>,
+    ) -> Outcome {
+        let (stdin, stdout) = (process.take_stdin(), process.take_stdout());
+
+        // Every spawned pipe task lives in the guard, so aborting is guaranteed
+        // even if this future is dropped; the writer owns the child's stdin, the
+        // downlink watcher enqueues events routed to this session, and the
+        // uplink reader enqueues protocol replies. Only the writer ever writes,
+        // so frames cannot interleave.
+        let mut tasks = TaskGuard::default();
+        let replies = stdin.map(|stdin| {
+            // Two channels, one writer: a backlog of routed events cannot block
+            // the uplink reader from delivering a protocol reply (a single
+            // channel could, wedging stdout behind stdin).
+            let (events_tx, events_rx) = mpsc::channel::<String>(64);
+            let (replies_tx, replies_rx) = mpsc::channel::<String>(64);
+            // Subscribe before the child can produce output, so an event
+            // published after the child's first frame is never missed.
+            let watcher = watch_downlink(&self.log, bridge.clone(), session_id, events_tx);
+            let handshake = bridge.handshake();
+            let writer = tokio::spawn(write_stdin(
+                stdin,
+                events_rx,
+                replies_rx,
+                bridge.clone(),
+                handshake,
+            ));
+            tasks.push(&writer);
+            let watcher = tokio::spawn(watcher);
+            tasks.push(&watcher);
+            replies_tx
+        });
+        let uplink = stdout.map(|stdout| {
+            let task = tokio::spawn(uplink_stream(
+                self.log.clone(),
+                bridge,
+                session_id.to_string(),
+                stdout,
+                replies,
+            ));
+            tasks.push(&task);
+            task
+        });
+
+        let result = if let Some(lifetime) = self.supervision.lifetime {
+            if let Ok(result) = tokio::time::timeout(lifetime, process.wait()).await {
+                Outcome::Exited(result)
+            } else {
+                if let Err(error) = process.kill().await {
+                    tracing::warn!(%error, "failed to kill an expired session");
+                }
+                Outcome::Lifetime
+            }
+        } else {
+            Outcome::Exited(process.wait().await)
+        };
+
+        // The stdout stream ends when the process closes it, so a short grace
+        // keeps the last frames ordered before the terminal state is reported.
+        // A descendant that inherited the stdout write end could keep it open
+        // forever, so the join is bounded and the task aborted on expiry.
+        if let Some(mut uplink) = uplink {
+            // `&mut` is awaitable, so this does not consume the handle.
+            if let Err(_elapsed) = tokio::time::timeout(FLUSH_GRACE, &mut uplink).await {
+                uplink.abort();
+            }
+        }
+        result
+    }
+}
+
+/// Aborts every held task when dropped, so a cancelled or panicking session
+/// cannot leave pipe tasks detached.
+#[derive(Default)]
+struct TaskGuard {
+    aborts: Vec<tokio::task::AbortHandle>,
+}
+
+impl TaskGuard {
+    /// Registers `task` for abort on drop; the caller may still await it.
+    fn push(
+        &mut self,
+        task: &tokio::task::JoinHandle<()>,
+    ) {
+        self.aborts.push(task.abort_handle());
+    }
+}
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        for abort in &self.aborts {
+            abort.abort();
+        }
+    }
+}
+
+/// Writes `lines` to `writer`, each terminated by a newline.
+async fn write_lines(
+    writer: &mut ChildStdin,
+    lines: &[String],
+) -> std::io::Result<()> {
+    for line in lines {
+        writer.write_all(line.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+    }
+    writer.flush().await
+}
+
+/// Reads the child's stdout line by line, appending one event per protocol
+/// message and feeding any handshake replies back to the child.
+///
+/// Reading is bounded: a line longer than [`MAX_FRAME_BYTES`] is drained and
+/// dropped rather than buffered whole, so a broken child cannot exhaust memory
+/// with an endless line. The drain consumes through the newline, so the stream
+/// resynchronizes at the next frame.
+async fn uplink_stream(
+    log: EventLog,
+    bridge: Arc<dyn Bridge>,
+    session_id: String,
+    stdout: ChildStdout,
+    replies: Option<mpsc::Sender<String>>,
+) {
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    loop {
+        match read_frame(&mut reader, &mut line).await {
+            Ok(ReadFrame::Eof) => return,
+            Ok(ReadFrame::Oversized) => {
+                tracing::warn!(%session_id, "dropping an oversized frame");
+            },
+            Ok(ReadFrame::Line) => {
+                let Some(conversion) = bridge.uplink(&line) else {
+                    continue;
+                };
+                for reply in conversion.to_child {
+                    if let Some(replies) = replies.as_ref()
+                        && replies.send(reply).await.is_err()
+                    {
+                        return;
+                    }
+                }
+                let event = conversion.event.with_subject(session_subject(&session_id));
+                if let Err(error) = log.publish(event).await {
+                    tracing::error!(%error, %session_id, "failed to record a bridged message");
+                }
+            },
+            Err(error) => {
+                tracing::warn!(%error, %session_id, "bridged stdout could not be read");
+                return;
+            },
+        }
+    }
+}
+
+/// One bounded read from the child's stdout.
+enum ReadFrame {
+    /// A complete line, in the caller's buffer without its newline.
+    Line,
+    /// A line longer than the cap; it was drained and dropped.
+    Oversized,
+    /// The stream ended.
+    Eof,
+}
+
+/// Reads one newline-terminated frame into `line`, bounded by
+/// [`MAX_FRAME_BYTES`].
+///
+/// At most `MAX_FRAME_BYTES` bytes are buffered; the rest of an oversized line
+/// is drained in chunks until its newline, so the next frame starts clean.
+async fn read_frame<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    line: &mut String,
+) -> std::io::Result<ReadFrame> {
+    line.clear();
+    let mut oversized = false;
+    let mut bytes = 0_usize;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return if line.is_empty() && !oversized {
+                Ok(ReadFrame::Eof)
+            } else {
+                Ok(if oversized {
+                    ReadFrame::Oversized
+                } else {
+                    ReadFrame::Line
+                })
+            };
+        }
+        let newline = available.iter().position(|&byte| byte == b'\n');
+        let consumed = newline.map_or(available, |position| &available[..position]);
+        if !oversized {
+            if bytes + consumed.len() > MAX_FRAME_BYTES {
+                oversized = true;
+            } else if let Ok(text) = std::str::from_utf8(consumed) {
+                line.push_str(text);
+                bytes += consumed.len();
+            } else {
+                oversized = true;
+            }
+        }
+        let consume_through = if newline.is_some() {
+            consumed.len() + 1
+        } else {
+            consumed.len()
+        };
+        reader.consume(consume_through);
+        if newline.is_some() {
+            line.truncate(line.trim_end_matches('\r').len());
+            return Ok(if oversized {
+                ReadFrame::Oversized
+            } else {
+                ReadFrame::Line
+            });
+        }
+    }
+}
+
+/// Subscribes to the log and forwards the events the bridge can downlink to
+/// `sender`, so only the writer touches the child's stdin.
+///
+/// Routing trusts `subject`, which is safe because a downlink event carries the
+/// reserved `session.*` type that only an authority token can publish (see
+/// `RESERVED_TYPE_PREFIXES`), and the daemon stamps `source`/`time` on ingress.
+/// An untrusted client cannot address a frame to another session's child.
+fn watch_downlink(
+    log: &EventLog,
+    bridge: Arc<dyn Bridge>,
+    session_id: &str,
+    sender: mpsc::Sender<String>,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let subject = session_subject(session_id);
+    let mut events = log.subscribe();
+    async move {
+        loop {
+            match events.recv().await {
+                Ok(entry) => {
+                    // Only an event addressed to this session is routed, so two
+                    // bridged sessions of the same protocol never receive each
+                    // other's messages.
+                    if entry.event.subject.as_deref() != Some(subject.as_str()) {
+                        continue;
+                    }
+                    if let Some(line) = bridge.downlink(&entry.event)
+                        && sender.send(line).await.is_err()
+                    {
+                        return;
+                    }
+                },
+                // A lagged subscriber has missed log entries; a downlink that
+                // was among them cannot be recovered, so it is dropped loudly
+                // rather than silently.
+                Err(RecvError::Lagged(skipped)) => {
+                    tracing::warn!(skipped, %subject, "downlink lagged and dropped events");
+                },
+                Err(RecvError::Closed) => return,
+            }
+        }
+    }
+}
+
+/// Owns the child's stdin: writes the opening handshake, then drains both the
+/// downlink channel (routed events) and the reply channel (protocol obligations
+/// the uplink reader owes), so no two tasks ever write to the pipe.
+async fn write_stdin(
+    mut stdin: ChildStdin,
+    mut events: mpsc::Receiver<String>,
+    mut replies: mpsc::Receiver<String>,
+    bridge: Arc<dyn Bridge>,
+    handshake: Vec<String>,
+) {
+    if let Err(error) = write_lines(&mut stdin, &handshake).await {
+        tracing::warn!(%error, "failed to write the handshake");
+    }
+    // A closed source disables its branch, so an empty channel never spins the
+    // loop; the writer ends once both sources are closed.
+    let mut events_open = true;
+    let mut replies_open = true;
+    while events_open || replies_open {
+        let line = tokio::select! {
+            event = events.recv(), if events_open => {
+                events_open = event.is_some();
+                event
+            },
+            reply = replies.recv(), if replies_open => {
+                replies_open = reply.is_some();
+                reply
+            },
+        };
+        let Some(line) = line else {
+            continue;
+        };
+        if let Err(error) = write_lines(&mut stdin, std::slice::from_ref(&line)).await {
+            tracing::warn!(%error, protocol = bridge.protocol(), "failed to write to the child");
+            return;
+        }
+    }
+}
+
+/// Removes a session from the active set when dropped, so every exit path
+/// (return, `?`, or unwind) leaves the set consistent.
+struct ActiveSession<'a> {
+    manager: &'a SessionManager,
+    session_id: String,
+}
+
+impl Drop for ActiveSession<'_> {
+    fn drop(&mut self) {
+        self.manager.active().remove(&self.session_id);
     }
 }
 
@@ -464,6 +834,7 @@ mod tests {
         SESSION_FAILED, SESSION_REQUESTED, SESSION_RESTARTED, SESSION_STARTED,
         SESSION_STATUS_REQUESTED, SessionManager, Supervision,
     };
+    use crate::bridge::{BRIDGED_INBOUND, McpBridge};
     use agentd_events::{Event, EventLog, LogEntry};
     use agentd_sandbox::{
         Access, ExecResult, Executor, FsEntry, FsPolicy, Policy, Sandbox, ShellPolicy, SpawnError,
@@ -561,6 +932,15 @@ mod tests {
             Sandbox::with_executor(&policy(), log.clone(), "agent", executor).expect("sandbox"),
         );
         SessionManager::with_sandbox(log, sandbox, command, "agent").with_supervision(supervision)
+    }
+
+    fn bridged_manager(
+        log: EventLog,
+        command: &str,
+        supervision: Supervision,
+    ) -> SessionManager {
+        manager(log, Arc::new(PlainExecutor), command, supervision)
+            .with_bridge(Arc::new(McpBridge::default()))
     }
 
     fn request(session_id: &str) -> Event {
@@ -708,6 +1088,122 @@ mod tests {
             .await
             .expect("join")
             .expect("run should stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn a_bridged_session_converts_an_mcp_handshake() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = open_log(dir.path());
+        let mut subscriber = log.subscribe();
+        // A minimal MCP server: consume the handshake, answer the initialize
+        // request (id 0), consume the initialized notification the bridge sends
+        // in reply, then emit one notification and exit.
+        let command = "read line; printf '%s\\n' \
+            '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"protocolVersion\":\"2024-11-05\"}}'; \
+            read line; printf '%s\\n' \
+            '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}'";
+        let manager = bridged_manager(log.clone(), command, Supervision::default());
+
+        manager.launch(&request("mcp-1"));
+
+        let message = wait_for(&mut subscriber, BRIDGED_INBOUND).await;
+        assert_eq!(message.data["protocol"], "mcp");
+        assert!(message.data["message"]["result"].is_object());
+
+        let notification = wait_for(&mut subscriber, BRIDGED_INBOUND).await;
+        assert_eq!(
+            notification.data["message"]["method"],
+            "notifications/tools/list_changed"
+        );
+        assert_eq!(notification.subject.as_deref(), Some("session:mcp-1"));
+
+        wait_for(&mut subscriber, super::SESSION_EXITED).await;
+        let records = log
+            .read_from(1)
+            .expect("read")
+            .collect::<Result<Vec<_>, _>>();
+        let count = records.expect("entries").len();
+        assert!(
+            count >= 3,
+            "expected lifecycle and bridged events, got {count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bridged_session_routes_an_outbound_event_to_the_child() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = open_log(dir.path());
+        let mut subscriber = log.subscribe();
+        // The child discards the handshake, emits one notification so the test
+        // knows the bridge is subscribed, then echoes the next line (the
+        // downlink it is sent) and exits.
+        let command = "read line; printf '%s\\n' \
+            '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/ready\"}'; \
+            read line; printf '%s\\n' \"$line\"";
+        let manager = bridged_manager(log.clone(), command, Supervision::default());
+
+        manager.launch(&request("mcp-2"));
+        wait_for(&mut subscriber, SESSION_STARTED).await;
+        let ready = wait_for(&mut subscriber, BRIDGED_INBOUND).await;
+        assert_eq!(ready.data["message"]["method"], "notifications/ready");
+
+        let outbound = Event::new(
+            crate::bridge::BRIDGED_OUTBOUND,
+            json!({
+                "protocol": "mcp",
+                "message": { "jsonrpc": "2.0", "id": 1, "method": "ping" },
+            }),
+        )
+        .with_subject("session:mcp-2");
+        log.publish(outbound).await.expect("publish");
+
+        let inbound = wait_for(&mut subscriber, BRIDGED_INBOUND).await;
+        assert_eq!(inbound.data["message"]["method"], "ping");
+        assert_eq!(inbound.subject.as_deref(), Some("session:mcp-2"));
+        wait_for(&mut subscriber, super::SESSION_EXITED).await;
+    }
+
+    #[tokio::test]
+    async fn read_frame_bounds_an_endless_line_and_resynchronizes() {
+        use super::{MAX_FRAME_BYTES, ReadFrame, read_frame};
+        use tokio::io::BufReader;
+
+        // One line far over the cap, with no newline until after the excess,
+        // followed by a normal line: the first is dropped and the second read
+        // cleanly.
+        let mut input = vec![b'x'; MAX_FRAME_BYTES + 10];
+        input.push(b'\n');
+        input.extend_from_slice(b"next\n");
+        let mut reader = BufReader::new(std::io::Cursor::new(input));
+
+        let mut line = String::new();
+        assert!(matches!(
+            read_frame(&mut reader, &mut line).await.expect("read"),
+            ReadFrame::Oversized
+        ));
+        assert!(matches!(
+            read_frame(&mut reader, &mut line).await.expect("read"),
+            ReadFrame::Line
+        ));
+        assert_eq!(line, "next");
+        assert!(matches!(
+            read_frame(&mut reader, &mut line).await.expect("read"),
+            ReadFrame::Eof
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_frame_trims_a_trailing_carriage_return() {
+        use super::{ReadFrame, read_frame};
+        use tokio::io::BufReader;
+
+        let mut reader = BufReader::new(std::io::Cursor::new(b"hello\r\n".to_vec()));
+        let mut line = String::new();
+        assert!(matches!(
+            read_frame(&mut reader, &mut line).await.expect("read"),
+            ReadFrame::Line
+        ));
+        assert_eq!(line, "hello");
     }
 
     #[test]
