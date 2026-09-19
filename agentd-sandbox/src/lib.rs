@@ -75,7 +75,7 @@ pub use policy::{
     Access, EnvAllowlist, EnvVar, FsEntry, FsPolicy, Limits, NetworkPolicy, Policy, PolicyError,
     ShellPolicy,
 };
-pub use sandbox::{Approval, Sandbox, Session};
+pub use sandbox::{Approval, Sandbox, SandboxedProcess};
 pub use violation::{
     VIOLATION_FILESYSTEM, VIOLATION_NETWORK, Violation, ViolationKind, ViolationReason,
     classify_violation, violation_event,

@@ -278,13 +278,13 @@ commands cannot back a session; the layer-1 executor overrides it.
 
 `Sandbox::spawn(command)` runs a long-lived process with piped stdio for the
 node model in `docs/node.md`. It goes through the same approval as `exec` once,
-at spawn, and appends `sandbox.session.started`; `Session::wait` appends
-`sandbox.session.exited` with the exit code and duration. The caller takes the
-pipes (`take_stdin`/`take_stdout`/`take_stderr`) and owns the I/O; the output is
-not captured, so a session is not bounded by the one-shot output cap. The
-session holds the executor alive, so the profile and scratch it was spawned
-under outlive the `Sandbox` handle, and it is killed on drop if it is still
-running. Because the whole process is confined by one profile and its children
+at spawn, and appends `sandbox.session.started`; `SandboxedProcess::wait`
+appends `sandbox.session.exited` with the exit code and duration. The caller
+takes the pipes (`take_stdin`/`take_stdout`/`take_stderr`) and owns the I/O; the
+output is not captured, so a session is not bounded by the one-shot output cap.
+The `SandboxedProcess` holds the executor alive, so the profile and scratch it
+was spawned under outlive the `Sandbox` handle, and it is killed on drop if it
+is still running. Because the whole process is confined by one profile and its children
 inherit it, per-command `sandbox.permission.*` events are not emitted for a
 session — its lifecycle events are the audit trail.
 

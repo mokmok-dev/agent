@@ -166,8 +166,8 @@ impl Sandbox {
     ///
     /// The session goes through the same approval as [`Sandbox::exec`] once, at
     /// spawn: `sandbox.session.started` is appended after the process starts,
-    /// and [`Session::wait`] appends `sandbox.session.exited` with its terminal
-    /// state. Output is not captured, so the caller owns the pipes.
+    /// and [`SandboxedProcess::wait`] appends `sandbox.session.exited` with its
+    /// terminal state. Output is not captured, so the caller owns the pipes.
     ///
     /// # Errors
     ///
@@ -178,7 +178,7 @@ impl Sandbox {
     pub async fn spawn(
         &self,
         command: &str,
-    ) -> Result<Session, SandboxError> {
+    ) -> Result<SandboxedProcess, SandboxError> {
         let sandbox_id = self.id.to_string();
         let request_id = Uuid::now_v7().to_string();
 
@@ -197,7 +197,7 @@ impl Sandbox {
                 &session_id.to_string(),
             ))
             .await?;
-        Ok(Session {
+        Ok(SandboxedProcess {
             id: session_id,
             pid: child.id(),
             child,
@@ -277,11 +277,11 @@ impl Sandbox {
 
 /// A long-lived confined process with piped stdio.
 ///
-/// Take the pipes with [`take_stdin`](Session::take_stdin),
-/// [`take_stdout`](Session::take_stdout), and [`take_stderr`](Session::take_stderr);
-/// the output is not captured for you. The session is killed on drop if it is
-/// still running.
-pub struct Session {
+/// Take the pipes with [`take_stdin`](SandboxedProcess::take_stdin),
+/// [`take_stdout`](SandboxedProcess::take_stdout), and
+/// [`take_stderr`](SandboxedProcess::take_stderr); the output is not captured
+/// for you. The process is killed on drop if it is still running.
+pub struct SandboxedProcess {
     id: Uuid,
     pid: Option<u32>,
     child: Child,
@@ -296,8 +296,9 @@ pub struct Session {
     keepalive: Arc<dyn Executor>,
 }
 
-impl Session {
-    /// The session id, correlating its lifecycle events.
+impl SandboxedProcess {
+    /// The process's id, correlating the `sandbox.session.*` lifecycle events
+    /// emitted for it (`data.session_id`).
     #[must_use]
     pub const fn id(&self) -> Uuid {
         self.id
@@ -320,9 +321,9 @@ impl Session {
 
     /// Kills the process group and reaps the child.
     ///
-    /// Reaping matters: a supervisor that cancels [`wait`](Session::wait) (for
-    /// example on a lifetime timeout) would otherwise leave a zombie per
-    /// session.
+    /// Reaping matters: a supervisor that cancels
+    /// [`wait`](SandboxedProcess::wait) (for example on a lifetime timeout)
+    /// would otherwise leave a zombie per spawned process.
     ///
     /// # Errors
     ///
@@ -343,8 +344,8 @@ impl Session {
         signalled
     }
 
-    /// Waits for the session to exit, appends `sandbox.session.exited`, and
-    /// returns its exit code.
+    /// Waits for the process to exit, appends `sandbox.session.exited` (the
+    /// sandbox's session-event namespace), and returns its exit code.
     ///
     /// # Errors
     ///
@@ -373,23 +374,23 @@ impl Session {
     }
 }
 
-impl std::fmt::Debug for Session {
+impl std::fmt::Debug for SandboxedProcess {
     fn fmt(
         &self,
         formatter: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         formatter
-            .debug_struct("Session")
+            .debug_struct("SandboxedProcess")
             .field("id", &self.id)
             .field("subject", &self.subject)
             .finish_non_exhaustive()
     }
 }
 
-impl Drop for Session {
+impl Drop for SandboxedProcess {
     fn drop(&mut self) {
-        // Best-effort: a session dropped without `wait` must not leak a
-        // running process.
+        // Best-effort: a process dropped without `wait` must not leak a
+        // running child.
         let _ = self.child.start_kill();
     }
 }
@@ -447,7 +448,7 @@ async fn await_decision(
 
 #[cfg(test)]
 mod tests {
-    use super::{Approval, Sandbox, Session};
+    use super::{Approval, Sandbox, SandboxedProcess};
     use crate::error::SandboxError;
     use crate::executor::{ExecResult, Executor, SpawnError};
     use crate::policy::{Access, FsEntry, FsPolicy, Limits, Policy};
@@ -728,7 +729,8 @@ mod tests {
         let (sandbox, _dir) = plain_sandbox();
         let mut subscriber = sandbox.log().subscribe();
 
-        let mut session: Session = sandbox.spawn("exit 3").await.expect("spawn should succeed");
+        let mut session: SandboxedProcess =
+            sandbox.spawn("exit 3").await.expect("spawn should succeed");
         let session_id = session.id().to_string();
         let exit_code = session.wait().await.expect("wait should succeed");
 

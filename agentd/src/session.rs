@@ -331,7 +331,7 @@ impl SessionManager {
     /// configured lifetime.
     async fn wait_for(
         &self,
-        mut session: agentd_sandbox::Session,
+        mut session: agentd_sandbox::SandboxedProcess,
     ) -> Outcome {
         let Some(lifetime) = self.supervision.lifetime else {
             return Outcome::Exited(session.wait().await);

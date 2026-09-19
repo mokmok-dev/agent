@@ -65,26 +65,28 @@ the child.
 
 ## Names
 
-"Session" currently names two different things, which is the root of the naming
+"Session" named two different things, which was the root of the naming
 difficulty:
 
-- `agentd_sandbox::Session` is a long-lived confined process with piped stdio.
-  It has no type name at the manager level (`agentd::session` names the manager,
+- `agentd_sandbox::Session` was a long-lived confined process with piped stdio.
+  It had no type name at the manager level (`agentd::session` names the manager,
   not the unit).
 - `agentd::session::SessionManager` supervises those units.
 
-The fix is to make the unit structural:
+The fix is to make the unit structural. The confined process has been renamed
+already; the unit follows once the `Bridge` exists:
 
 ```rust
 /// The unit the manager owns. It knows nothing about protocols.
 pub struct Session {
-    process: SandboxedProcess, // renamed from agentd_sandbox::Session
+    process: SandboxedProcess,
     bridge: Box<dyn Bridge>,
 }
 ```
 
-- `agentd_sandbox::Session` → **`SandboxedProcess`**: the child process, its
-  pipes, and the profile/scratch it was spawned under. This is the mechanism.
+- **`SandboxedProcess`** (renamed from `agentd_sandbox::Session`): the child
+  process, its pipes, and the profile/scratch it was spawned under. This is the
+  mechanism.
 - **`Session`** = `SandboxedProcess` + `Bridge`. The manager's unit of
   supervision. Its `Bridge` field is `dyn`, so the manager never names a
   protocol.
@@ -153,6 +155,13 @@ serde default and a `skip_serializing_if`, the same shape as `time`. It is not
 part of `set_provenance`: the daemon owns `source` and `time` on ingress, but
 `subject` belongs to the producer (the Bridge) and must survive a relay.
 
+There is a name collision to resolve when this lands. The sandbox's session
+events already carry a `data.subject` field holding the *command string*
+(`agentd-sandbox/src/events.rs:142`), so `subject` would denote the command in
+`data` and the session id in the context attribute. The context attribute keeps
+the CloudEvents spelling; the data field is renamed to `command` when the
+attribute is introduced, so one word stops naming two things.
+
 ## Routing and backpressure
 
 Downlink reuses the existing client-side selection: a session declares the
@@ -197,9 +206,11 @@ the protocol, and only those.
 
 ## Implementation status
 
-Design only. No code in this document is implemented yet. The refactors it
-implies are: rename `agentd_sandbox::Session` to `SandboxedProcess`, introduce
-the `Bridge` trait and the `Session { SandboxedProcess, Bridge }` unit, and
-define `subject` stamping for bridged events. The existing supervisor, its
-`session.*` lifecycle events, and the `agentd-node` CloudEvents peer path are
-unchanged by this design.
+The rename is done: `agentd_sandbox::Session` is now `SandboxedProcess`
+(`agentd-sandbox/src/sandbox.rs`), with no behavior change, so supervision and
+conversion stop sharing the word "Session".
+
+Still design only: the `Bridge` trait, the `Session { SandboxedProcess, Bridge }`
+unit, and `subject` stamping for bridged events are not implemented. The
+existing supervisor, its `session.*` lifecycle events, and the `agentd-node`
+CloudEvents peer path are unchanged by this design.
