@@ -189,17 +189,23 @@ A narrow host:port egress grant, the obvious fix, is **not achievable on Linux**
   host dimension. A host:port allowlist cannot be enforced.
 
 So the honest options are a blanket reopen (rejected: it discards the boundary)
-or a **managed proxy**. The latter is now designed in [egress](egress.md): the
+or a **managed proxy**. The latter is designed in [egress](egress.md): the
 daemon runs a CONNECT proxy, the OS grants only the proxy's loopback port, and
 the proxy enforces a `host:port` allowlist. A session opts in with
 `--session-egress`. It is an opaque tunnel — no TLS termination and no
 credential injection — so the agent still holds its own provider key.
 
-Two things remain before a real agent runs confined: the agent must honour the
-injected proxy env (see the egress doc's stated gap), and starting an agent
-inside the sandbox still needs its own state directory and its loopback bind
-(`--session-loopback-bind`), plus the NixOS shell/roots portability fix. The
-example runs the agent unconfined until then.
+For the model path, the agent must honour the injected proxy env (see the egress
+doc's stated gap); a state directory it can write is a separate filesystem
+concern.
+
+Separately, **an ACP agent starts and completes its handshake confined** with no
+egress at all: its internal HTTP server needs free loopback, which
+`--session-loopback` grants as a private network namespace (see
+[egress](egress.md#two-network-models)). `agentd/examples/acp_handshake.rs
+--sandbox` drives a real `opencode2 acp` to `session.acp.ready` this way. This
+needs bubblewrap; the Landlock fallback cannot express free loopback without
+opening egress, so it fails closed.
 
 ## Testing strategy
 
@@ -235,7 +241,11 @@ ACP agent that reaches a remote model provider cannot run under the sandbox yet.
 Verified against a real agent: `agentd/examples/acp_handshake.rs` drives
 `opencode acp` through `AcpProtocol` and completes the handshake
 (`initialize` -> `session/update` -> `session/new`, then `session.acp.ready`).
-It runs the agent unconfined on purpose, and the reason is the gap below: under
-the sandbox the agent fails at startup on the platform's own state directory and
-on the loopback HTTP server it binds, before any model call. So the bridge is
-proven end to end; confinement of a networked agent is the open part.
+
+It runs both ways: unconfined by default, and `--sandbox` confined. The confined
+run works because the agent's internal HTTP server needs free loopback, which is
+a private network namespace (see [egress](egress.md#two-network-models)): it
+binds an ephemeral port and connects to it with no external route. That needs
+bubblewrap; the Landlock fallback cannot express free loopback without opening
+egress, so it fails closed. Reaching a remote model remains the proxy model's
+job and is the open part below.

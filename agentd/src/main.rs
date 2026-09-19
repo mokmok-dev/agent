@@ -89,10 +89,11 @@ struct ServeArgs {
     /// port granted to the session policy automatically.
     #[arg(long = "session-egress", value_name = "HOST:PORT")]
     session_egress: Vec<String>,
-    /// A loopback TCP port the session may bind for its own local server.
-    /// Use `0` to grant the ephemeral range. Repeatable.
-    #[arg(long = "session-loopback-bind", value_name = "PORT")]
-    session_loopback_bind: Vec<u16>,
+    /// Grant the session free loopback (its own server and client), for an
+    /// agent that binds an ephemeral port and talks to it. Needs bubblewrap;
+    /// cannot be combined with `--session-egress`.
+    #[arg(long = "session-loopback")]
+    session_loopback: bool,
     /// Restart a crashed session up to this many times.
     #[arg(long, default_value_t = 0)]
     session_max_restarts: u32,
@@ -128,6 +129,9 @@ enum RunError {
     #[cfg(feature = "sandbox")]
     #[error("--session-egress must be host:port: {0}")]
     Egress(String),
+    #[cfg(feature = "sandbox")]
+    #[error("--session-loopback and --session-egress cannot be combined")]
+    LoopbackWithEgress,
     #[cfg(feature = "sandbox")]
     #[error("failed to start the egress proxy: {0}")]
     Proxy(std::io::Error),
@@ -206,9 +210,9 @@ struct SessionOptions {
     /// The `host:port` destinations the session's proxy may tunnel to. Empty
     /// leaves egress denied.
     egress: Vec<agentd_sandbox::HostPort>,
-    /// Loopback ports the session may bind for its own local server (an ACP
-    /// agent's internal HTTP server). `0` grants the ephemeral range.
-    loopback_bind: Vec<u16>,
+    /// Whether the session may use loopback freely (an ACP agent's internal
+    /// HTTP server).
+    loopback: bool,
     /// The daemon's own event socket, granted to the session's policy so the
     /// launched node can reach the daemon it is supervised by.
     socket: PathBuf,
@@ -228,20 +232,14 @@ async fn start_session_manager(
         supervision,
         bridge,
         egress,
-        loopback_bind,
+        loopback,
         socket,
         ..
     } = options;
     if !policy.network.unix_sockets.contains(&socket) {
         policy.network.unix_sockets.push(socket);
     }
-    // Merge the CLI ports with any the policy file already declared, rather than
-    // discard the file's.
-    for port in loopback_bind {
-        if !policy.network.loopback_bind.contains(&port) {
-            policy.network.loopback_bind.push(port);
-        }
-    }
+    policy.network.loopback |= loopback;
     // With an egress allowlist, start the daemon's CONNECT proxy and point the
     // session at it: the OS then grants only the proxy port, and the proxy
     // enforces the allowlist (see `docs/egress.md`).
@@ -317,7 +315,7 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
         sandbox_policy,
         session_agent_id,
         session_egress,
-        session_loopback_bind,
+        session_loopback,
         session_max_restarts,
         session_lifetime_secs,
         session_bridge,
@@ -341,6 +339,11 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
             restart_backoff: Duration::from_secs(1),
             lifetime: session_lifetime_secs.map(Duration::from_secs),
         };
+        if session_loopback && !session_egress.is_empty() {
+            // Loopback is a private namespace and the proxy is a host socket;
+            // a session cannot have both (see `docs/egress.md`).
+            return Err(RunError::LoopbackWithEgress);
+        }
         let egress = parse_egress(&session_egress)?;
         start_session_manager(
             &log,
@@ -351,15 +354,20 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
                 supervision,
                 bridge: session_bridge,
                 egress,
-                loopback_bind: session_loopback_bind,
+                loopback: session_loopback,
                 socket: socket.clone(),
             },
         )
         .await?;
     }
     #[cfg(feature = "sandbox")]
-    if session_command.is_none() && (session_bridge.is_some() || !session_egress.is_empty()) {
-        tracing::warn!("--session-bridge/--session-egress ignored: they require --session-command");
+    if session_command.is_none()
+        && (session_bridge.is_some() || !session_egress.is_empty() || session_loopback)
+    {
+        tracing::warn!(
+            "--session-bridge/--session-egress/--session-loopback ignored: they require \
+             --session-command"
+        );
     }
     #[cfg(not(feature = "sandbox"))]
     {
@@ -373,7 +381,7 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
             session_lifetime_secs,
             session_bridge,
             session_egress,
-            session_loopback_bind,
+            session_loopback,
         );
     }
 
