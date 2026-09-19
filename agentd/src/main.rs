@@ -217,7 +217,7 @@ struct SessionOptions {
 
 /// Starts the session manager and a shutdown watcher for it.
 #[cfg(feature = "sandbox")]
-async fn start_session_manager(
+fn start_session_manager(
     log: &EventLog,
     options: SessionOptions,
 ) -> Result<(), RunError> {
@@ -240,15 +240,25 @@ async fn start_session_manager(
     // With an egress allowlist, start the daemon's CONNECT proxy and point the
     // session at it: the OS then grants only the proxy port, and the proxy
     // enforces the allowlist (see `docs/egress.md`).
+    //
+    // The proxy listens on a Unix socket, not loopback TCP: the session runs in a
+    // private network namespace with no IP route, and a Unix socket is a
+    // filesystem object that crosses the namespace, so the child reaches the
+    // proxy through its forwarder without any egress channel existing.
     let proxy = if egress.is_empty() {
         None
     } else {
-        let proxy = agentd::proxy::Proxy::start(agentd::proxy::Egress::new(egress.clone()))
-            .await
-            .map_err(RunError::Proxy)?;
+        let proxy_socket =
+            std::env::temp_dir().join(format!("agentd-egress-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&proxy_socket);
+        let proxy = agentd::proxy::Proxy::start_unix(
+            &proxy_socket,
+            agentd::proxy::Egress::new(egress.clone()),
+        )
+        .map_err(RunError::Proxy)?;
         // The URL carries the proxy's per-session credential; a client sends it
         // as `Proxy-Authorization` so a different local process cannot reuse the
-        // tunnel.
+        // tunnel. On the Unix transport the URL names the child's forwarder port.
         let url = proxy.url();
         for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
             policy.shell.env.push(agentd_sandbox::EnvVar {
@@ -263,14 +273,9 @@ async fn start_session_manager(
             name: String::from("NO_PROXY"),
             value: String::from("127.0.0.1,localhost,::1"),
         });
-        let Some(address) = proxy.address() else {
-            // `start` always binds TCP; a Unix proxy would not reach here.
-            return Err(RunError::Proxy(std::io::Error::other(
-                "the egress proxy did not bind a TCP port",
-            )));
-        };
         policy.network.proxy = Some(agentd_sandbox::Proxy {
-            port: address.port(),
+            port: agentd::proxy::FORWARD_PORT,
+            socket: Some(proxy_socket),
             egress,
         });
         Some(proxy)
@@ -362,8 +367,7 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
                 loopback: session_loopback,
                 socket: socket.clone(),
             },
-        )
-        .await?;
+        )?;
     }
     #[cfg(feature = "sandbox")]
     if session_command.is_none()

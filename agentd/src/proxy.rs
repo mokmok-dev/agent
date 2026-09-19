@@ -32,8 +32,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The most concurrent client connections the proxy serves.
 const MAX_CONNECTIONS: usize = 256;
 /// The loopback port the child's forwarder listens on, fixed so the injected
-/// proxy URL is stable.
-const FORWARD_PORT: u16 = 31_828;
+/// proxy URL is stable. A Unix-socket proxy's policy port must be this.
+pub const FORWARD_PORT: u16 = 31_828;
 
 /// The proxy allowlist: the `host:port` destinations a tunnel may open.
 #[derive(Clone, Debug, Default)]

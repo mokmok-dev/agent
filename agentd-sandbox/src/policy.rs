@@ -64,6 +64,11 @@ impl Policy {
                     return Err(PolicyError::InvalidEgressHost(destination.host.clone()));
                 }
             }
+            if let Some(socket) = &proxy.socket
+                && !socket.is_absolute()
+            {
+                return Err(PolicyError::RelativeSocket(socket.clone()));
+            }
         }
         Ok(())
     }
@@ -153,20 +158,20 @@ pub enum Access {
 /// Network policy for the OS confinement profile.
 ///
 /// The default grants nothing. A named Unix domain socket is a local
-/// destination. The IP grants are [`loopback`](NetworkPolicy::loopback) (a
+/// destination. The IP-style grants are [`loopback`](NetworkPolicy::loopback) (a
 /// command's own loopback server and client, e.g. an ACP agent's internal HTTP
 /// server) and [`proxy`](NetworkPolicy::proxy) (a single daemon-run CONNECT
-/// proxy). See `docs/egress.md` for the two models:
+/// proxy). See `docs/egress.md`.
 ///
-/// - **`loopback` alone** is served by a private network namespace: the command
-///   has loopback and *no* egress.
-/// - **`proxy`** is served by a port-scoped filter on the *shared* network: the
-///   command can reach the daemon's proxy and nothing else. Combining it with
-///   `loopback` also grants the command its own loopback server, which is what a
-///   networked ACP agent needs (its internal server plus the proxy).
+/// On **Linux** the boundary is a **private network namespace** (`--unshare-all`
+/// via bubblewrap): the command has loopback and no IP route at all, and reaches
+/// the proxy through a Unix socket the daemon bind-mounts in (a Unix socket is a
+/// filesystem object, so it crosses the namespace). That is why `proxy` carries
+/// a `socket` and `loopback` alone needs no port filter: there is no egress to
+/// filter.
 ///
-/// There is no general host/IP allowlist: Linux cannot enforce one, so the proxy
-/// enforces the egress allowlist.
+/// On **macOS** there is no network namespace, so the profile grants the
+/// loopback proxy port (and loopback generally) instead.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NetworkPolicy {
@@ -177,22 +182,30 @@ pub struct NetworkPolicy {
     /// Whether the command may use loopback TCP freely: bind a server of its own
     /// and connect to it at whatever ephemeral port it chose (an ACP agent
     /// starts an internal HTTP server on an ephemeral port and talks to it).
-    /// Alone this is a private network namespace; with a `proxy` it is the
-    /// shared network with the ephemeral range reachable.
+    /// On Linux this is within the private namespace, so it adds no egress.
     pub loopback: bool,
     /// The daemon's CONNECT proxy, when the command may reach the network
-    /// through it. The OS grants the port; the proxy enforces the allowlist.
+    /// through it. The proxy enforces the allowlist.
     pub proxy: Option<Proxy>,
 }
 
-/// The daemon's CONNECT proxy as it appears to one sandbox: the loopback port
-/// the command connects to and the egress the proxy permits.
+/// The daemon's CONNECT proxy as it appears to one sandbox.
+///
+/// Two forms, matching the host: on **Linux** the proxy listens on a Unix
+/// socket (`socket` is set) and the command runs in a private network namespace
+/// with a forwarder bridging its loopback to the socket; on **macOS** the proxy
+/// listens on loopback TCP (`socket` is `None`) and the profile grants the port.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Proxy {
-    /// The loopback port the proxy listens on. The OS profile grants a connect
-    /// to this port on `127.0.0.1` and nothing else.
+    /// The loopback port the command's `HTTP_PROXY` names. On Linux this is the
+    /// child's forwarder; on macOS the proxy's own port.
     pub port: u16,
+    /// The daemon proxy's Unix socket, when it is a Unix proxy (Linux). The
+    /// child gets it bind-mounted and reaches it through the forwarder, so it
+    /// needs no IP route;
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket: Option<PathBuf>,
     /// The `host:port` destinations the proxy may tunnel to. Enforced by the
     /// proxy, not the OS.
     pub egress: Vec<HostPort>,
@@ -302,6 +315,7 @@ mod tests {
             network: NetworkPolicy {
                 proxy: Some(Proxy {
                     port: 9000,
+                    socket: None,
                     egress: vec![HostPort {
                         host: String::new(),
                         port: 443,
@@ -320,6 +334,7 @@ mod tests {
             network: NetworkPolicy {
                 proxy: Some(Proxy {
                     port: 9000,
+                    socket: None,
                     egress: vec![HostPort {
                         host: String::from("api\"example\".com"),
                         port: 443,
@@ -346,6 +361,7 @@ mod tests {
                 loopback: true,
                 proxy: Some(Proxy {
                     port: 9000,
+                    socket: None,
                     egress: Vec::new(),
                 }),
                 ..NetworkPolicy::default()
@@ -409,6 +425,7 @@ mod tests {
                 loopback: false,
                 proxy: Some(Proxy {
                     port: 9000,
+                    socket: None,
                     egress: vec![HostPort {
                         host: String::from("api.example.com"),
                         port: 443,

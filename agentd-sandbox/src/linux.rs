@@ -40,6 +40,13 @@ const HELPER: &str = "agentd-sandbox-helper";
 /// The environment variable that overrides where the Landlock helper is found.
 const HELPER_ENV: &str = "AGENTD_SANDBOX_HELPER";
 
+/// The child-side egress forwarder binary looked up on `PATH`, or set explicitly
+/// with `AGENTD_EGRESS_FORWARD`.
+const FORWARD: &str = "agentd-egress-forward";
+
+/// The environment variable that overrides where the forwarder is found.
+const FORWARD_ENV: &str = "AGENTD_EGRESS_FORWARD";
+
 /// The host roots a confined shell and its binaries need, bound read-only and
 /// executable on Linux. `/bin` and `/lib` may be symlinks into `/usr`, which
 /// Landlock resolves. `/nix` and `/run/current-system` cover NixOS, where the
@@ -71,6 +78,9 @@ pub struct ConfinedProcessExecutor {
     workdir: PathBuf,
     /// The shell the command runs under, resolved on this host.
     shell: PathBuf,
+    /// The egress forwarder, when the command reaches the proxy through a
+    /// mounted Unix socket instead of an IP route.
+    forward: Option<Forward>,
     /// Read-write roots, for the bubblewrap backend.
     writes: Vec<PathBuf>,
     /// Read-only carve-outs inside a write root, for the bubblewrap backend.
@@ -90,6 +100,17 @@ enum Backend {
     Bubblewrap(PathBuf),
     /// Spawn the Landlock helper with a serialized spec.
     Landlock { helper: PathBuf, spec_path: PathBuf },
+}
+
+/// The child-side egress forwarder, when the proxy is a Unix socket the command
+/// reaches from inside a private network namespace.
+struct Forward {
+    /// The forwarder binary, resolved on `PATH`.
+    binary: PathBuf,
+    /// The daemon proxy's Unix socket, bind-mounted in and read inside.
+    socket: PathBuf,
+    /// The loopback port the forwarder listens on (the `HTTP_PROXY` port).
+    port: u16,
 }
 
 /// A resolved `deny` entry and how to mask it in the sandbox.
@@ -200,6 +221,22 @@ impl ConfinedProcessExecutor {
             select_backend(policy, forced, &resolved, &scratch, &shell).inspect_err(|_| {
                 let _ = fs::remove_dir_all(&scratch);
             })?;
+        // A Unix-socket proxy is reached through the forwarder; a loopback TCP
+        // proxy (or no proxy) needs none.
+        let forward = match &policy.network.proxy {
+            Some(proxy) if proxy.socket.is_some() => {
+                let socket = proxy.socket.clone().unwrap_or_default();
+                let binary = find_forwarder(&policy.fs).inspect_err(|_| {
+                    let _ = fs::remove_dir_all(&scratch);
+                })?;
+                Some(Forward {
+                    binary,
+                    socket,
+                    port: proxy.port,
+                })
+            },
+            _ => None,
+        };
         let env = policy
             .shell
             .env
@@ -211,6 +248,7 @@ impl ConfinedProcessExecutor {
             scratch,
             workdir,
             shell,
+            forward,
             writes: resolved.writes,
             protected: resolved.protected,
             denies: resolved.denies,
@@ -302,13 +340,35 @@ impl ConfinedProcessExecutor {
                 },
             }
         }
-        std_command
-            .arg("--chdir")
-            .arg(&self.workdir)
-            .arg("--")
-            .arg(&self.shell)
-            .arg("-c")
-            .arg(command);
+        // With a Unix-socket proxy, mount the socket in (as an option, before
+        // `--`) and run the command under the forwarder, so every
+        // `127.0.0.1:<port>` connection reaches the daemon proxy even though the
+        // namespace has no IP route. Without a forwarder the shell runs the
+        // command directly.
+        if let Some(forward) = &self.forward {
+            std_command
+                .arg("--ro-bind")
+                .arg(&forward.socket)
+                .arg(&forward.socket);
+        }
+        std_command.arg("--chdir").arg(&self.workdir).arg("--");
+        match &self.forward {
+            Some(forward) => {
+                std_command
+                    .arg(&forward.binary)
+                    .arg("--port")
+                    .arg(forward.port.to_string())
+                    .arg("--socket")
+                    .arg(&forward.socket)
+                    .arg("--")
+                    .arg(&self.shell)
+                    .arg("-c")
+                    .arg(command);
+            },
+            None => {
+                std_command.arg(&self.shell).arg("-c").arg(command);
+            },
+        }
         std_command
     }
 
@@ -385,21 +445,31 @@ fn select_backend(
             landlock_backend(policy, &helper, resolved, scratch, shell)
         },
         None => {
-            let private_loopback = policy.network.loopback && policy.network.proxy.is_none();
-            if private_loopback {
+            // A Unix-socket proxy needs a private namespace (no IP route) and
+            // the forwarder; a loopback-only grant needs the same namespace.
+            let unix_proxy = policy
+                .network
+                .proxy
+                .as_ref()
+                .is_some_and(|proxy| proxy.socket.is_some());
+            let private_namespace =
+                (policy.network.loopback && policy.network.proxy.is_none()) || unix_proxy;
+            if private_namespace {
                 return find_on_path(BWRAP, Some(&policy.fs))
                     .map(Backend::Bubblewrap)
                     .ok_or_else(|| {
                         SandboxError::InvalidPolicy(String::from(
-                            "the policy grants loopback, which requires bubblewrap for a private \
-                             network namespace; bubblewrap is unavailable",
+                            "the policy needs a private network namespace, which requires \
+                             bubblewrap; bubblewrap is unavailable",
                         ))
                     });
             }
+            // A loopback TCP proxy has no namespace to confine it, so it needs
+            // the Landlock port filter.
             if policy.network.proxy.is_some() {
                 let helper = find_helper(&policy.fs).map_err(|_| {
                     SandboxError::InvalidPolicy(String::from(
-                        "the policy grants the proxy, which requires the Landlock helper; \
+                        "the policy grants a loopback proxy, which requires the Landlock helper; \
                          bubblewrap cannot filter by port and the helper is unavailable",
                     ))
                 })?;
@@ -532,16 +602,17 @@ fn build_spec(
     });
     paths.dedup_by(|left, right| left.path == right.path);
 
-    // The port rules. With a proxy the network is shared, so a command that also
-    // needs loopback (an ACP agent's own server) gets the ephemeral range:
-    // bind via the one range form Landlock offers (`0`), connect via an explicit
-    // list (Landlock has no connect range). The proxy port is always connectable.
-    let proxy_port = policy.network.proxy.as_ref().map(|proxy| proxy.port);
-    let (bind_ports, connect_ports) = if proxy_port.is_some() {
-        let mut connect_ports = Vec::new();
-        if let Some(port) = proxy_port {
-            connect_ports.push(port);
-        }
+    // Landlock port rules are for the *shared* network (a loopback TCP proxy on
+    // a host with no namespace, macOS-style). A Unix-socket proxy runs in a
+    // private namespace with no IP route, so it needs none.
+    let loopback_proxy = policy
+        .network
+        .proxy
+        .as_ref()
+        .is_some_and(|proxy| proxy.socket.is_none());
+    let (bind_ports, connect_ports) = if loopback_proxy {
+        let proxy_port = policy.network.proxy.as_ref().map_or(0, |proxy| proxy.port);
+        let mut connect_ports = vec![proxy_port];
         let mut bind_ports = Vec::new();
         if policy.network.loopback {
             bind_ports.push(0);
@@ -626,6 +697,30 @@ fn find_helper(fs_policy: &FsPolicy) -> Result<PathBuf, SandboxError> {
     find_on_path(HELPER, Some(fs_policy)).ok_or(SandboxError::UnsupportedPlatform(
         "no confinement backend: bubblewrap and the `agentd-sandbox-helper` are both unavailable",
     ))
+}
+
+/// Finds the egress forwarder: the `AGENTD_EGRESS_FORWARD` override, else on
+/// `PATH`.
+///
+/// A Unix-socket proxy is reached through it, so it must be resolvable; a
+/// repository cannot supply it (the same trust rule as the helper).
+fn find_forwarder(fs_policy: &FsPolicy) -> Result<PathBuf, SandboxError> {
+    if let Some(configured) = std::env::var_os(FORWARD_ENV) {
+        let candidate = PathBuf::from(configured);
+        if process::is_executable(&candidate)
+            && process::is_outside_write_roots(&candidate, fs_policy)
+        {
+            return Ok(candidate);
+        }
+        return Err(SandboxError::InvalidPolicy(String::from(
+            "the configured AGENTD_EGRESS_FORWARD is not an executable outside the workspace",
+        )));
+    }
+    find_on_path(FORWARD, Some(fs_policy)).ok_or_else(|| {
+        SandboxError::InvalidPolicy(String::from(
+            "a Unix-socket proxy requires the `agentd-egress-forward` binary, which is not on PATH",
+        ))
+    })
 }
 
 /// Resolves the write, read, protected, and deny entries into canonical paths.
@@ -916,6 +1011,7 @@ mod tests {
         let mut policy = workdir_policy(&host);
         policy.network.proxy = Some(crate::policy::Proxy {
             port: 9000,
+            socket: None,
             egress: vec![crate::policy::HostPort {
                 host: String::from("api.example.com"),
                 port: 443,
@@ -979,6 +1075,7 @@ mod tests {
         let mut policy = workdir_policy(&host);
         policy.network.proxy = Some(crate::policy::Proxy {
             port: 9000,
+            socket: None,
             egress: Vec::new(),
         });
         let executor =
@@ -1002,6 +1099,7 @@ mod tests {
         policy.network.loopback = true;
         policy.network.proxy = Some(crate::policy::Proxy {
             port: 9000,
+            socket: None,
             egress: Vec::new(),
         });
         let executor =
@@ -1315,6 +1413,7 @@ mod tests {
         let mut policy = workdir_policy(&host);
         policy.network.proxy = Some(crate::policy::Proxy {
             port: allowed_port,
+            socket: None,
             egress: Vec::new(),
         });
         let Some(executor) = landlock_executor(&policy) else {

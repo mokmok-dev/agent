@@ -1,7 +1,7 @@
 ---
 type: Design
 title: egress
-description: サンドボックスから外部ネットワークへ到達するための managed proxy 設計。sandbox は loopback の proxy ポートだけを許可し、proxy が host:port allowlist を強制する。プラットフォーム別の表現、スレッドモデル、未解決ギャップを定める。
+description: サンドボックスから外部ネットワークへ到達するための managed proxy 設計。Linux は private netns + bind-mount した Unix socket 上の proxy で経路を一本化し、child 側 forwarder が loopback を橋渡しする。proxy が host:port allowlist を強制する。プラットフォーム別の表現、信頼境界、未解決ギャップを定める。
 tags:
   - egress
   - network
@@ -103,32 +103,29 @@ Seatbelt), where the child reaches the proxy on `127.0.0.1`. The Unix-socket
 form is the Linux model, because only Linux has the namespace to make it a real
 boundary.
 
-## Two network models
+## The two mechanisms
 
-A command may need the network for one of two reasons, and they want opposite
-mechanisms:
+A command may need the network for one of two reasons:
 
 - **Loopback only.** An ACP agent starts its own HTTP server on an *ephemeral*
-  port and connects to it. It never needs a remote host. The only safe way to
-  express "loopback, and nothing else" is a **private network namespace**:
-  inside it `127.0.0.1` is the command's own, and every other address is
-  unreachable (`Network is unreachable`). bubblewrap's `--unshare-all` provides
-  exactly this.
+  port and connects to it. It never needs a remote host. A **private network
+  namespace** expresses "loopback, and nothing else": inside it `127.0.0.1` is
+  the command's own, and every other address is unreachable (`Network is
+  unreachable`). bubblewrap's `--unshare-all` provides exactly this.
 - **Remote egress.** A command reaches a provider through the daemon's CONNECT
-  proxy. This needs the *shared* network with only the proxy port open, which is
-  the Landlock helper's `NetPort` filter.
+  proxy, which enforces the `host:port` allowlist.
 
-The two are different mechanisms, but not exclusive: a **networked ACP agent
-needs both** — its own loopback server *and* the proxy. That combination cannot
-use a private namespace (which has no route to the host's proxy), so it takes
-the *shared* network with two grants at once:
+A **networked ACP agent needs both** — its own loopback server *and* the proxy.
+The two mechanisms compose on Linux because a **Unix socket crosses a network
+namespace**: the daemon binds the proxy on a Unix socket, the child gets it
+bind-mounted in, and a small **forwarder** inside the namespace presents it on
+`127.0.0.1`. So the child still runs in a private namespace, with no IP route at
+all, and reaches the proxy anyway.
 
-- the proxy port, and
-- the host's ephemeral range, so the agent's own server can bind a random port
-  and connect to it.
-
-`loopback` with `proxy` therefore means "shared network, proxy port and ephemeral
-range open"; `loopback` alone means "private namespace, loopback only".
+That is stronger than a port filter: there is no ephemeral-range hole, no UDP or
+QUIC bypass (there is no external interface to send from), and the proxy port is
+not a host-reachable address. macOS has no network namespace, so it uses the
+weaker loopback-TCP form (below).
 
 ## Policy model
 
@@ -137,18 +134,20 @@ pub struct NetworkPolicy {
     /// Unix domain sockets the command may connect to (unchanged).
     pub unix_sockets: Vec<PathBuf>,
     /// Free loopback: the command may bind its own server and connect to it on
-    /// any ephemeral port. Alone this is a private namespace (no egress); with a
-    /// `proxy` it is the shared network with the ephemeral range open.
+    /// any ephemeral port. On Linux this lives inside the private namespace.
     pub loopback: bool,
-    /// The daemon proxy the command may connect to: its loopback port and the
-    /// host:port allowlist the proxy enforces. `None` grants no egress.
+    /// The daemon proxy the command may connect to. `None` grants no egress.
     pub proxy: Option<Proxy>,
 }
 
 pub struct Proxy {
+    /// The loopback port the child's `HTTP_PROXY` names (the forwarder on
+    /// Linux, the proxy itself on macOS).
     pub port: u16,
-    /// Hosts the proxy may open a tunnel to. The OS does not enforce this; the
-    /// proxy does, which is the whole point.
+    /// The proxy's Unix socket (Linux). When set, the child reaches it through
+    /// the forwarder; when `None`, the proxy is loopback TCP (macOS).
+    pub socket: Option<PathBuf>,
+    /// Hosts the proxy may open a tunnel to. Enforced by the proxy.
     pub egress: Vec<HostPort>,
 }
 
@@ -158,45 +157,42 @@ pub struct HostPort {
 }
 ```
 
-The zero value still grants nothing. `loopback` and `proxy` are the only IP
-grants.
+The zero value still grants nothing.
 
 ## Platform rendering
 
 | Model | macOS Seatbelt | Linux |
 | --- | --- | --- |
-| loopback alone | `(allow network-bind/local ip "localhost:*")` + `(allow network-outbound (remote ip "localhost:*"))` | bubblewrap `--unshare-all`: a private namespace where only loopback exists |
-| proxy | `(allow network-outbound (remote ip "localhost:P"))` | the Landlock helper: `NetPort(P, ConnectTcp)` on the shared network |
-| loopback + proxy | the loopback grants plus the proxy grant | shared network: `NetPort(0, BindTcp)` (the ephemeral range) and `NetPort(p, ConnectTcp)` for `p` in the ephemeral range **and** the proxy port |
+| loopback | `(allow network-bind/local ip "localhost:*")` + outbound | bubblewrap `--unshare-all`: a private namespace where only loopback exists |
+| proxy (Unix socket) | — | private namespace + the mounted socket + `agentd-egress-forward` |
+| proxy (loopback TCP) | `(allow network-outbound (remote ip "localhost:P"))` | the Landlock helper: `NetPort(P, ConnectTcp)` |
 | unix sockets | path-scoped `remote unix-socket` (existing) | unaffected (filesystem objects) |
 
-Backend selection follows from the model:
+Backend selection:
 
-- `loopback` **without** a proxy requires **bubblewrap** (the private namespace);
-  without it, construction **fails closed**.
-- `proxy` (with or without `loopback`) requires the **Landlock helper** (the port
-  filter); without it, construction **fails closed**.
-- neither prefers bubblewrap and falls back to Landlock for the filesystem and
+- A **private namespace** is needed for `loopback` alone and for a Unix-socket
+  proxy; it requires **bubblewrap**, and construction **fails closed** without it.
+- A **loopback TCP proxy** (macOS-style, no namespace) requires the **Landlock
+  helper**; construction **fails closed** without it.
+- neither prefers bubblewrap, falling back to Landlock for the filesystem and
   seccomp.
 
 Notes and gaps:
 
-- **Landlock has no connect range, so the ephemeral range is enumerated.** The
-  agent binds a random ephemeral port and connects to it; Landlock's one range
-  form (`port 0`) covers **bind only**, so the connect side is ~28k explicit
-  `NetPort` rules read from `/proc/sys/net/ipv4/ip_local_port_range`. The kernel
-  accepts them in a few milliseconds; that is why the helper's spec lists ports.
-- **The combined model opens the ephemeral range to any host, not just
-  loopback.** Landlock has no host dimension, so a connect grant for an
-  ephemeral port allows that port on *any* address. An agent (or a command that
-  borrows its environment) could reach an arbitrary server on an ephemeral port.
-  The proxy port is likewise host-agnostic. This is the price of giving a
-  networked agent its own loopback server under a port-only filter; a private
-  namespace plus a veth to the host proxy would remove it, and unprivileged
-  bubblewrap cannot create one. Stated gap.
+- **The child-side forwarder is dumb.** It bridges one loopback port to the one
+  mounted socket and carries no allowlist or decision; the proxy on the other
+  end of the socket is the trust boundary. See `agentd-sandbox::forward`.
+- **A Unix-socket proxy needs `agentd-egress-forward` on `PATH`** (or
+  `AGENTD_EGRESS_FORWARD`). It is resolved with the same trust rule as the
+  helper: a binary inside a policy write root is rejected.
+- **The loopback-TCP form is weaker and only for hosts without a namespace.**
+  Landlock is port-only and host-agnostic, so the granted port is reachable on
+  any address; that form is what Docker Sandboxes' host proxy avoids with a
+  microVM. The Linux Unix-socket form has no such gap, which is why Linux uses
+  it.
 - **Landlock network rules need ABI v4 (Linux 6.7).** On an older kernel the
   crate would drop the handling silently and the `NetPort` rules would become
-  no-ops, so a networked session would run **unfiltered**. The helper requests
+  no-ops, so a loopback-TCP session would run **unfiltered**. The helper requests
   the net access as a `CompatLevel::HardRequirement`, so a kernel that cannot
   enforce it fails `handle_access` before the command runs.
 - **`NO_PROXY` keeps the agent's own loopback off the tunnel.** The daemon
@@ -205,9 +201,10 @@ Notes and gaps:
   fails. Verified: an empty `NO_PROXY` breaks `opencode2 acp`'s `session/new`.
 - **A networked agent verified end to end.** `opencode2 acp` under
   `--sandbox --egress openrouter.ai:443` (in `agentd/examples/acp_handshake.rs`)
-  completes its handshake and a prompt turn, and the proxy observes
-  `CONNECT openrouter.ai:443`. `--sandbox` alone (loopback, no egress) also
-  works, under `bwrap --unshare-all`.
+  completes its handshake and a prompt turn **inside a private network namespace
+  with no IP route** — external connects fail with `Network is unreachable`,
+  while the forwarder's loopback port reaches the mounted socket. `--sandbox`
+  alone (loopback, no egress) also works, under `bwrap --unshare-all`.
 - **DNS.** A hostname in the allowlist is resolved by the proxy, on the trusted
   side, so the child never needs the resolver. A child that resolves names
   itself still cannot: it has no route except the proxy.
@@ -230,8 +227,8 @@ Notes and gaps:
 ## The proxy
 
 The proxy is a daemon component, not part of `agentd-sandbox`: the sandbox stays
-protocol-agnostic and only grants a port. It is a small HTTP `CONNECT` server on
-`127.0.0.1:<proxy.port>`:
+protocol-agnostic and grants only the transport. It is a small HTTP `CONNECT`
+server on either a **Unix socket** (Linux) or **loopback TCP** (macOS):
 
 - It reads the `CONNECT host:port` request line, checks `host:port` against the
   session's allowlist, and either opens a TCP connection and pipes bytes both
@@ -263,39 +260,41 @@ honours them; this was verified by observing its `CONNECT openrouter.ai:443`.
 - **Policy tests**: the zero value grants nothing; `loopback` and `proxy`
   round-trip through JSON; the combination validates.
 - **Rendering tests**: Seatbelt emits the loopback clauses and the proxy connect
-  clause; Landlock emits the `NetPort` connect rules and, for loopback + proxy,
-  the ephemeral range and the bind-range rule; a loopback grant with no
-  bubblewrap fails closed.
+  clause; Landlock emits the `NetPort` connect rules for a loopback-TCP proxy; a
+  private-namespace grant with no bubblewrap fails closed; a Unix-socket proxy
+  renders the socket mount and the forwarder.
+- **Forwarder tests**: it bridges loopback to a Unix socket, and parses its CLI.
 - **Proxy tests**: an allowed `host:port` tunnels bytes to a local listener; a
   denied host is refused with `403`; a missing or wrong credential is refused
-  with `407`; a client half-close still receives the reply.
-- **End-to-end**: a real ACP agent completes its handshake and a prompt turn both
-  confined with no egress and confined with the proxy.
+  with `407`; a client half-close still receives the reply; a Unix-socket proxy
+  tunnels too.
+- **End-to-end**: a real ACP agent completes its handshake and a prompt turn
+  inside a private network namespace with no IP route, reaching the model only
+  through the mounted socket.
 
 ## Implementation status
 
-Implemented: the `loopback`/`proxy`/`HostPort` policy fields with validation
-(including the combination); the Seatbelt loopback and proxy clauses; the
-bubblewrap private-namespace model for `loopback` alone; the Landlock helper's
-`NetPort` bind and connect rules (as a `CompatLevel::HardRequirement`) for the
-proxied models, with the ephemeral range enumerated; the model-driven backend
-selection, which fails closed without the required binary; the daemon's CONNECT
-proxy (`agentd::proxy`) with a per-session credential, an allowlist, a bounded
-handshake, and a byte tunnel; and the `--session-egress host:port` /
-`--session-loopback` flags with the `NO_PROXY` injection.
+Implemented: the `loopback`/`proxy`/`HostPort` policy fields with validation;
+the Seatbelt loopback and proxy clauses; the bubblewrap private namespace; the
+**Unix-socket proxy transport** (`Proxy::start_unix`) and the **child-side
+forwarder** (`agentd-egress-forward`) that bridges loopback to the mounted
+socket; the Landlock helper's `NetPort` rules as the fallback for a loopback-TCP
+proxy; the model-driven backend selection, which fails closed without the
+required binary; and the `--session-egress host:port` / `--session-loopback`
+flags with the `NO_PROXY` injection.
 
 Verified end to end:
 
-- The Landlock filter permits a connect to the granted port and denies another,
-  and denies all TCP when no network is granted (`linux.rs`).
-- The proxy tunnels bytes to an allowed destination, refuses a denied one, and
-  refuses a missing or wrong credential (`proxy.rs`).
-- A real agent: `agentd/examples/acp_handshake.rs` drives `opencode2 acp`
-  confined to `session.acp.ready` and through a prompt turn, both with
-  `--sandbox` (private namespace, no egress) and with
-  `--sandbox --egress openrouter.ai:443` (shared network, proxy port and
-  ephemeral range open), where the proxy observes the agent's
-  `CONNECT openrouter.ai:443`.
+- The proxy tunnels bytes to an allowed destination over both transports,
+  refuses a denied one, and refuses a missing or wrong credential (`proxy.rs`).
+- In one `bwrap --unshare-all` namespace, external egress is `Network is
+  unreachable` while the forwarder's loopback port reaches the mounted socket
+  (`forward.rs` and a live run).
+- A real agent: `agentd/examples/acp_handshake.rs` drives `opencode2 acp` to
+  `session.acp.ready` and through a prompt turn, both with `--sandbox` (private
+  namespace, no egress) and with `--sandbox --egress openrouter.ai:443` — the
+  latter inside the same no-egress namespace, reaching the model only through
+  the socket.
 
 Not built: a private namespace with a veth to the host proxy (which would
 remove the ephemeral-range gap without enumerating ports, but unprivileged

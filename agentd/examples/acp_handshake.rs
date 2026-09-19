@@ -171,7 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         ..Policy::default()
     };
-    let proxy = configure_egress(&mut policy, egress).await?;
+    let proxy = configure_egress(&mut policy, egress, sandboxed).await?;
 
     let sandbox = if sandboxed {
         // An ACP agent binds its own loopback HTTP server and talks to it. With
@@ -259,11 +259,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn configure_egress(
     policy: &mut Policy,
     egress: Vec<HostPort>,
+    sandboxed: bool,
 ) -> Result<Option<Proxy>, Box<dyn std::error::Error>> {
     if egress.is_empty() {
         return Ok(None);
     }
-    let proxy = Proxy::start(Egress::new(egress.clone())).await?;
+    // A sandboxed agent runs in a private network namespace with no IP route, so
+    // the proxy is reached over a Unix socket the daemon bind-mounts in; the
+    // child's forwarder presents it on loopback. An unconfined run takes the
+    // host's loopback directly. See `docs/egress.md`.
+    let (proxy, socket, port) = if sandboxed {
+        let socket =
+            std::env::temp_dir().join(format!("agentd-egress-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        let proxy = Proxy::start_unix(&socket, Egress::new(egress.clone()))?;
+        let port = agentd::proxy::FORWARD_PORT;
+        (proxy, Some(socket), port)
+    } else {
+        let proxy = Proxy::start(Egress::new(egress.clone())).await?;
+        let address = proxy.address().ok_or("the proxy did not bind TCP")?;
+        (proxy, None, address.port())
+    };
     for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
         policy.shell.env.push(EnvVar {
             name: String::from(name),
@@ -276,11 +292,9 @@ async fn configure_egress(
         name: String::from("NO_PROXY"),
         value: String::from("127.0.0.1,localhost,::1"),
     });
-    let Some(address) = proxy.address() else {
-        return Err("the egress proxy did not bind a TCP port".into());
-    };
     policy.network.proxy = Some(agentd_sandbox::Proxy {
-        port: address.port(),
+        port,
+        socket,
         egress,
     });
     Ok(Some(proxy))

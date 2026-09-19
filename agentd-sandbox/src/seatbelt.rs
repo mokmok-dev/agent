@@ -673,6 +673,7 @@ mod tests {
             network: NetworkPolicy {
                 proxy: Some(crate::policy::Proxy {
                     port: 9000,
+                    socket: None,
                     egress: vec![crate::policy::HostPort {
                         host: String::from("api.example.com"),
                         port: 443,
