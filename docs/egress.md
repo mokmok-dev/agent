@@ -142,10 +142,11 @@ Notes and gaps:
   itself still cannot: it has no route except the proxy.
 - **TLS stays end to end.** The proxy sees `host:port` and ciphertext, never the
   provider key or the plaintext request.
-- **NixOS-style hosts.** The executor's default shell and system roots assume
-  FHS (`/bin/bash`, `/usr`, ...), so on a host where the interpreter lives in a
-  store (`/nix/store`) the confinement probe fails before any network filtering
-  is reached. That is a general portability gap, not specific to egress.
+- **NixOS-style hosts.** The executor resolves its shell from `PATH` (then
+  `/bin/bash`, then `/bin/sh`) and grants the shell's directory, and it treats
+  `/nix` and `/run/current-system` as system roots, so a host whose interpreter
+  lives in a store works. The resolved shell is rejected inside a policy write
+  root, so a repository cannot supply it.
 - **`loopback_bind: 0` means different things per backend.** Landlock treats
   port `0` as the kernel's ephemeral range, so an ACP agent's internal server
   can pick any port. Seatbelt renders `localhost:0`, which matches nothing. A
