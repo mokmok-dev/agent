@@ -99,6 +99,11 @@ pub struct Event {
     /// the specification, so absent timestamps are tolerated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time: Option<String>,
+    /// The `CloudEvents` `subject` attribute: the resource the event is about
+    /// within its `source`. Optional in the specification, so absent subjects
+    /// are tolerated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
     /// The `CloudEvents` `data` payload.
     #[serde(default)]
     pub data: serde_json::Value,
@@ -123,8 +128,26 @@ impl Event {
             specversion: String::from(SPEC_VERSION),
             r#type: r#type.into(),
             time: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
+            subject: None,
             data,
         }
+    }
+
+    /// Sets the `subject` attribute, the resource the event is about within
+    /// its `source`, and returns `self` for chaining after [`Event::new`].
+    ///
+    /// Unlike [`set_provenance`](Event::set_provenance), this is a consuming
+    /// builder because `subject` belongs to the producer, not the daemon: the
+    /// daemon appends events and would call `set_provenance` on a borrowed,
+    /// already-deserialized event, while a producer (such as a bridge) sets the
+    /// subject as it builds the event.
+    #[must_use]
+    pub fn with_subject(
+        mut self,
+        subject: impl Into<String>,
+    ) -> Self {
+        self.subject = Some(subject.into());
+        self
     }
 
     /// Whether this event's `type` is reserved to daemon-authority publishers
@@ -137,7 +160,8 @@ impl Event {
     /// Overwrites the provenance attributes the daemon owns on ingress: the
     /// `source` is replaced with the authenticated principal's, and `time` with
     /// the daemon's current UTC time, so a client cannot forge where or when an
-    /// event entered the log.
+    /// event entered the log. The `subject` is left alone; it belongs to the
+    /// producer (see [`with_subject`](Event::with_subject)).
     pub fn set_provenance(
         &mut self,
         source: impl Into<String>,
@@ -328,7 +352,21 @@ mod tests {
         let event: Event = serde_json::from_str(raw).expect("should deserialize");
 
         assert_eq!(event.time, None);
+        assert_eq!(event.subject, None);
         assert_eq!(event.data, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn with_subject_sets_an_optional_attribute_that_round_trips() {
+        let event = test_event("test.event").with_subject("session:s1");
+
+        assert_eq!(event.subject.as_deref(), Some("session:s1"));
+        let raw = serde_json::to_string(&event).expect("should serialize");
+        let decoded: Event = serde_json::from_str(&raw).expect("should deserialize");
+        assert_eq!(decoded.subject.as_deref(), Some("session:s1"));
+
+        let without = serde_json::to_string(&test_event("test.event")).expect("serialize");
+        assert!(!without.contains("subject"));
     }
 
     #[tokio::test]
