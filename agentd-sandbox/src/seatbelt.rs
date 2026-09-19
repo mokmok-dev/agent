@@ -342,17 +342,22 @@ fn unix_socket_grants(policy: &Policy) -> Vec<String> {
     grants
 }
 
-/// The loopback grants: a bind on any loopback port the policy names, and a
-/// connect to the daemon proxy's loopback port.
+/// The loopback grants: free loopback when the policy allows it, and a connect
+/// to the daemon proxy's loopback port.
 ///
-/// Loopback is not egress: a bind is the command's own server, and the proxy
-/// connect reaches a daemon-run endpoint on the same host. The proxy enforces
-/// the real egress allowlist, so the OS only needs to permit these two ports.
+/// Loopback is not egress: it reaches the command's own server or a daemon-run
+/// endpoint on the same host. The proxy enforces the real egress allowlist, so
+/// the OS only needs to permit these.
 fn loopback_grants(policy: &Policy) -> Vec<String> {
     let mut grants: Vec<String> = Vec::new();
-    for port in &policy.network.loopback_bind {
-        grants.push(format!(
-            "(allow network-bind (local ip \"localhost:{port}\"))"
+    if policy.network.loopback {
+        // A bind and a connect on loopback, any port: an ACP agent binds an
+        // ephemeral port and connects to it.
+        grants.push(String::from(
+            "(allow network-bind (local ip \"localhost:*\"))",
+        ));
+        grants.push(String::from(
+            "(allow network-outbound (remote ip \"localhost:*\"))",
         ));
     }
     if let Some(proxy) = &policy.network.proxy {
@@ -637,12 +642,35 @@ mod tests {
     }
 
     #[test]
-    fn loopback_bind_and_proxy_connect_render_scoped_grants() {
+    fn loopback_renders_scoped_grants() {
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
         let policy = Policy {
             network: NetworkPolicy {
-                loopback_bind: vec![8080],
+                loopback: true,
+                ..NetworkPolicy::default()
+            },
+            ..workdir_policy(&host)
+        };
+
+        let profile = render(&policy, &[]);
+
+        assert!(
+            profile.contains("(allow network-bind (local ip \"localhost:*\"))"),
+            "the bind grant must be loopback-scoped: {profile}"
+        );
+        assert!(
+            profile.contains("(allow network-outbound (remote ip \"localhost:*\"))"),
+            "the loopback connect must be loopback-scoped: {profile}"
+        );
+    }
+
+    #[test]
+    fn a_proxy_connect_renders_one_scoped_grant() {
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        let policy = Policy {
+            network: NetworkPolicy {
                 proxy: Some(crate::policy::Proxy {
                     port: 9000,
                     egress: vec![crate::policy::HostPort {
@@ -657,10 +685,6 @@ mod tests {
 
         let profile = render(&policy, &[]);
 
-        assert!(
-            profile.contains("(allow network-bind (local ip \"localhost:8080\"))"),
-            "the bind grant must be loopback and port-scoped: {profile}"
-        );
         assert!(
             profile.contains("(allow network-outbound (remote ip \"localhost:9000\"))"),
             "the proxy connect must be loopback and port-scoped: {profile}"

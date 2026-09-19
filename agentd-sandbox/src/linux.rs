@@ -352,21 +352,20 @@ enum ForcedBackend {
     Landlock(PathBuf),
 }
 
-/// Whether the policy grants any IP network access.
-///
-/// A Unix socket is a filesystem object and needs no network grant, so only the
-/// loopback bind and the proxy connect count.
-const fn network_grants(policy: &Policy) -> bool {
-    !policy.network.loopback_bind.is_empty() || policy.network.proxy.is_some()
-}
-
 /// Chooses the backend: a forced one, else `bwrap`, else the Landlock helper.
 ///
-/// bubblewrap cannot filter by port, so when the policy grants IP network access
-/// the bubblewrap backend would have to keep the network namespace shared with
-/// no filter — a blanket reopen. Instead, a network grant forces the Landlock
-/// helper (for the port filter and seccomp) even when `bwrap` is available, and
-/// construction fails closed if the helper is missing.
+/// The two network models decide this:
+///
+/// - **Loopback** needs a *private network namespace* (only loopback exists), so
+///   it must use the bubblewrap backend's `--unshare-all`; the Landlock fallback
+///   cannot express it and construction fails closed without `bwrap`.
+/// - **The proxy** needs the *shared* network with a single port open, so it
+///   must use the Landlock helper's `NetPort` filter; bubblewrap cannot filter
+///   by port. Construction fails closed without the helper.
+/// - Neither: prefer bubblewrap (namespaces plus mounts) and fall back to
+///   Landlock for the filesystem and seccomp.
+///
+/// `Policy::validate` rejects a policy that asks for both.
 fn select_backend(
     policy: &Policy,
     forced: Option<ForcedBackend>,
@@ -375,19 +374,28 @@ fn select_backend(
     shell: &Path,
 ) -> Result<Backend, SandboxError> {
     match forced {
-        // The test-only forced backend bypasses the network-grant guard on
-        // purpose: it exists to render bwrap args without bwrap installed. It
-        // must stay `#[cfg(test)]`, or a network policy would silently get an
-        // unfiltered namespace.
+        // The test-only forced backends bypass the network-model guards on
+        // purpose: they render args without the binary installed. They must stay
+        // `#[cfg(test)]`, or a network policy would silently get the wrong model.
         Some(ForcedBackend::Bubblewrap(bwrap)) => Ok(Backend::Bubblewrap(bwrap)),
         Some(ForcedBackend::Landlock(helper)) => {
             landlock_backend(policy, &helper, resolved, scratch, shell)
         },
         None => {
-            if network_grants(policy) {
+            if policy.network.loopback {
+                return find_on_path(BWRAP, Some(&policy.fs))
+                    .map(Backend::Bubblewrap)
+                    .ok_or_else(|| {
+                        SandboxError::InvalidPolicy(String::from(
+                            "the policy grants loopback, which requires bubblewrap for a private \
+                             network namespace; bubblewrap is unavailable",
+                        ))
+                    });
+            }
+            if policy.network.proxy.is_some() {
                 let helper = find_helper(&policy.fs).map_err(|_| {
                     SandboxError::InvalidPolicy(String::from(
-                        "the policy grants network access, which requires the Landlock helper; \
+                        "the policy grants the proxy, which requires the Landlock helper; \
                          bubblewrap cannot filter by port and the helper is unavailable",
                     ))
                 })?;
@@ -519,12 +527,10 @@ fn build_spec(
             .then_with(|| right.access.rank().cmp(&left.access.rank()))
     });
     paths.dedup_by(|left, right| left.path == right.path);
-    let mut bind_ports = policy.network.loopback_bind.clone();
-    bind_ports.sort_unstable();
-    bind_ports.dedup();
     Spec {
         paths,
-        bind_ports,
+        // Loopback is a private namespace, so no port rule is needed; only the
+        // proxy's port is filtered.
         connect_port: policy.network.proxy.as_ref().map(|proxy| proxy.port),
     }
 }
@@ -862,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn a_network_grant_requires_the_landlock_helper() {
+    fn the_proxy_grant_requires_the_landlock_helper() {
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
         let mut policy = workdir_policy(&host);
@@ -874,13 +880,12 @@ mod tests {
             }],
         });
 
-        // With a network grant the helper is required even if `bwrap` is on
-        // PATH, because bubblewrap cannot filter by port; the helper resolves
-        // from `PATH`, so construction succeeds when it is installed.
+        // The proxy needs the port filter the helper provides; bubblewrap cannot
+        // express it. Construction succeeds when the helper is installed.
         match ConfinedProcessExecutor::new(&policy) {
             Ok(executor) => {
                 let Backend::Landlock { spec_path, .. } = &executor.backend else {
-                    panic!("a network grant must force the Landlock backend");
+                    panic!("a proxy grant must select the Landlock backend");
                 };
                 let spec: Spec =
                     serde_json::from_slice(&std::fs::read(spec_path).expect("the spec is written"))
@@ -898,11 +903,38 @@ mod tests {
     }
 
     #[test]
-    fn landlock_spec_carries_loopback_and_proxy_ports() {
+    fn the_loopback_grant_uses_bubblewrap_and_fails_closed_without_it() {
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
         let mut policy = workdir_policy(&host);
-        policy.network.loopback_bind = vec![8080, 8080, 9090];
+        policy.network.loopback = true;
+
+        // `ConfinedProcessExecutor::new` reaches the real backend selection.
+        // Either bubblewrap is present (bubblewrap backend) or the policy is
+        // rejected for lacking it; it must never silently fall back to Landlock,
+        // which cannot confine free loopback.
+        match ConfinedProcessExecutor::new(&policy) {
+            Ok(executor) => {
+                assert!(
+                    matches!(executor.backend, Backend::Bubblewrap(_)),
+                    "a loopback grant must select the bubblewrap backend"
+                );
+            },
+            Err(crate::error::SandboxError::InvalidPolicy(message)) => {
+                assert!(
+                    message.contains("bubblewrap"),
+                    "the failure must explain the missing bubblewrap: {message}"
+                );
+            },
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn landlock_spec_carries_the_proxy_port() {
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        let mut policy = workdir_policy(&host);
         policy.network.proxy = Some(crate::policy::Proxy {
             port: 9000,
             egress: Vec::new(),
@@ -917,11 +949,6 @@ mod tests {
             serde_json::from_slice(&std::fs::read(spec_path).expect("the spec is written"))
                 .expect("the spec parses");
 
-        assert_eq!(
-            spec.bind_ports,
-            vec![8080, 9090],
-            "ports are sorted and deduped"
-        );
         assert_eq!(spec.connect_port, Some(9000));
     }
 
@@ -1163,6 +1190,31 @@ mod tests {
         let result = executor.blocking_exec("echo confined-ok");
         assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
         assert!(result.stdout.contains("confined-ok"));
+    }
+
+    #[test]
+    fn landlock_denies_tcp_when_no_network_is_granted() {
+        // Regression guard: network must be *handled* even when no port is
+        // granted, or Landlock leaves TCP entirely unrestricted.
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        let Some(executor) = landlock_executor(&workdir_policy(&host)) else {
+            return;
+        };
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+
+        let result =
+            executor.blocking_exec(&format!("exec 3<>/dev/tcp/127.0.0.1/{port} && echo open"));
+        assert_ne!(
+            result.exit_code, 0,
+            "a session with no network grant must not connect: {}",
+            result.stdout
+        );
     }
 
     #[test]
