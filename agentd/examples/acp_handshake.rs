@@ -8,19 +8,26 @@
 //!     opencode2 acp
 //! ```
 //!
-//! Or confined. A confined agent needs free loopback for its own HTTP server,
-//! which is a private network namespace with no egress, so `--sandbox` cannot
-//! be combined with `--egress`:
+//! Or confined:
 //!
 //! ```sh
 //! cargo run -p agentd --features sandbox --example acp_handshake -- \
 //!     --sandbox -- opencode2 acp
 //! ```
 //!
-//! The confined run proves the sandbox can start an ACP agent under a private
-//! namespace. Reaching a remote model is the separate proxy model
-//! (`--egress`, unconfined here), which additionally needs the agent to honour
-//! the injected `HTTP_PROXY` and hold credentials (see `docs/egress.md`).
+//! A confined agent binds its own loopback HTTP server; with no proxy that is a
+//! private network namespace (loopback, no egress). Add `--egress host:port` to
+//! reach a model provider through the daemon's CONNECT proxy *and* keep the
+//! agent's own loopback server:
+//!
+//! ```sh
+//! cargo run -p agentd --features sandbox --example acp_handshake -- \
+//!     --sandbox --egress openrouter.ai:443 -- opencode2 acp
+//! ```
+//!
+//! That combined model is the shared network with the proxy port and the
+//! ephemeral range open (see `docs/egress.md`); the injected `NO_PROXY` keeps the
+//! agent's own loopback off the tunnel.
 
 use agentd::proxy::{Egress, Proxy};
 use agentd::session::{SessionManager, Supervision};
@@ -98,6 +105,8 @@ fn plain_result(output: Result<std::process::Output, std::io::Error>) -> ExecRes
 struct Args {
     sandboxed: bool,
     egress: Vec<HostPort>,
+    /// A prompt to send once the session is ready, to exercise a model call.
+    prompt: Option<String>,
     command: String,
 }
 
@@ -105,6 +114,7 @@ struct Args {
 fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     let mut sandboxed = false;
     let mut egress: Vec<HostPort> = Vec::new();
+    let mut prompt = None;
     let mut command_args: Vec<String> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -114,17 +124,20 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
                 let value = args.next().ok_or("--egress needs host:port")?;
                 egress.push(parse_host_port(&value)?);
             },
+            "--prompt" => prompt = Some(args.next().ok_or("--prompt needs text")?),
             _ => command_args.push(arg),
         }
     }
     if command_args.is_empty() {
         return Err(
-            "usage: acp_handshake [--sandbox] [--egress host:port] <command> [args...]".into(),
+            "usage: acp_handshake [--sandbox] [--egress host:port] [--prompt text] <command> [args...]"
+                .into(),
         );
     }
     Ok(Args {
         sandboxed,
         egress,
+        prompt,
         command: command_args.join(" "),
     })
 }
@@ -134,6 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Args {
         sandboxed,
         egress,
+        prompt,
         command,
     } = parse_args()?;
     let workdir = std::env::current_dir()?;
@@ -157,40 +171,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         ..Policy::default()
     };
-
-    // A confined ACP agent needs loopback for its own HTTP server, but the
-    // daemon proxy lives on the host's loopback, which a private namespace
-    // cannot reach. The two models are mutually exclusive, so this combination
-    // is not a thing the sandbox can express (see `docs/egress.md`).
-    if sandboxed && !egress.is_empty() {
-        return Err(
-            "an ACP agent needs loopback, which is a private namespace with no route to the \
-             host's proxy; --sandbox and --egress cannot be combined"
-                .into(),
-        );
-    }
-
-    // The daemon's CONNECT proxy: the only egress path the sandbox grants.
-    let proxy = if egress.is_empty() {
-        None
-    } else {
-        let proxy = Proxy::start(Egress::new(egress.clone())).await?;
-        for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
-            policy.shell.env.push(EnvVar {
-                name: String::from(name),
-                value: proxy.url(),
-            });
-        }
-        policy.network.proxy = Some(agentd_sandbox::Proxy {
-            port: proxy.address().port(),
-            egress,
-        });
-        Some(proxy)
-    };
+    let proxy = configure_egress(&mut policy, egress).await?;
 
     let sandbox = if sandboxed {
-        // An ACP agent binds its own loopback HTTP server and talks to it; a
-        // private network namespace gives it free loopback with no egress.
+        // An ACP agent binds its own loopback HTTP server and talks to it. With
+        // no proxy that is a private network namespace (loopback, no egress);
+        // with a proxy the network is shared and the ephemeral range is opened
+        // alongside the proxy port (see `docs/egress.md`).
         policy.network.loopback = true;
         Arc::new(Sandbox::new(&policy, log.clone(), "acp-demo")?)
     } else {
@@ -230,7 +217,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ))
     .await?;
 
-    let ready = watch_until_ready(subscriber).await;
+    let mut events = subscriber;
+    let ready = watch_until_ready(&mut events).await;
+
+    // With a prompt, send it once ready and wait for the turn to finish, which
+    // is where a model call happens (through the proxy, if one is configured).
+    let turn = if ready && let Some(prompt) = prompt {
+        log.publish(
+            agentd::bridge::prompt(&json!([{ "type": "text", "text": prompt }]))
+                .with_subject("session:opencode-demo"),
+        )
+        .await?;
+        watch_for_turn(&mut events).await
+    } else {
+        None
+    };
 
     let _ = shutdown_tx.send(true);
     let _ = run.await;
@@ -239,17 +240,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let _ = std::fs::remove_file(&events_path);
 
-    if ready {
-        println!("ACP handshake completed: the agent answered initialize and session/new.");
-        Ok(())
-    } else {
-        Err("the ACP handshake did not complete".into())
+    match (ready, turn) {
+        (true, None) => {
+            println!("ACP handshake completed: the agent answered initialize and session/new.");
+            Ok(())
+        },
+        (true, Some(stop_reason)) => {
+            println!("ACP turn completed with stop reason: {stop_reason}");
+            Ok(())
+        },
+        (false, _) => Err("the ACP handshake did not complete".into()),
     }
 }
 
-/// Prints the session events until the ACP handshake completes or times out.
+/// Starts the daemon's CONNECT proxy for `egress` and points `policy` at it: the
+/// proxy env, the `NO_PROXY` that keeps loopback off the tunnel, and the
+/// network grant. Returns the running proxy, or `None` when `egress` is empty.
+async fn configure_egress(
+    policy: &mut Policy,
+    egress: Vec<HostPort>,
+) -> Result<Option<Proxy>, Box<dyn std::error::Error>> {
+    if egress.is_empty() {
+        return Ok(None);
+    }
+    let proxy = Proxy::start(Egress::new(egress.clone())).await?;
+    for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+        policy.shell.env.push(EnvVar {
+            name: String::from(name),
+            value: proxy.url(),
+        });
+    }
+    // Loopback traffic must not go through the proxy, or an agent's own internal
+    // server calls would be tunnelled and break.
+    policy.shell.env.push(EnvVar {
+        name: String::from("NO_PROXY"),
+        value: String::from("127.0.0.1,localhost,::1"),
+    });
+    policy.network.proxy = Some(agentd_sandbox::Proxy {
+        port: proxy.address().port(),
+        egress,
+    });
+    Ok(Some(proxy))
+}
+
+/// Prints session events until the handshake completes or times out.
 async fn watch_until_ready(
-    mut events: tokio::sync::broadcast::Receiver<agentd_events::LogEntry>
+    events: &mut tokio::sync::broadcast::Receiver<agentd_events::LogEntry>
 ) -> bool {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     while tokio::time::Instant::now() < deadline {
@@ -272,6 +308,36 @@ async fn watch_until_ready(
     false
 }
 
+/// Prints session events until a prompt turn ends, returning its stop reason.
+async fn watch_for_turn(
+    events: &mut tokio::sync::broadcast::Receiver<agentd_events::LogEntry>
+) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
+            Ok(Ok(entry)) => {
+                let event = entry.event;
+                if event.r#type.starts_with("session.") || event.r#type.starts_with("sandbox.") {
+                    println!("[{}] {}", event.r#type, summarize(&event));
+                }
+                if event.r#type == agentd::bridge::ACP_TURN_COMPLETED {
+                    return Some(
+                        event.data["stop_reason"]
+                            .as_str()
+                            .unwrap_or("unknown")
+                            .to_string(),
+                    );
+                }
+                if event.r#type == agentd::bridge::ACP_FAILED || event.r#type == "session.exited" {
+                    return None;
+                }
+            },
+            Ok(Err(_)) | Err(_) => return None,
+        }
+    }
+    None
+}
+
 /// Parses `host:port`, accepting a bracketed IPv6 literal.
 fn parse_host_port(value: &str) -> Result<HostPort, Box<dyn std::error::Error>> {
     let (host, port) = value.rsplit_once(':').ok_or("expected host:port")?;
@@ -288,6 +354,24 @@ fn summarize(event: &Event) -> String {
         "session.acp.ready" => String::from("session is ready"),
         "session.bridge.inbound" => {
             let message = &data["message"];
+            if let Some(update) = message
+                .get("params")
+                .and_then(|params| params.get("update"))
+            {
+                // A session/update notification: surface the text the agent
+                // streams, so the model's output is visible.
+                if let Some(text) = update
+                    .get("content")
+                    .and_then(|content| content.get("text"))
+                    .and_then(Value::as_str)
+                {
+                    let kind = update
+                        .get("sessionUpdate")
+                        .and_then(Value::as_str)
+                        .unwrap_or("update");
+                    return format!("{kind}: {}", truncate(text, 200));
+                }
+            }
             message.get("method").and_then(Value::as_str).map_or_else(
                 || {
                     message.get("result").map_or_else(

@@ -190,22 +190,26 @@ A narrow host:port egress grant, the obvious fix, is **not achievable on Linux**
 
 So the honest options are a blanket reopen (rejected: it discards the boundary)
 or a **managed proxy**. The latter is designed in [egress](egress.md): the
-daemon runs a CONNECT proxy, the OS grants only the proxy's loopback port, and
-the proxy enforces a `host:port` allowlist. A session opts in with
-`--session-egress`. It is an opaque tunnel — no TLS termination and no
+daemon runs a CONNECT proxy, the OS grants the proxy's loopback port (and, for an
+agent with its own server, the loopback ephemeral range), and the proxy enforces
+a `host:port` allowlist. A session opts in with `--session-loopback
+--session-egress host:port`. It is an opaque tunnel — no TLS termination and no
 credential injection — so the agent still holds its own provider key.
 
-For the model path, the agent must honour the injected proxy env (see the egress
-doc's stated gap); a state directory it can write is a separate filesystem
-concern.
+An ACP agent starts and completes its handshake confined, in two ways:
 
-Separately, **an ACP agent starts and completes its handshake confined** with no
-egress at all: its internal HTTP server needs free loopback, which
-`--session-loopback` grants as a private network namespace (see
-[egress](egress.md#two-network-models)). `agentd/examples/acp_handshake.rs
---sandbox` drives a real `opencode2 acp` to `session.acp.ready` this way. This
-needs bubblewrap; the Landlock fallback cannot express free loopback without
-opening egress, so it fails closed.
+- `--session-loopback` alone: a private network namespace, loopback only, no
+  egress. Needs bubblewrap.
+- `--session-loopback --session-egress openrouter.ai:443`: the shared network
+  with the proxy port and the ephemeral range open, so the agent reaches the
+  provider *and* keeps its own server. The daemon injects `NO_PROXY` so the
+  agent's own loopback stays off the tunnel. `agentd/examples/acp_handshake.rs`
+  drives a real `opencode2 acp` to `session.acp.ready` and through a prompt turn
+  this way; the proxy observes the agent's `CONNECT openrouter.ai:443`.
+
+The agent must honour the injected proxy env (see the egress doc's gap);
+`opencode` does. A state directory it can write is a separate filesystem
+concern.
 
 ## Testing strategy
 

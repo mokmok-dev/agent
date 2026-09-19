@@ -186,6 +186,7 @@ async fn serve(
             return reply(&mut client_write, 502, "Bad Gateway").await;
         },
     };
+    tracing::info!(%host, %port, "the proxy opened a tunnel");
     client_write
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;

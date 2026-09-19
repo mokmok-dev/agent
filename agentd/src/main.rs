@@ -130,9 +130,6 @@ enum RunError {
     #[error("--session-egress must be host:port: {0}")]
     Egress(String),
     #[cfg(feature = "sandbox")]
-    #[error("--session-loopback and --session-egress cannot be combined")]
-    LoopbackWithEgress,
-    #[cfg(feature = "sandbox")]
     #[error("failed to start the egress proxy: {0}")]
     Proxy(std::io::Error),
     #[error("failed to load the provider config: {0}")]
@@ -259,6 +256,13 @@ async fn start_session_manager(
                 value: url.clone(),
             });
         }
+        // Loopback traffic must not go through the proxy: an agent with its own
+        // internal server (an ACP agent) would otherwise route its own calls
+        // through the tunnel and break.
+        policy.shell.env.push(agentd_sandbox::EnvVar {
+            name: String::from("NO_PROXY"),
+            value: String::from("127.0.0.1,localhost,::1"),
+        });
         policy.network.proxy = Some(agentd_sandbox::Proxy {
             port: proxy.address().port(),
             egress,
@@ -339,11 +343,6 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
             restart_backoff: Duration::from_secs(1),
             lifetime: session_lifetime_secs.map(Duration::from_secs),
         };
-        if session_loopback && !session_egress.is_empty() {
-            // Loopback is a private namespace and the proxy is a host socket;
-            // a session cannot have both (see `docs/egress.md`).
-            return Err(RunError::LoopbackWithEgress);
-        }
         let egress = parse_egress(&session_egress)?;
         start_session_manager(
             &log,
