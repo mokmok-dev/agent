@@ -87,6 +87,8 @@ enum Command {
 enum BridgeKind {
     /// The Model Context Protocol over stdio (newline-delimited JSON-RPC 2.0).
     Mcp,
+    /// The Agent Client Protocol over stdio; the daemon is the client.
+    Acp,
 }
 
 #[derive(Debug, Error)]
@@ -154,7 +156,10 @@ fn start_session_manager(
     let manager = match bridge {
         None => manager,
         Some(BridgeKind::Mcp) => {
-            manager.with_bridge(Arc::new(agentd::bridge::McpBridge::default()))
+            manager.with_protocol(Arc::new(agentd::bridge::McpProtocol::default()))
+        },
+        Some(BridgeKind::Acp) => {
+            manager.with_protocol(Arc::new(agentd::bridge::AcpProtocol::default()))
         },
     };
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

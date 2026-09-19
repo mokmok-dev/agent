@@ -22,6 +22,7 @@
 //! process it did not spawn. See [`SessionManager::run`].
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -34,7 +35,7 @@ use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, watch};
 
-use crate::bridge::{Bridge, session_subject};
+use crate::bridge::{Action, Bridge, Protocol, session_subject};
 
 /// The largest protocol frame accepted from a bridged child before the frame is
 /// dropped and the stream resynchronizes at the next newline. The read is
@@ -104,9 +105,13 @@ pub struct SessionManager {
     command: String,
     agent_id: String,
     supervision: Supervision,
-    /// The protocol bridge, when the configured command is a third-party tool
-    /// that does not speak `CloudEvents`. `None` supervises the process only.
-    bridge: Option<Arc<dyn Bridge>>,
+    /// The protocol, when the configured command is a third-party tool that
+    /// does not speak `CloudEvents`. `None` supervises the process only. One
+    /// stateful [`Bridge`] is created per session from it.
+    protocol: Option<Arc<dyn Protocol>>,
+    /// The sandbox working directory, handed to a protocol that advertises it
+    /// (an ACP agent gets it as the session `cwd`).
+    workdir: PathBuf,
     /// The active sessions, by id, with the restart count of each.
     ///
     /// A `std` mutex is sufficient because no critical section awaits; keeping
@@ -135,7 +140,8 @@ impl SessionManager {
             command: command.into(),
             agent_id,
             supervision: Supervision::default(),
-            bridge: None,
+            protocol: None,
+            workdir: policy.shell.workdir.clone(),
             active: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
@@ -155,9 +161,21 @@ impl SessionManager {
             command: command.into(),
             agent_id: agent_id.into(),
             supervision: Supervision::default(),
-            bridge: None,
+            protocol: None,
+            workdir: PathBuf::from("/"),
             active: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    /// Sets the working directory a protocol advertises (the ACP session
+    /// `cwd`). Defaults to the policy's shell workdir, or `/`.
+    #[must_use]
+    pub fn with_workdir(
+        mut self,
+        workdir: impl Into<PathBuf>,
+    ) -> Self {
+        self.workdir = workdir.into();
+        self
     }
 
     /// Sets the supervision policy.
@@ -170,14 +188,14 @@ impl SessionManager {
         self
     }
 
-    /// Sets the protocol bridge, so the configured command's stdio is converted
-    /// to and from events.
+    /// Sets the protocol, so the configured command's stdio is converted to and
+    /// from events by a state machine created per session.
     #[must_use]
-    pub fn with_bridge(
+    pub fn with_protocol(
         mut self,
-        bridge: Arc<dyn Bridge>,
+        protocol: Arc<dyn Protocol>,
     ) -> Self {
-        self.bridge = Some(bridge);
+        self.protocol = Some(protocol);
         self
     }
 
@@ -377,8 +395,8 @@ impl SessionManager {
         session_id: &str,
         mut process: SandboxedProcess,
     ) -> Outcome {
-        if let Some(bridge) = self.bridge.clone() {
-            return self.drive(session_id, &mut process, bridge).await;
+        if let Some(protocol) = self.protocol.clone() {
+            return self.drive(session_id, &mut process, protocol).await;
         }
         // Without a bridge the process is a `CloudEvents` peer: its pipes are
         // left untouched, so the previous behavior is unchanged.
@@ -404,9 +422,18 @@ impl SessionManager {
         &self,
         session_id: &str,
         process: &mut SandboxedProcess,
-        bridge: Arc<dyn Bridge>,
+        protocol: Arc<dyn Protocol>,
     ) -> Outcome {
         let (stdin, stdout) = (process.take_stdin(), process.take_stdout());
+
+        // The per-session state machine. The stdin writer and the stdout reader
+        // both drive it, so it sits behind a mutex held only for one synchronous
+        // step; no lock is ever held across an await.
+        let context = crate::bridge::SessionContext {
+            session_id,
+            workdir: &self.workdir,
+        };
+        let bridge: Arc<Mutex<Box<dyn Bridge>>> = Arc::new(Mutex::new(protocol.connect(&context)));
 
         // Every spawned pipe task lives in the guard, so aborting is guaranteed
         // even if this future is dropped; the writer owns the child's stdin, the
@@ -422,13 +449,19 @@ impl SessionManager {
             let (replies_tx, replies_rx) = mpsc::channel::<String>(64);
             // Subscribe before the child can produce output, so an event
             // published after the child's first frame is never missed.
-            let watcher = watch_downlink(&self.log, bridge.clone(), session_id, events_tx);
-            let handshake = bridge.handshake();
+            let watcher = watch_downlink(
+                self.log.clone(),
+                bridge.clone(),
+                session_id.to_string(),
+                events_tx,
+            );
+            let handshake = start_actions(&bridge);
             let writer = tokio::spawn(write_stdin(
+                self.log.clone(),
                 stdin,
                 events_rx,
                 replies_rx,
-                bridge.clone(),
+                session_id.to_string(),
                 handshake,
             ));
             tasks.push(&writer);
@@ -500,6 +533,76 @@ impl Drop for TaskGuard {
     }
 }
 
+/// A bridge step's actions: events to publish are appended, and lines to write
+/// are forwarded to the single stdin writer through `writer`.
+///
+/// The bridge lock is not held here: `actions` is computed under the lock, then
+/// published and forwarded without it, so no lock is ever held across an await
+/// and publishing cannot block another step.
+async fn apply_actions(
+    log: &EventLog,
+    session_id: &str,
+    actions: Vec<Action>,
+    writer: &mpsc::Sender<String>,
+) {
+    for action in actions {
+        match action {
+            Action::Publish(event) => {
+                let event = event.with_subject(session_subject(session_id));
+                if let Err(error) = log.publish(event).await {
+                    tracing::error!(%error, %session_id, "failed to record a bridged message");
+                }
+            },
+            Action::Write(line) => {
+                if writer.send(line).await.is_err() {
+                    return;
+                }
+            },
+        }
+    }
+}
+
+/// Publishes a step's events when there is no stdin writer to hand writes to.
+async fn publish_events(
+    log: &EventLog,
+    session_id: &str,
+    actions: Vec<Action>,
+) {
+    for action in actions {
+        let Action::Publish(event) = action else {
+            continue;
+        };
+        let event = event.with_subject(session_subject(session_id));
+        if let Err(error) = log.publish(event).await {
+            tracing::error!(%error, %session_id, "failed to record a bridged message");
+        }
+    }
+}
+
+/// Runs the bridge's opening step under the lock and returns its actions.
+fn start_actions(bridge: &Arc<Mutex<Box<dyn Bridge>>>) -> Vec<Action> {
+    let mut bridge = bridge.lock().unwrap_or_else(PoisonError::into_inner);
+    bridge.start()
+}
+
+/// Runs one inbound step under the lock and returns its actions.
+fn line_actions(
+    bridge: &Arc<Mutex<Box<dyn Bridge>>>,
+    line: &str,
+) -> Vec<Action> {
+    let mut bridge = bridge.lock().unwrap_or_else(PoisonError::into_inner);
+    bridge.on_line(line)
+}
+
+/// Runs one downlink step under the lock and returns its actions.
+fn event_actions(
+    bridge: &Arc<Mutex<Box<dyn Bridge>>>,
+    event: &Event,
+) -> Vec<Action> {
+    let mut bridge = bridge.lock().unwrap_or_else(PoisonError::into_inner);
+    bridge.on_event(event)
+}
+
 /// Writes `lines` to `writer`, each terminated by a newline.
 async fn write_lines(
     writer: &mut ChildStdin,
@@ -521,7 +624,7 @@ async fn write_lines(
 /// resynchronizes at the next frame.
 async fn uplink_stream(
     log: EventLog,
-    bridge: Arc<dyn Bridge>,
+    bridge: Arc<Mutex<Box<dyn Bridge>>>,
     session_id: String,
     stdout: ChildStdout,
     replies: Option<mpsc::Sender<String>>,
@@ -535,20 +638,14 @@ async fn uplink_stream(
                 tracing::warn!(%session_id, "dropping an oversized frame");
             },
             Ok(ReadFrame::Line) => {
-                let Some(conversion) = bridge.uplink(&line) else {
+                let actions = line_actions(&bridge, &line);
+                // Without a stdin writer there is nowhere to send a line, but
+                // events are still recorded; only the writes are dropped.
+                let Some(replies) = replies.as_ref() else {
+                    publish_events(&log, &session_id, actions).await;
                     continue;
                 };
-                for reply in conversion.to_child {
-                    if let Some(replies) = replies.as_ref()
-                        && replies.send(reply).await.is_err()
-                    {
-                        return;
-                    }
-                }
-                let event = conversion.event.with_subject(session_subject(&session_id));
-                if let Err(error) = log.publish(event).await {
-                    tracing::error!(%error, %session_id, "failed to record a bridged message");
-                }
+                apply_actions(&log, &session_id, actions, replies).await;
             },
             Err(error) => {
                 tracing::warn!(%error, %session_id, "bridged stdout could not be read");
@@ -622,20 +719,20 @@ async fn read_frame<R: AsyncBufRead + Unpin>(
     }
 }
 
-/// Subscribes to the log and forwards the events the bridge can downlink to
-/// `sender`, so only the writer touches the child's stdin.
+/// Subscribes to the log and drives the bridge with the events routed to this
+/// session, publishing what it emits and writing what it asks for.
 ///
 /// Routing trusts `subject`, which is safe because a downlink event carries the
 /// reserved `session.*` type that only an authority token can publish (see
 /// `RESERVED_TYPE_PREFIXES`), and the daemon stamps `source`/`time` on ingress.
 /// An untrusted client cannot address a frame to another session's child.
 fn watch_downlink(
-    log: &EventLog,
-    bridge: Arc<dyn Bridge>,
-    session_id: &str,
-    sender: mpsc::Sender<String>,
+    log: EventLog,
+    bridge: Arc<Mutex<Box<dyn Bridge>>>,
+    session_id: String,
+    writer: mpsc::Sender<String>,
 ) -> impl std::future::Future<Output = ()> + Send + 'static {
-    let subject = session_subject(session_id);
+    let subject = session_subject(&session_id);
     let mut events = log.subscribe();
     async move {
         loop {
@@ -647,11 +744,8 @@ fn watch_downlink(
                     if entry.event.subject.as_deref() != Some(subject.as_str()) {
                         continue;
                     }
-                    if let Some(line) = bridge.downlink(&entry.event)
-                        && sender.send(line).await.is_err()
-                    {
-                        return;
-                    }
+                    let actions = event_actions(&bridge, &entry.event);
+                    apply_actions(&log, &session_id, actions, &writer).await;
                 },
                 // A lagged subscriber has missed log entries; a downlink that
                 // was among them cannot be recovered, so it is dropped loudly
@@ -669,13 +763,28 @@ fn watch_downlink(
 /// downlink channel (routed events) and the reply channel (protocol obligations
 /// the uplink reader owes), so no two tasks ever write to the pipe.
 async fn write_stdin(
+    log: EventLog,
     mut stdin: ChildStdin,
     mut events: mpsc::Receiver<String>,
     mut replies: mpsc::Receiver<String>,
-    bridge: Arc<dyn Bridge>,
-    handshake: Vec<String>,
+    session_id: String,
+    handshake: Vec<Action>,
 ) {
-    if let Err(error) = write_lines(&mut stdin, &handshake).await {
+    // The opening step's own events are published here; its lines are written
+    // directly because this task owns the pipe from the start.
+    let mut lines = Vec::new();
+    for action in handshake {
+        match action {
+            Action::Write(line) => lines.push(line),
+            Action::Publish(event) => {
+                let event = event.with_subject(session_subject(&session_id));
+                if let Err(error) = log.publish(event).await {
+                    tracing::error!(%error, %session_id, "failed to record a bridged message");
+                }
+            },
+        }
+    }
+    if let Err(error) = write_lines(&mut stdin, &lines).await {
         tracing::warn!(%error, "failed to write the handshake");
     }
     // A closed source disables its branch, so an empty channel never spins the
@@ -697,7 +806,7 @@ async fn write_stdin(
             continue;
         };
         if let Err(error) = write_lines(&mut stdin, std::slice::from_ref(&line)).await {
-            tracing::warn!(%error, protocol = bridge.protocol(), "failed to write to the child");
+            tracing::warn!(%error, %session_id, "failed to write to the child");
             return;
         }
     }
@@ -834,7 +943,7 @@ mod tests {
         SESSION_FAILED, SESSION_REQUESTED, SESSION_RESTARTED, SESSION_STARTED,
         SESSION_STATUS_REQUESTED, SessionManager, Supervision,
     };
-    use crate::bridge::{BRIDGED_INBOUND, McpBridge};
+    use crate::bridge::{BRIDGED_INBOUND, McpProtocol};
     use agentd_events::{Event, EventLog, LogEntry};
     use agentd_sandbox::{
         Access, ExecResult, Executor, FsEntry, FsPolicy, Policy, Sandbox, ShellPolicy, SpawnError,
@@ -940,7 +1049,16 @@ mod tests {
         supervision: Supervision,
     ) -> SessionManager {
         manager(log, Arc::new(PlainExecutor), command, supervision)
-            .with_bridge(Arc::new(McpBridge::default()))
+            .with_protocol(Arc::new(McpProtocol::default()))
+    }
+
+    fn acp_manager(
+        log: EventLog,
+        command: &str,
+        supervision: Supervision,
+    ) -> SessionManager {
+        manager(log, Arc::new(PlainExecutor), command, supervision)
+            .with_protocol(Arc::new(crate::bridge::AcpProtocol::default()))
     }
 
     fn request(session_id: &str) -> Event {
@@ -1160,6 +1278,31 @@ mod tests {
         let inbound = wait_for(&mut subscriber, BRIDGED_INBOUND).await;
         assert_eq!(inbound.data["message"]["method"], "ping");
         assert_eq!(inbound.subject.as_deref(), Some("session:mcp-2"));
+        wait_for(&mut subscriber, super::SESSION_EXITED).await;
+    }
+
+    #[tokio::test]
+    async fn an_acp_session_negotiates_over_the_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = open_log(dir.path());
+        let mut subscriber = log.subscribe();
+        // A minimal ACP agent: consume `initialize` (id 0) and answer it, then
+        // consume `session/new` (id 1) and return a session id.
+        let command = "read line; printf '%s\\n' \
+            '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{}}}'; \
+            read line; printf '%s\\n' \
+            '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sessionId\":\"sess_1\"}}'";
+        let manager = acp_manager(log.clone(), command, Supervision::default());
+
+        manager.launch(&request("acp-1"));
+
+        let initialize = wait_for(&mut subscriber, BRIDGED_INBOUND).await;
+        assert_eq!(initialize.data["protocol"], "acp");
+        assert_eq!(initialize.data["message"]["result"]["protocolVersion"], 1);
+
+        let ready = wait_for(&mut subscriber, crate::bridge::ACP_READY).await;
+        assert_eq!(ready.subject.as_deref(), Some("session:acp-1"));
+
         wait_for(&mut subscriber, super::SESSION_EXITED).await;
     }
 

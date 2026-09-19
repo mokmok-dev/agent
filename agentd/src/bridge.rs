@@ -2,15 +2,18 @@
 //! event log.
 //!
 //! A third-party tool speaks its own protocol over stdio; it does not speak
-//! `CloudEvents`. A [`Bridge`] is the facade that converts between the two:
-//! [`Bridge::uplink`] turns one line of the child's output into an event to
-//! append, and [`Bridge::downlink`] turns an event routed to the child into a
-//! line to write back. The session manager owns the child and drives the pipes;
-//! it never inspects the protocol payload, so adding a protocol does not touch
-//! it.
+//! `CloudEvents`. A [`Protocol`] is a factory shared across sessions; it creates
+//! one stateful [`Bridge`] per supervised child. The bridge turns the child's
+//! output lines and the events routed to it into [`Action`]s — events to append
+//! or lines to write — and the session manager performs them. The manager never
+//! inspects the protocol payload, so adding a protocol does not touch it.
 //!
-//! [`McpBridge`] is the first protocol: the Model Context Protocol over stdio,
-//! which frames each JSON-RPC 2.0 message as one line of JSON.
+//! Two protocols ship: `mcp` ([`McpProtocol`]), the Model Context Protocol over
+//! stdio, a line codec with no real state; and `acp` ([`AcpProtocol`]), the
+//! Agent Client Protocol, a client-side state machine that negotiates a session
+//! and answers the agent's permission requests over the log.
+
+use std::collections::HashMap;
 
 use agentd_events::Event;
 use serde_json::{Value, json};
@@ -24,6 +27,47 @@ pub const BRIDGED_INBOUND: &str = "session.bridge.inbound";
 /// so an inbound message is never routed straight back to the child that
 /// produced it.
 pub const BRIDGED_OUTBOUND: &str = "session.bridge.outbound";
+/// A client asks a bridged ACP child to start a prompt turn.
+pub const PROMPT: &str = "session.bridge.prompt";
+/// A bridged ACP child asks for permission to run a tool call.
+pub const SESSION_PERMISSION_REQUESTED: &str = "session.permission.requested";
+/// An approver's answer to [`SESSION_PERMISSION_REQUESTED`].
+pub const SESSION_PERMISSION_DECIDED: &str = "session.permission.decided";
+/// The ACP handshake completed; the agent accepts prompts.
+pub const ACP_READY: &str = "session.acp.ready";
+/// The ACP handshake or a turn failed.
+pub const ACP_FAILED: &str = "session.acp.failed";
+/// An ACP prompt turn ended, carrying its stop reason.
+pub const ACP_TURN_COMPLETED: &str = "session.acp.turn.completed";
+
+/// A client asks an ACP agent to start a prompt turn with `blocks` (ACP
+/// content blocks, e.g. `[{"type":"text","text":"hi"}]`).
+#[must_use]
+pub fn prompt(blocks: &Value) -> Event {
+    Event::new(PROMPT, json!({ "protocol": "acp", "prompt": blocks }))
+}
+
+/// An approver allows the tool call `request_id` with `option_id`, the id of
+/// one of the options the agent offered.
+#[must_use]
+pub fn permission_decided(
+    request_id: &str,
+    option_id: &str,
+) -> Event {
+    Event::new(
+        SESSION_PERMISSION_DECIDED,
+        json!({ "request_id": request_id, "option_id": option_id }),
+    )
+}
+
+/// An approver rejects the tool call `request_id` (or the turn was cancelled).
+#[must_use]
+pub fn permission_cancelled(request_id: &str) -> Event {
+    Event::new(
+        SESSION_PERMISSION_DECIDED,
+        json!({ "request_id": request_id, "cancelled": true }),
+    )
+}
 
 /// The prefix of a bridged event's `subject`, addressing one session's child.
 pub const SUBJECT_PREFIX: &str = "session:";
@@ -34,61 +78,91 @@ pub fn session_subject(session_id: &str) -> String {
     format!("{SUBJECT_PREFIX}{session_id}")
 }
 
-/// The JSON-RPC version every MCP message declares.
+/// The JSON-RPC version every bridged message declares.
 const JSONRPC_VERSION: &str = "2.0";
 
-/// One line of child output converted into daemon state.
+/// One step a bridge asks the manager to take.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Conversion {
-    /// The event to append for this line.
-    pub event: Event,
-    /// Lines the bridge sends to the child in reply, if any (for example a
-    /// notification that follows a handshake response).
-    pub to_child: Vec<String>,
+pub enum Action {
+    /// Append this event (the manager stamps `subject`).
+    Publish(Event),
+    /// Write this line to the child.
+    Write(String),
 }
 
-/// Converts between a child's stdio protocol and events.
+/// What a protocol needs to know about the session it is connecting.
 ///
-/// Implementations are stateless with respect to the session: the session id
-/// and the `subject` attribute are attached by the caller, so a bridge cannot
-/// attribute a message to the wrong session.
-pub trait Bridge: Send + Sync {
-    /// A stable label for the protocol, recorded on every event the bridge
-    /// produces.
-    fn protocol(&self) -> &'static str;
+/// `connect` returns a `'static` bridge, so an implementor must copy anything
+/// it keeps out of the borrowed context.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionContext<'a> {
+    /// The daemon's session id, used in the `subject` of emitted events.
+    pub session_id: &'a str,
+    /// The sandbox working directory, which an agent advertises as the ACP
+    /// `cwd` and works inside.
+    pub workdir: &'a std::path::Path,
+}
 
-    /// The lines to write to the child once it has started. Empty by default,
-    /// for a protocol with no opening handshake.
-    fn handshake(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    /// Converts one line of the child's output into a [`Conversion`], or
-    /// `None` when the line is incomplete, blank, or not a protocol message.
-    fn uplink(
+/// A protocol, shared across sessions. It creates one state machine per child.
+pub trait Protocol: Send + Sync {
+    /// A fresh state machine for one session.
+    fn connect(
         &self,
-        line: &str,
-    ) -> Option<Conversion>;
+        context: &SessionContext<'_>,
+    ) -> Box<dyn Bridge>;
+}
 
-    /// Converts an event routed to the child into a line to write, or `None`
-    /// when the event is not a protocol message the bridge can send.
-    fn downlink(
-        &self,
+/// The per-session conversion state machine.
+///
+/// The methods are synchronous and take `&mut self`: a bridge owns its phase
+/// and id table for one child, and all I/O stays in the manager.
+pub trait Bridge: Send {
+    /// The opening exchange, called once when the child starts.
+    fn start(&mut self) -> Vec<Action>;
+
+    /// Converts one event routed to this session into actions.
+    fn on_event(
+        &mut self,
         event: &Event,
-    ) -> Option<String>;
+    ) -> Vec<Action>;
+
+    /// Converts one line of the child's output into actions.
+    fn on_line(
+        &mut self,
+        line: &str,
+    ) -> Vec<Action>;
+}
+
+/// Builds the event for one inbound protocol message.
+///
+/// The `subject` attribute is deliberately not set here: the manager that knows
+/// the session attaches it, so a bridge cannot misattribute a message.
+#[must_use]
+pub fn bridged_inbound(
+    protocol: &str,
+    message: &Value,
+) -> Event {
+    Event::new(
+        BRIDGED_INBOUND,
+        json!({ "protocol": protocol, "message": message }),
+    )
+}
+
+/// Parses one line as a JSON-RPC 2.0 message, or `None`.
+fn parse_message(line: &str) -> Option<Value> {
+    let message: Value = serde_json::from_str(line).ok()?;
+    (message.get("jsonrpc").and_then(Value::as_str) == Some(JSONRPC_VERSION)).then_some(message)
 }
 
 /// The Model Context Protocol over stdio: newline-delimited JSON-RPC 2.0.
 #[derive(Debug, Clone)]
-pub struct McpBridge {
-    /// The protocol version sent in the handshake.
+pub struct McpProtocol {
     protocol_version: String,
-    /// The client name sent in the handshake.
     client_name: String,
 }
 
-impl McpBridge {
-    /// Creates a bridge that announces `client_name` at
+impl McpProtocol {
+    /// Creates a protocol that announces `client_name` at
     /// [`DEFAULT_PROTOCOL_VERSION`](Self::DEFAULT_PROTOCOL_VERSION).
     #[must_use]
     pub fn new(client_name: impl Into<String>) -> Self {
@@ -108,12 +182,39 @@ impl McpBridge {
         self
     }
 
-    /// The MCP revision this bridge announces by default.
+    /// The MCP revision this protocol announces by default.
     pub const DEFAULT_PROTOCOL_VERSION: &'static str = "2024-11-05";
+}
 
+impl Default for McpProtocol {
+    fn default() -> Self {
+        Self::new("agentd")
+    }
+}
+
+impl Protocol for McpProtocol {
+    fn connect(
+        &self,
+        _context: &SessionContext<'_>,
+    ) -> Box<dyn Bridge> {
+        Box::new(McpBridge {
+            protocol_version: self.protocol_version.clone(),
+            client_name: self.client_name.clone(),
+        })
+    }
+}
+
+/// The MCP state machine. MCP is a request/response codec with no phase, so the
+/// machine's only state is the configured handshake.
+struct McpBridge {
+    protocol_version: String,
+    client_name: String,
+}
+
+impl McpBridge {
     /// Builds the `initialize` request, the first message of an MCP session.
     fn initialize_request(&self) -> String {
-        let request = json!({
+        json!({
             "jsonrpc": JSONRPC_VERSION,
             "id": 0,
             "method": "initialize",
@@ -125,8 +226,8 @@ impl McpBridge {
                     "version": env!("CARGO_PKG_VERSION"),
                 },
             },
-        });
-        request.to_string()
+        })
+        .to_string()
     }
 
     /// Whether `message` is the response to the bridge's `initialize` request,
@@ -135,92 +236,462 @@ impl McpBridge {
         message.get("id").and_then(Value::as_u64) == Some(0)
             && (message.get("result").is_some() || message.get("error").is_some())
     }
+}
 
-    /// The `notifications/initialized` line that acknowledges a handshake.
-    fn initialized_notification() -> String {
-        json!({ "jsonrpc": JSONRPC_VERSION, "method": "notifications/initialized" }).to_string()
+impl Bridge for McpBridge {
+    fn start(&mut self) -> Vec<Action> {
+        vec![Action::Write(self.initialize_request())]
+    }
+
+    fn on_event(
+        &mut self,
+        event: &Event,
+    ) -> Vec<Action> {
+        if event.r#type != BRIDGED_OUTBOUND
+            || event.data.get("protocol").and_then(Value::as_str) != Some("mcp")
+        {
+            return Vec::new();
+        }
+        let Some(message) = event.data.get("message") else {
+            return Vec::new();
+        };
+        if message.get("jsonrpc").and_then(Value::as_str) != Some(JSONRPC_VERSION) {
+            return Vec::new();
+        }
+        vec![Action::Write(message.to_string())]
+    }
+
+    fn on_line(
+        &mut self,
+        line: &str,
+    ) -> Vec<Action> {
+        let Some(message) = parse_message(line) else {
+            return Vec::new();
+        };
+        let mut actions = vec![Action::Publish(bridged_inbound("mcp", &message))];
+        if Self::is_initialize_response(&message) {
+            actions.push(Action::Write(
+                json!({ "jsonrpc": JSONRPC_VERSION, "method": "notifications/initialized" })
+                    .to_string(),
+            ));
+        }
+        actions
     }
 }
 
-impl Default for McpBridge {
+/// The Agent Client Protocol: a client-side state machine over stdio JSON-RPC.
+#[derive(Debug, Clone)]
+pub struct AcpProtocol {
+    client_name: String,
+    protocol_version: u16,
+}
+
+impl AcpProtocol {
+    /// Creates a protocol that announces `client_name`.
+    #[must_use]
+    pub fn new(client_name: impl Into<String>) -> Self {
+        Self {
+            client_name: client_name.into(),
+            protocol_version: Self::DEFAULT_PROTOCOL_VERSION,
+        }
+    }
+
+    /// The ACP major version this client announces by default.
+    pub const DEFAULT_PROTOCOL_VERSION: u16 = 1;
+
+    /// Overrides the ACP major version announced in `initialize`.
+    #[must_use]
+    pub const fn with_protocol_version(
+        mut self,
+        protocol_version: u16,
+    ) -> Self {
+        self.protocol_version = protocol_version;
+        self
+    }
+}
+
+impl Default for AcpProtocol {
     fn default() -> Self {
         Self::new("agentd")
     }
 }
 
-impl Bridge for McpBridge {
-    fn protocol(&self) -> &'static str {
-        "mcp"
-    }
-
-    fn handshake(&self) -> Vec<String> {
-        vec![self.initialize_request()]
-    }
-
-    fn uplink(
+impl Protocol for AcpProtocol {
+    fn connect(
         &self,
-        line: &str,
-    ) -> Option<Conversion> {
-        let message: Value = serde_json::from_str(line).ok()?;
-        if message.get("jsonrpc").and_then(Value::as_str) != Some(JSONRPC_VERSION) {
-            return None;
-        }
-        let to_child = if Self::is_initialize_response(&message) {
-            vec![Self::initialized_notification()]
-        } else {
-            Vec::new()
-        };
-        Some(Conversion {
-            event: bridged_inbound(self.protocol(), &message),
-            to_child,
+        context: &SessionContext<'_>,
+    ) -> Box<dyn Bridge> {
+        Box::new(AcpBridge {
+            session_id: context.session_id.to_string(),
+            workdir: context.workdir.to_path_buf(),
+            client_name: self.client_name.clone(),
+            protocol_version: self.protocol_version,
+            phase: Phase::Started,
+            next_id: 0,
+            acp_session_id: None,
+            pending: HashMap::new(),
+            inbound: HashMap::new(),
         })
-    }
-
-    fn downlink(
-        &self,
-        event: &Event,
-    ) -> Option<String> {
-        if event.r#type != BRIDGED_OUTBOUND
-            || event.data.get("protocol")?.as_str()? != self.protocol()
-        {
-            return None;
-        }
-        let message = event.data.get("message")?;
-        if message.get("jsonrpc").and_then(Value::as_str) != Some(JSONRPC_VERSION) {
-            return None;
-        }
-        Some(message.to_string())
     }
 }
 
-/// Builds the event for one inbound protocol message.
-///
-/// The `subject` attribute is deliberately not set here: the caller that knows
-/// the session attaches it, so a bridge cannot misattribute a message.
-#[must_use]
-pub fn bridged_inbound(
-    protocol: &str,
-    message: &Value,
-) -> Event {
-    Event::new(
-        BRIDGED_INBOUND,
-        json!({ "protocol": protocol, "message": message }),
-    )
+/// How far the client side of the ACP handshake has progressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// `initialize` sent, its response awaited.
+    Started,
+    /// `initialize` answered, `session/new` sent.
+    Initialized,
+    /// A session exists; prompts may be sent.
+    Ready,
+    /// A prompt turn is in flight.
+    Prompting,
+    /// The handshake was rejected; the child cannot be driven.
+    Failed,
+}
+
+/// What an outbound JSON-RPC id was allocated for, so its response advances the
+/// right state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    Initialize,
+    NewSession,
+    Prompt,
+}
+
+/// The ACP client state machine for one supervised agent.
+struct AcpBridge {
+    /// The daemon's session id, used in the `subject` of the events it emits.
+    session_id: String,
+    /// The sandbox working directory, advertised as the ACP `cwd`.
+    workdir: std::path::PathBuf,
+    client_name: String,
+    protocol_version: u16,
+    phase: Phase,
+    /// The next outbound JSON-RPC id.
+    next_id: u64,
+    /// The ACP session id from `session/new`, needed by `session/prompt`.
+    acp_session_id: Option<String>,
+    /// Outbound requests awaiting a response, keyed by JSON-RPC id.
+    pending: HashMap<u64, Pending>,
+    /// Inbound requests from the agent awaiting a decision, keyed by the
+    /// JSON-RPC id's string form, so a decision can be answered under the same
+    /// id.
+    inbound: HashMap<String, Value>,
+}
+
+impl AcpBridge {
+    /// Allocates the next outbound JSON-RPC id for `pending`.
+    fn request(
+        &mut self,
+        pending: Pending,
+        method: &str,
+        params: &Value,
+    ) -> Action {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.pending.insert(id, pending);
+        Action::Write(
+            json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": id,
+                "method": method,
+                "params": params,
+            })
+            .to_string(),
+        )
+    }
+
+    /// The client capabilities advertised in `initialize`. The agent does its
+    /// own filesystem and shell work inside the sandbox, so the daemon proxies
+    /// none of it.
+    fn client_capabilities() -> Value {
+        json!({
+            "fs": { "readTextFile": false, "writeTextFile": false },
+            "terminal": false,
+        })
+    }
+
+    /// Handles an inbound request (one with a `method` and an `id`).
+    fn on_request(
+        &mut self,
+        id: &Value,
+        method: &str,
+        params: &Value,
+    ) -> Vec<Action> {
+        let message =
+            json!({ "jsonrpc": JSONRPC_VERSION, "id": id, "method": method, "params": params });
+        let mut actions = vec![Action::Publish(bridged_inbound("acp", &message))];
+        if method == "session/request_permission" {
+            let request_id = id_to_string(id);
+            self.inbound.insert(request_id.clone(), id.clone());
+            actions.push(Action::Publish(Event::new(
+                SESSION_PERMISSION_REQUESTED,
+                json!({
+                    "protocol": "acp",
+                    "session_id": self.session_id,
+                    "request_id": request_id,
+                    "tool_call": params.get("toolCall").cloned().unwrap_or(Value::Null),
+                    "options": params.get("options").cloned().unwrap_or(Value::Null),
+                }),
+            )));
+        } else {
+            // The daemon advertises no other client capability, so any other
+            // request is answered with JSON-RPC's `Method not found` (code
+            // -32601) rather than left hanging on the agent's pending id.
+            actions.push(Action::Write(
+                json!({
+                    "jsonrpc": JSONRPC_VERSION,
+                    "id": id,
+                    "error": { "code": -32601, "message": format!("method not supported: {method}") },
+                })
+                .to_string(),
+            ));
+        }
+        actions
+    }
+
+    /// Handles an inbound response (one with an `id` and `result`/`error`),
+    /// advancing the handshake and publishing the message.
+    fn on_response(
+        &mut self,
+        id: u64,
+        message: &Value,
+    ) -> Vec<Action> {
+        let mut actions = vec![Action::Publish(bridged_inbound("acp", message))];
+        match self.pending.remove(&id) {
+            Some(Pending::Initialize) => {
+                if message.get("error").is_some() {
+                    self.phase = Phase::Failed;
+                    actions.push(Action::Publish(Event::new(
+                        ACP_FAILED,
+                        json!({
+                            "protocol": "acp",
+                            "session_id": self.session_id,
+                            "error": message.get("error").cloned().unwrap_or(Value::Null),
+                        }),
+                    )));
+                } else {
+                    self.phase = Phase::Initialized;
+                    let cwd = Value::String(self.workdir.to_string_lossy().into_owned());
+                    actions.push(self.request(
+                        Pending::NewSession,
+                        "session/new",
+                        &json!({ "cwd": cwd, "mcpServers": [] }),
+                    ));
+                }
+            },
+            Some(Pending::NewSession) => {
+                if message.get("error").is_some() {
+                    self.phase = Phase::Failed;
+                    actions.push(Action::Publish(Event::new(
+                        ACP_FAILED,
+                        json!({
+                            "protocol": "acp",
+                            "session_id": self.session_id,
+                            "error": message.get("error").cloned().unwrap_or(Value::Null),
+                        }),
+                    )));
+                } else {
+                    self.acp_session_id = message
+                        .get("result")
+                        .and_then(|result| result.get("sessionId"))
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                    if self.acp_session_id.is_some() {
+                        self.phase = Phase::Ready;
+                        actions.push(Action::Publish(Event::new(
+                            ACP_READY,
+                            json!({ "protocol": "acp", "session_id": self.session_id }),
+                        )));
+                    }
+                }
+            },
+            Some(Pending::Prompt) => {
+                self.phase = Phase::Ready;
+                actions.push(Action::Publish(Event::new(
+                    ACP_TURN_COMPLETED,
+                    json!({
+                        "protocol": "acp",
+                        "session_id": self.session_id,
+                        "stop_reason": message
+                            .get("result")
+                            .and_then(|result| result.get("stopReason"))
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    }),
+                )));
+            },
+            None => {},
+        }
+        actions
+    }
+
+    /// Answers a pending permission request under its original id.
+    fn on_permission_decided(
+        &mut self,
+        event: &Event,
+    ) -> Vec<Action> {
+        let Some(request_id) = event.data.get("request_id").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let Some(id) = self.inbound.remove(request_id) else {
+            return Vec::new();
+        };
+        let outcome = if event.data.get("cancelled").and_then(Value::as_bool) == Some(true) {
+            json!({ "outcome": "cancelled" })
+        } else if let Some(option_id) = event.data.get("option_id").and_then(Value::as_str) {
+            json!({ "outcome": "selected", "optionId": option_id })
+        } else {
+            json!({ "outcome": "cancelled" })
+        };
+        vec![Action::Write(
+            json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": id,
+                "result": { "outcome": outcome },
+            })
+            .to_string(),
+        )]
+    }
+
+    /// Starts a prompt turn from a routed [`PROMPT`] event.
+    fn on_prompt(
+        &mut self,
+        event: &Event,
+    ) -> Vec<Action> {
+        let Some(session) = self.acp_session_id.clone() else {
+            return Vec::new();
+        };
+        if self.phase != Phase::Ready {
+            return Vec::new();
+        }
+        let prompt = event.data.get("prompt").cloned().unwrap_or(Value::Null);
+        self.phase = Phase::Prompting;
+        vec![self.request(
+            Pending::Prompt,
+            "session/prompt",
+            &json!({ "sessionId": session, "prompt": prompt }),
+        )]
+    }
+}
+
+impl Bridge for AcpBridge {
+    fn start(&mut self) -> Vec<Action> {
+        vec![self.request(
+            Pending::Initialize,
+            "initialize",
+            &json!({
+                "protocolVersion": self.protocol_version,
+                "clientCapabilities": Self::client_capabilities(),
+                "clientInfo": {
+                    "name": self.client_name,
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            }),
+        )]
+    }
+
+    fn on_event(
+        &mut self,
+        event: &Event,
+    ) -> Vec<Action> {
+        match event.r#type.as_str() {
+            PROMPT => self.on_prompt(event),
+            SESSION_PERMISSION_DECIDED => self.on_permission_decided(event),
+            BRIDGED_OUTBOUND => {
+                if event.data.get("protocol").and_then(Value::as_str) != Some("acp") {
+                    return Vec::new();
+                }
+                let Some(message) = event.data.get("message") else {
+                    return Vec::new();
+                };
+                if message.get("jsonrpc").and_then(Value::as_str) != Some(JSONRPC_VERSION) {
+                    return Vec::new();
+                }
+                vec![Action::Write(message.to_string())]
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    fn on_line(
+        &mut self,
+        line: &str,
+    ) -> Vec<Action> {
+        let Some(message) = parse_message(line) else {
+            return Vec::new();
+        };
+        if let Some(method) = message.get("method").and_then(Value::as_str) {
+            return match message.get("id") {
+                Some(id) if !id.is_null() => {
+                    let params = message.get("params").cloned().unwrap_or(Value::Null);
+                    self.on_request(id, method, &params)
+                },
+                // A notification (no id) is only published.
+                _ => vec![Action::Publish(bridged_inbound("acp", &message))],
+            };
+        }
+        message.get("id").and_then(Value::as_u64).map_or_else(
+            || vec![Action::Publish(bridged_inbound("acp", &message))],
+            |id| self.on_response(id, &message),
+        )
+    }
+}
+
+/// The string form of a JSON-RPC id, used as the correlation key in events.
+fn id_to_string(id: &Value) -> String {
+    match id {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BRIDGED_INBOUND, BRIDGED_OUTBOUND, Bridge, McpBridge};
+    use super::{
+        ACP_READY, AcpProtocol, BRIDGED_INBOUND, BRIDGED_OUTBOUND, Bridge, McpProtocol, Protocol,
+        SESSION_PERMISSION_REQUESTED, permission_decided, prompt, session_subject,
+    };
     use agentd_events::Event;
-    use serde_json::json;
+    use serde_json::{Value, json};
+
+    fn lines(actions: &[super::Action]) -> Vec<String> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                super::Action::Write(line) => Some(line.clone()),
+                super::Action::Publish(_) => None,
+            })
+            .collect()
+    }
+
+    fn events(actions: &[super::Action]) -> Vec<Event> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                super::Action::Publish(event) => Some(event.clone()),
+                super::Action::Write(_) => None,
+            })
+            .collect()
+    }
+
+    fn parse(line: &str) -> Value {
+        serde_json::from_str(line).expect("a JSON line")
+    }
+
+    fn connect<P: Protocol>(protocol: &P) -> Box<dyn Bridge> {
+        protocol.connect(&super::SessionContext {
+            session_id: "s1",
+            workdir: std::path::Path::new("/repo"),
+        })
+    }
 
     #[test]
-    fn handshake_sends_the_initialize_request() {
-        let lines = McpBridge::default().handshake();
+    fn mcp_start_sends_the_initialize_request() {
+        let mut bridge = connect(&McpProtocol::default());
+        let request = parse(&lines(&bridge.start())[0]);
 
-        assert_eq!(lines.len(), 1);
-        let request: serde_json::Value =
-            serde_json::from_str(&lines[0]).expect("the handshake is JSON");
         assert_eq!(request["jsonrpc"], "2.0");
         assert_eq!(request["method"], "initialize");
         assert_eq!(request["params"]["protocolVersion"], "2024-11-05");
@@ -228,44 +699,43 @@ mod tests {
     }
 
     #[test]
-    fn uplink_parses_a_notification_into_an_event() {
-        let conversion = McpBridge::default()
-            .uplink(r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#)
-            .expect("a valid message converts");
+    fn mcp_uplink_parses_a_notification_into_an_event() {
+        let mut bridge = connect(&McpProtocol::default());
+        let actions =
+            bridge.on_line(r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#);
 
-        assert_eq!(conversion.event.r#type, BRIDGED_INBOUND);
-        assert_eq!(conversion.event.data["protocol"], "mcp");
+        let published = events(&actions);
+        assert_eq!(published[0].r#type, BRIDGED_INBOUND);
+        assert_eq!(published[0].data["protocol"], "mcp");
         assert_eq!(
-            conversion.event.data["message"]["method"],
+            published[0].data["message"]["method"],
             "notifications/tools/list_changed"
         );
-        assert!(conversion.to_child.is_empty());
+        assert!(lines(&actions).is_empty());
     }
 
     #[test]
-    fn uplink_acknowledges_the_initialize_response() {
-        let conversion = McpBridge::default()
-            .uplink(r#"{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2024-11-05"}}"#)
-            .expect("a valid message converts");
+    fn mcp_uplink_acknowledges_the_initialize_response() {
+        let mut bridge = connect(&McpProtocol::default());
+        let actions =
+            bridge.on_line(r#"{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2024-11-05"}}"#);
 
-        assert_eq!(conversion.to_child.len(), 1);
-        let notification: serde_json::Value =
-            serde_json::from_str(&conversion.to_child[0]).expect("the reply is JSON");
-        assert_eq!(notification["method"], "notifications/initialized");
+        let reply = parse(&lines(&actions)[0]);
+        assert_eq!(reply["method"], "notifications/initialized");
     }
 
     #[test]
-    fn uplink_ignores_blank_non_json_and_foreign_messages() {
-        let bridge = McpBridge::default();
+    fn mcp_ignores_blank_non_json_and_foreign_messages() {
+        let mut bridge = connect(&McpProtocol::default());
 
-        assert!(bridge.uplink("   ").is_none());
-        assert!(bridge.uplink("not json").is_none());
-        assert!(bridge.uplink(r#"{"method":"no-version"}"#).is_none());
+        assert!(bridge.on_line("   ").is_empty());
+        assert!(bridge.on_line("not json").is_empty());
+        assert!(bridge.on_line(r#"{"method":"no-version"}"#).is_empty());
     }
 
     #[test]
-    fn downlink_renders_only_this_protocols_messages() {
-        let bridge = McpBridge::default();
+    fn mcp_downlink_renders_only_this_protocols_messages() {
+        let mut bridge = connect(&McpProtocol::default());
         let ours = Event::new(
             BRIDGED_OUTBOUND,
             json!({
@@ -276,19 +746,123 @@ mod tests {
         let foreign = Event::new(
             BRIDGED_OUTBOUND,
             json!({
-                "protocol": "lsp",
+                "protocol": "acp",
                 "message": { "jsonrpc": "2.0", "id": 1, "method": "ping" },
             }),
         );
 
-        let line = bridge.downlink(&ours).expect("ours renders");
-        let message: serde_json::Value = serde_json::from_str(&line).expect("the line is JSON");
-        assert_eq!(message["method"], "ping");
-        assert!(bridge.downlink(&foreign).is_none());
+        assert_eq!(parse(&lines(&bridge.on_event(&ours))[0])["method"], "ping");
+        assert!(bridge.on_event(&foreign).is_empty());
         assert!(
             bridge
-                .downlink(&Event::new("agent.inbox", json!({})))
-                .is_none()
+                .on_event(&Event::new("agent.inbox", json!({})))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn acp_negotiates_a_session_and_a_prompt() {
+        let mut bridge = connect(&AcpProtocol::default());
+
+        let initialize = parse(&lines(&bridge.start())[0]);
+        assert_eq!(initialize["method"], "initialize");
+        assert_eq!(initialize["params"]["protocolVersion"], 1);
+        assert_eq!(
+            initialize["params"]["clientCapabilities"]["fs"]["readTextFile"],
+            false
+        );
+        assert_eq!(
+            initialize["params"]["clientCapabilities"]["terminal"],
+            false
+        );
+        let initialize_id = initialize["id"].as_u64().expect("an id");
+
+        let actions = bridge.on_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": initialize_id,
+                "result": { "protocolVersion": 1, "agentCapabilities": {} },
+            })
+            .to_string(),
+        );
+        let new_session = parse(&lines(&actions)[0]);
+        assert_eq!(new_session["method"], "session/new");
+        assert_eq!(new_session["params"]["mcpServers"], json!([]));
+        let new_session_id = new_session["id"].as_u64().expect("an id");
+
+        let actions = bridge.on_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": new_session_id,
+                "result": { "sessionId": "sess_1" },
+            })
+            .to_string(),
+        );
+        assert!(
+            events(&actions)
+                .iter()
+                .any(|event| event.r#type == ACP_READY)
+        );
+
+        let prompt = prompt(&json!([{ "type": "text", "text": "hi" }]));
+        let turn = parse(&lines(&bridge.on_event(&prompt))[0]);
+        assert_eq!(turn["method"], "session/prompt");
+        assert_eq!(turn["params"]["sessionId"], "sess_1");
+        assert_eq!(turn["params"]["prompt"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn acp_does_not_prompt_before_a_session_exists() {
+        let mut bridge = connect(&AcpProtocol::default());
+        let request = prompt(&json!([]));
+
+        assert!(bridge.on_event(&request).is_empty());
+    }
+
+    #[test]
+    fn acp_routes_a_permission_request_and_answers_under_the_same_id() {
+        let mut bridge = connect(&AcpProtocol::default());
+
+        let actions = bridge.on_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "sess_1",
+                    "toolCall": { "toolCallId": "call_1" },
+                    "options": [{ "optionId": "allow-once", "name": "Allow", "kind": "allow_once" }],
+                },
+            })
+            .to_string(),
+        );
+        let requested = events(&actions)
+            .into_iter()
+            .find(|event| event.r#type == SESSION_PERMISSION_REQUESTED)
+            .expect("a permission request");
+        assert_eq!(requested.data["request_id"], "5");
+        assert_eq!(requested.data["tool_call"]["toolCallId"], "call_1");
+
+        let decision = permission_decided("5", "allow-once").with_subject(session_subject("s1"));
+        let response = parse(&lines(&bridge.on_event(&decision))[0]);
+        assert_eq!(response["id"], 5);
+        assert_eq!(response["result"]["outcome"]["outcome"], "selected");
+        assert_eq!(response["result"]["outcome"]["optionId"], "allow-once");
+
+        // A second decision for the same id is not re-answered.
+        assert!(bridge.on_event(&decision).is_empty());
+    }
+
+    #[test]
+    fn acp_ignores_unknown_ids_and_blank_lines() {
+        let mut bridge = connect(&AcpProtocol::default());
+
+        assert!(bridge.on_line("").is_empty());
+        assert_eq!(
+            bridge
+                .on_line(r#"{"jsonrpc":"2.0","id":99,"result":{}}"#)
+                .len(),
+            1
         );
     }
 }
