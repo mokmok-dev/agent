@@ -58,6 +58,13 @@ impl Policy {
                 return Err(PolicyError::InvalidProtectedName(name.clone()));
             }
         }
+        if let Some(proxy) = &self.network.proxy {
+            for destination in &proxy.egress {
+                if destination.host.is_empty() || !profile_safe(&destination.host) {
+                    return Err(PolicyError::InvalidEgressHost(destination.host.clone()));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -90,6 +97,9 @@ pub enum PolicyError {
     /// represent.
     #[error("protected name {0:?} must be a representable single path component")]
     InvalidProtectedName(String),
+    /// An egress host must be a non-empty, profile-representable string.
+    #[error("egress host {0:?} must be non-empty and representable in the profile")]
+    InvalidEgressHost(String),
 }
 
 /// Filesystem policy for the OS confinement profile.
@@ -142,9 +152,13 @@ pub enum Access {
 
 /// Network policy for the OS confinement profile.
 ///
-/// Only outbound connections to named Unix domain sockets are expressible;
-/// there is no IP grant, because the sandbox has no use for one and the daemon
-/// is reached over a local socket. The zero value grants nothing.
+/// The default grants nothing. A named Unix domain socket is a local
+/// destination; the only IP grants are [`loopback_bind`](NetworkPolicy::loopback_bind)
+/// (a command's own local server) and [`proxy`](NetworkPolicy::proxy) (a single
+/// daemon-run CONNECT proxy). There is no general host/IP allowlist: the OS
+/// cannot enforce one on Linux, so the proxy enforces the egress allowlist and
+/// the OS only decides which loopback ports are reachable (see
+/// `docs/egress.md`).
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NetworkPolicy {
@@ -152,6 +166,35 @@ pub struct NetworkPolicy {
     /// the path at the end of the socket address, so the connecting process must
     /// use a path ending with this one (normally the same path string).
     pub unix_sockets: Vec<PathBuf>,
+    /// Loopback TCP ports the command may bind, for a server of its own (for
+    /// example an ACP agent's internal HTTP server).
+    pub loopback_bind: Vec<u16>,
+    /// The daemon's CONNECT proxy, when the command may reach the network
+    /// through it. The OS grants the port; the proxy enforces the allowlist.
+    pub proxy: Option<Proxy>,
+}
+
+/// The daemon's CONNECT proxy as it appears to one sandbox: the loopback port
+/// the command connects to and the egress the proxy permits.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Proxy {
+    /// The loopback port the proxy listens on. The OS profile grants a connect
+    /// to this port on `127.0.0.1` and nothing else.
+    pub port: u16,
+    /// The `host:port` destinations the proxy may tunnel to. Enforced by the
+    /// proxy, not the OS.
+    pub egress: Vec<HostPort>,
+}
+
+/// One destination the proxy may open a tunnel to.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostPort {
+    /// A hostname or IP literal. A hostname is resolved by the proxy.
+    pub host: String,
+    /// The TCP port on `host`.
+    pub port: u16,
 }
 
 /// Shell policy for commands executed through the sandbox.
@@ -223,7 +266,8 @@ mod duration_seconds {
 #[cfg(test)]
 mod tests {
     use super::{
-        Access, EnvVar, FsEntry, FsPolicy, Limits, NetworkPolicy, Policy, PolicyError, ShellPolicy,
+        Access, EnvVar, FsEntry, FsPolicy, HostPort, Limits, NetworkPolicy, Policy, PolicyError,
+        Proxy, ShellPolicy,
     };
     use serde_json::{Value, from_value, json, to_value};
     use std::path::PathBuf;
@@ -236,7 +280,50 @@ mod tests {
         assert!(policy.fs.entries.is_empty());
         assert!(policy.shell.env.is_empty());
         assert!(policy.network.unix_sockets.is_empty());
+        assert!(policy.network.loopback_bind.is_empty());
+        assert!(policy.network.proxy.is_none());
         assert_eq!(policy.shell.workdir, PathBuf::new());
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_or_unrepresentable_egress_host() {
+        let empty = Policy {
+            network: NetworkPolicy {
+                proxy: Some(Proxy {
+                    port: 9000,
+                    egress: vec![HostPort {
+                        host: String::new(),
+                        port: 443,
+                    }],
+                }),
+                ..NetworkPolicy::default()
+            },
+            ..Policy::default()
+        };
+        assert_eq!(
+            empty.validate(),
+            Err(PolicyError::InvalidEgressHost(String::new()))
+        );
+
+        let quoted = Policy {
+            network: NetworkPolicy {
+                proxy: Some(Proxy {
+                    port: 9000,
+                    egress: vec![HostPort {
+                        host: String::from("api\"example\".com"),
+                        port: 443,
+                    }],
+                }),
+                ..NetworkPolicy::default()
+            },
+            ..Policy::default()
+        };
+        assert_eq!(
+            quoted.validate(),
+            Err(PolicyError::InvalidEgressHost(String::from(
+                "api\"example\".com"
+            )))
+        );
     }
 
     #[test]
@@ -289,6 +376,14 @@ mod tests {
             },
             network: NetworkPolicy {
                 unix_sockets: vec![PathBuf::from("/run/agentd.sock")],
+                loopback_bind: vec![8080],
+                proxy: Some(Proxy {
+                    port: 9000,
+                    egress: vec![HostPort {
+                        host: String::from("api.example.com"),
+                        port: 443,
+                    }],
+                }),
             },
             limits: Limits {
                 timeout: Duration::from_secs(30),
@@ -380,6 +475,7 @@ mod tests {
         let relative = Policy {
             network: NetworkPolicy {
                 unix_sockets: vec![PathBuf::from("agentd.sock")],
+                ..NetworkPolicy::default()
             },
             ..Policy::default()
         };
@@ -395,6 +491,7 @@ mod tests {
         let quoted = Policy {
             network: NetworkPolicy {
                 unix_sockets: vec![PathBuf::from("/run/agent\"d.sock")],
+                ..NetworkPolicy::default()
             },
             ..Policy::default()
         };

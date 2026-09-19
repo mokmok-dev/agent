@@ -72,8 +72,8 @@ pub use events::{
 };
 pub use executor::{ConfinedProcessExecutor, ExecResult, Executor, SpawnError};
 pub use policy::{
-    Access, EnvAllowlist, EnvVar, FsEntry, FsPolicy, Limits, NetworkPolicy, Policy, PolicyError,
-    ShellPolicy,
+    Access, EnvAllowlist, EnvVar, FsEntry, FsPolicy, HostPort, Limits, NetworkPolicy, Policy,
+    PolicyError, Proxy, ShellPolicy,
 };
 pub use sandbox::{Approval, Sandbox, SandboxedProcess};
 pub use violation::{

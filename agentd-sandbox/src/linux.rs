@@ -341,7 +341,21 @@ enum ForcedBackend {
     Landlock(PathBuf),
 }
 
+/// Whether the policy grants any IP network access.
+///
+/// A Unix socket is a filesystem object and needs no network grant, so only the
+/// loopback bind and the proxy connect count.
+const fn network_grants(policy: &Policy) -> bool {
+    !policy.network.loopback_bind.is_empty() || policy.network.proxy.is_some()
+}
+
 /// Chooses the backend: a forced one, else `bwrap`, else the Landlock helper.
+///
+/// bubblewrap cannot filter by port, so when the policy grants IP network access
+/// the bubblewrap backend would have to keep the network namespace shared with
+/// no filter — a blanket reopen. Instead, a network grant forces the Landlock
+/// helper (for the port filter and seccomp) even when `bwrap` is available, and
+/// construction fails closed if the helper is missing.
 fn select_backend(
     policy: &Policy,
     forced: Option<ForcedBackend>,
@@ -350,25 +364,37 @@ fn select_backend(
 ) -> Result<Backend, SandboxError> {
     match forced {
         Some(ForcedBackend::Bubblewrap(bwrap)) => Ok(Backend::Bubblewrap(bwrap)),
-        Some(ForcedBackend::Landlock(helper)) => landlock_backend(&helper, resolved, scratch),
+        Some(ForcedBackend::Landlock(helper)) => {
+            landlock_backend(policy, &helper, resolved, scratch)
+        },
         None => {
+            if network_grants(policy) {
+                let helper = find_helper(&policy.fs).map_err(|_| {
+                    SandboxError::InvalidPolicy(String::from(
+                        "the policy grants network access, which requires the Landlock helper; \
+                         bubblewrap cannot filter by port and the helper is unavailable",
+                    ))
+                })?;
+                return landlock_backend(policy, &helper, resolved, scratch);
+            }
             if let Some(bwrap) = find_on_path(BWRAP, Some(&policy.fs)) {
                 return Ok(Backend::Bubblewrap(bwrap));
             }
             let helper = find_helper(&policy.fs)?;
-            landlock_backend(&helper, resolved, scratch)
+            landlock_backend(policy, &helper, resolved, scratch)
         },
     }
 }
 
 /// Writes the Landlock spec and returns the helper backend.
 fn landlock_backend(
+    policy: &Policy,
     helper: &Path,
     resolved: &Resolved,
     scratch: &Path,
 ) -> Result<Backend, SandboxError> {
     ensure_denies_enforceable(resolved, scratch)?;
-    let spec = build_spec(resolved, scratch);
+    let spec = build_spec(policy, resolved, scratch);
     let spec_path = scratch.join("spec.json");
     fs::write(
         &spec_path,
@@ -431,6 +457,7 @@ fn granted_paths(
 /// read-only; write roots and the scratch directory are granted read-write;
 /// `deny` entries are simply omitted, because Landlock cannot subtract.
 fn build_spec(
+    policy: &Policy,
     resolved: &Resolved,
     scratch: &Path,
 ) -> Spec {
@@ -456,7 +483,14 @@ fn build_spec(
     });
     paths.sort_by(|left, right| left.path.cmp(&right.path));
     paths.dedup_by(|left, right| left.path == right.path);
-    Spec { paths }
+    let mut bind_ports = policy.network.loopback_bind.clone();
+    bind_ports.sort_unstable();
+    bind_ports.dedup();
+    Spec {
+        paths,
+        bind_ports,
+        connect_port: policy.network.proxy.as_ref().map(|proxy| proxy.port),
+    }
 }
 
 /// Adds a rule for `path` when it exists.
@@ -664,7 +698,7 @@ fn resolve_entries(
 mod tests {
     use super::{BWRAP, Backend, ConfinedProcessExecutor, find_on_path};
     use crate::executor::Executor;
-    use crate::helper::{PathAccess, Spec};
+    use crate::helper::{PathAccess, PathRule, Spec};
     use crate::policy::{Access, EnvVar, FsEntry, FsPolicy, Policy, ShellPolicy};
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
@@ -689,14 +723,21 @@ mod tests {
     }
 
     /// The helper binary built alongside the tests.
+    ///
+    /// A unit test runs from `target/<profile>/deps`, but the binary is built
+    /// into `target/<profile>`, so both are tried.
     fn helper_path() -> PathBuf {
         if let Some(path) = option_env!("CARGO_BIN_EXE_agentd-sandbox-helper") {
             return PathBuf::from(path);
         }
         let mut dir = std::env::current_exe().expect("the test binary has a path");
         dir.pop();
-        dir.push("agentd-sandbox-helper");
-        dir
+        let mut candidate = dir.join("agentd-sandbox-helper");
+        if !candidate.exists() {
+            dir.pop();
+            candidate = dir.join("agentd-sandbox-helper");
+        }
+        candidate
     }
 
     /// Whether bubblewrap can actually build a namespace here. The Nix build
@@ -817,6 +858,70 @@ mod tests {
             window(&args, &["--ro-bind-try", &git, &git]),
             "an existing .git must be re-bound read-only: {args:?}"
         );
+    }
+
+    #[test]
+    fn a_network_grant_requires_the_landlock_helper() {
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        let mut policy = workdir_policy(&host);
+        policy.network.proxy = Some(crate::policy::Proxy {
+            port: 9000,
+            egress: vec![crate::policy::HostPort {
+                host: String::from("api.example.com"),
+                port: 443,
+            }],
+        });
+
+        // With a network grant the helper is required even if `bwrap` is on
+        // PATH, because bubblewrap cannot filter by port; the helper resolves
+        // from `PATH`, so construction succeeds when it is installed.
+        match ConfinedProcessExecutor::new(&policy) {
+            Ok(executor) => {
+                let Backend::Landlock { spec_path, .. } = &executor.backend else {
+                    panic!("a network grant must force the Landlock backend");
+                };
+                let spec: Spec =
+                    serde_json::from_slice(&std::fs::read(spec_path).expect("the spec is written"))
+                        .expect("the spec parses");
+                assert_eq!(spec.connect_port, Some(9000));
+            },
+            Err(crate::error::SandboxError::InvalidPolicy(message)) => {
+                assert!(
+                    message.contains("helper"),
+                    "the failure must explain the missing helper: {message}"
+                );
+            },
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn landlock_spec_carries_loopback_and_proxy_ports() {
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        let mut policy = workdir_policy(&host);
+        policy.network.loopback_bind = vec![8080, 8080, 9090];
+        policy.network.proxy = Some(crate::policy::Proxy {
+            port: 9000,
+            egress: Vec::new(),
+        });
+        let executor =
+            ConfinedProcessExecutor::with_landlock(&policy, helper_path()).expect("landlock spec");
+
+        let Backend::Landlock { spec_path, .. } = &executor.backend else {
+            panic!("the executor must use the Landlock backend");
+        };
+        let spec: Spec =
+            serde_json::from_slice(&std::fs::read(spec_path).expect("the spec is written"))
+                .expect("the spec parses");
+
+        assert_eq!(
+            spec.bind_ports,
+            vec![8080, 9090],
+            "ports are sorted and deduped"
+        );
+        assert_eq!(spec.connect_port, Some(9000));
     }
 
     #[test]
@@ -1027,6 +1132,89 @@ mod tests {
         );
         assert_eq!(result.exit_code, 124);
         assert!(result.stderr.contains("timeout"));
+    }
+
+    #[test]
+    fn landlock_grants_only_the_named_connect_port() {
+        if !helper_path().exists() {
+            return;
+        }
+        // The executor's probe uses `/bin/bash`, which some distributions lack
+        // (e.g. NixOS), so drive the helper directly with a hand-built spec to
+        // test the network filter itself rather than the FHS assumption.
+        let Some(shell) = find_on_path("bash", None) else {
+            return;
+        };
+        // Grant the shell's own store and the FHS system roots read-execute.
+        let mut paths: Vec<PathRule> = [
+            shell.parent().and_then(Path::parent),
+            Some(Path::new("/nix")),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|path| PathRule {
+            path: path.to_path_buf(),
+            access: PathAccess::ReadExecute,
+        })
+        .collect();
+        for root in ["/usr", "/bin", "/lib", "/lib64", "/etc"] {
+            let path = PathBuf::from(root);
+            if path.exists() {
+                paths.push(PathRule {
+                    path,
+                    access: PathAccess::ReadExecute,
+                });
+            }
+        }
+
+        // A listener the confined command may reach only on its port.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let allowed_port = listener.local_addr().expect("addr").port();
+        let deny_port = {
+            let other = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            other.local_addr().expect("addr").port()
+        };
+        std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+
+        let dir = TempDir::new().expect("tempdir");
+        let spec_path = dir.path().join("spec.json");
+        let spec = Spec {
+            paths,
+            bind_ports: Vec::new(),
+            connect_port: Some(allowed_port),
+        };
+        std::fs::write(
+            &spec_path,
+            serde_json::to_vec(&spec).expect("serialize the spec"),
+        )
+        .expect("write the spec");
+
+        let connect = |port: u16| {
+            std::process::Command::new(helper_path())
+                .arg(&spec_path)
+                .arg(&shell)
+                .arg("-c")
+                .arg(format!("exec 3<>/dev/tcp/127.0.0.1/{port} && echo open"))
+                .output()
+                .expect("the helper runs")
+        };
+
+        // The proxy port is reachable; a different loopback port is denied.
+        let allowed = connect(allowed_port);
+        assert!(
+            allowed.status.success() && String::from_utf8_lossy(&allowed.stdout).contains("open"),
+            "the proxy port must be reachable: {}",
+            String::from_utf8_lossy(&allowed.stderr)
+        );
+
+        let denied = connect(deny_port);
+        assert!(
+            !denied.status.success(),
+            "a port outside the policy must be denied: {}",
+            String::from_utf8_lossy(&denied.stdout)
+        );
     }
 
     #[test]

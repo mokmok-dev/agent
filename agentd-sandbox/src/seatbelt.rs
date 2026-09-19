@@ -339,6 +339,30 @@ fn unix_socket_grants(policy: &Policy) -> Vec<String> {
     grants
 }
 
+/// The loopback grants: a bind on any loopback port the policy names, and a
+/// connect to the daemon proxy's loopback port.
+///
+/// Loopback is not egress: a bind is the command's own server, and the proxy
+/// connect reaches a daemon-run endpoint on the same host. The proxy enforces
+/// the real egress allowlist, so the OS only needs to permit these two ports.
+fn loopback_grants(policy: &Policy) -> Vec<String> {
+    let mut grants: Vec<String> = Vec::new();
+    for port in &policy.network.loopback_bind {
+        grants.push(format!(
+            "(allow network-bind (local ip \"localhost:{port}\"))"
+        ));
+    }
+    if let Some(proxy) = &policy.network.proxy {
+        grants.push(format!(
+            "(allow network-outbound (remote ip \"localhost:{}\"))",
+            proxy.port
+        ));
+    }
+    grants.sort();
+    grants.dedup();
+    grants
+}
+
 /// The protected-metadata denial for one write root: writing anything at
 /// `<root>/<name>` or beneath it is denied, including creating it.
 fn protected_denials(
@@ -408,10 +432,12 @@ fn render_profile(
     lines.push(String::from("(allow sysctl-read)"));
 
     // Network is denied by default; only the policy's Unix domain sockets are
-    // reachable. The `.*` absorbs the address prefix Seatbelt matches ahead of
-    // the socket path, so the grant anchors the path's end without opening
-    // egress to anything else (see `unix_socket_grants`).
+    // reachable, plus the loopback grants: a command's own bind and the daemon
+    // proxy's connect. The `.*` absorbs the address prefix Seatbelt matches
+    // ahead of the socket path, so the grant anchors the path's end without
+    // opening egress to anything else (see `unix_socket_grants`).
     lines.extend(unix_socket_grants(policy));
+    lines.extend(loopback_grants(policy));
 
     // Protected metadata is carved out of the write roots, and the roots
     // themselves cannot be renamed or unlinked. Both are denials emitted after
@@ -604,6 +630,43 @@ mod tests {
             profile.matches("network-").count(),
             1,
             "only the socket grant may appear: {profile}"
+        );
+    }
+
+    #[test]
+    fn loopback_bind_and_proxy_connect_render_scoped_grants() {
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        let policy = Policy {
+            network: NetworkPolicy {
+                loopback_bind: vec![8080],
+                proxy: Some(crate::policy::Proxy {
+                    port: 9000,
+                    egress: vec![crate::policy::HostPort {
+                        host: String::from("api.example.com"),
+                        port: 443,
+                    }],
+                }),
+                ..NetworkPolicy::default()
+            },
+            ..workdir_policy(&host)
+        };
+
+        let profile = render(&policy, &[]);
+
+        assert!(
+            profile.contains("(allow network-bind (local ip \"localhost:8080\"))"),
+            "the bind grant must be loopback and port-scoped: {profile}"
+        );
+        assert!(
+            profile.contains("(allow network-outbound (remote ip \"localhost:9000\"))"),
+            "the proxy connect must be loopback and port-scoped: {profile}"
+        );
+        // No general IP egress: the allowlist is not rendered, so only the proxy
+        // port is reachable.
+        assert!(
+            !profile.contains("api.example.com"),
+            "the egress allowlist is enforced by the proxy, not the profile: {profile}"
         );
     }
 

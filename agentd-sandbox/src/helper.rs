@@ -19,17 +19,23 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use landlock::{
-    ABI, Access, AccessFs, AccessNet, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    ABI, Access, AccessFs, AccessNet, NetPort, PathBeneath, PathFd, Ruleset, RulesetAttr,
+    RulesetCreatedAttr,
 };
 use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetArch};
 use serde::{Deserialize, Serialize};
 
-/// The filesystem confinement the helper applies.
+/// The confinement the helper applies.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Spec {
     /// The path rules, evaluated as an allowlist.
     pub paths: Vec<PathRule>,
+    /// Loopback TCP ports the command may bind.
+    pub bind_ports: Vec<u16>,
+    /// The single loopback TCP port the command may connect to (the daemon
+    /// proxy). `None` denies all TCP connect, as before.
+    pub connect_port: Option<u16>,
 }
 
 /// One Landlock path rule.
@@ -113,7 +119,7 @@ pub(crate) fn confine(
     let raw = fs::read(spec_path).map_err(|error| format!("cannot read the spec: {error}"))?;
     let spec: Spec =
         serde_json::from_slice(&raw).map_err(|error| format!("cannot parse the spec: {error}"))?;
-    apply_landlock(&spec.paths)?;
+    apply_landlock(&spec)?;
     apply_seccomp(BLOCKED_SYSCALLS)?;
     let (program, args) = command.split_first().ok_or("no command to run")?;
     let error = std::process::Command::new(program).args(args).exec();
@@ -131,7 +137,7 @@ pub(crate) fn confine(
 /// sockets are filesystem objects and are unaffected. Network handling needs
 /// Landlock ABI v4 (Linux 6.7) and is best-effort: on an older kernel it is
 /// silently dropped and egress is not confined.
-fn apply_landlock(rules: &[PathRule]) -> Result<(), String> {
+fn apply_landlock(spec: &Spec) -> Result<(), String> {
     let abi = ABI::V1;
     let handled = AccessFs::from_all(abi);
     let net = AccessNet::from_all(ABI::V4);
@@ -140,7 +146,7 @@ fn apply_landlock(rules: &[PathRule]) -> Result<(), String> {
         .and_then(|ruleset| ruleset.handle_access(net))
         .and_then(Ruleset::create)
         .map_err(|error| format!("cannot create the Landlock ruleset: {error}"))?;
-    for rule in rules {
+    for rule in &spec.paths {
         let access = access_for(rule.access, abi);
         if !rule.path.exists() {
             // Landlock cannot express a missing path; the executor only lists
@@ -152,6 +158,20 @@ fn apply_landlock(rules: &[PathRule]) -> Result<(), String> {
         ruleset = ruleset
             .add_rule(PathBeneath::new(fd, access))
             .map_err(|error| format!("cannot add a rule for {:?}: {error}", rule.path.display()))?;
+    }
+    // Network is handled but no port is allowed unless the policy names one, so
+    // TCP bind and connect stay denied by default. A port rule is port-only:
+    // Landlock has no host dimension, but the granted port is the daemon proxy
+    // bound on loopback, so no other host is a reachable egress channel.
+    for port in &spec.bind_ports {
+        ruleset = ruleset
+            .add_rule(NetPort::new(*port, AccessNet::BindTcp))
+            .map_err(|error| format!("cannot allow bind on port {port}: {error}"))?;
+    }
+    if let Some(port) = spec.connect_port {
+        ruleset = ruleset
+            .add_rule(NetPort::new(port, AccessNet::ConnectTcp))
+            .map_err(|error| format!("cannot allow connect on port {port}: {error}"))?;
     }
     ruleset
         .restrict_self()
