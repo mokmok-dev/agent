@@ -73,33 +73,28 @@ difficulty:
   not the unit).
 - `agentd::session::SessionManager` supervises those units.
 
-The fix is to make the unit structural. The confined process has been renamed
-already; the unit follows once the `Bridge` exists:
-
-```rust
-/// The unit the manager owns. It knows nothing about protocols.
-pub struct Session {
-    process: SandboxedProcess,
-    bridge: Box<dyn Bridge>,
-}
-```
+The fix was to separate the three roles by name and by type:
 
 - **`SandboxedProcess`** (renamed from `agentd_sandbox::Session`): the child
   process, its pipes, and the profile/scratch it was spawned under. This is the
   mechanism.
-- **`Session`** = `SandboxedProcess` + `Bridge`. The manager's unit of
-  supervision. Its `Bridge` field is `dyn`, so the manager never names a
-  protocol.
+- **`SessionManager`** owns the lifecycle and holds an
+  `Option<Arc<dyn Bridge>>`. The manager never names a protocol, so a new
+  protocol does not touch it.
 - **`Bridge`** = the conversion. Bidirectional and symmetric, so one word
   covers both directions.
 
+A dedicated `Session { SandboxedProcess, Bridge }` struct was designed and then
+deleted: nothing needed a second name for the pairing, and the manager — the
+only holder — holds the bridge directly. "Session" now names the manager's
+domain and its `session.*` events, not a Rust type.
+
 `Bridge` is chosen over the alternatives for three reasons: the direction is
 symmetric (a child-to-bus *uplink* and a bus-to-child *downlink* are both
-"bridging"), the concrete type can be named after the protocol
-(`StdioBridge`, `McpBridge`, `LspBridge`), and the name does not claim the
-manager knows the protocol. `Driver` is avoided because it collides with the
-tokio I/O driver; `Adapter` and `Codec` were considered and lose the symmetry or
-sound byte-level.
+"bridging"), the concrete type is named after the protocol (`McpBridge`, and a
+future `LspBridge`), and the name does not claim the manager knows the protocol.
+`Driver` is avoided because it collides with the tokio I/O driver; `Adapter` and
+`Codec` were considered and lose the symmetry or sound byte-level.
 
 Vocabulary that is reserved, not used here:
 
@@ -115,21 +110,39 @@ confinement is. The name should not imply more capability than the child has.
 
 ```rust
 pub trait Bridge: Send + Sync {
-    /// Child bytes -> events. Called as the child produces output.
-    async fn uplink(&self, ...) -> Option<Event>;
-    /// Events -> child bytes. Called for each event routed to the session.
-    async fn downlink(&self, event: Event);
+    /// A stable label for the protocol, recorded on every event.
+    fn protocol(&self) -> &'static str;
+    /// Lines to write once the child starts; empty when there is no handshake.
+    fn handshake(&self) -> Vec<String>;
+    /// One child output line -> an event, plus any protocol replies it owes.
+    fn uplink(&self, line: &str) -> Option<Conversion>;
+    /// An event routed to this session -> a line to write, or `None`.
+    fn downlink(&self, event: &Event) -> Option<String>;
 }
 ```
 
-`uplink` is driven by the child's output; `downlink` by the bus. The manager
-gives a `Bridge` the child's pipes (`SandboxedProcess::take_stdin` /
-`take_stdout` / `take_stderr`, see [sandbox](sandbox.md)) and the publish
-handle. It never inspects the bytes.
+The methods are synchronous because they are pure conversions of one already
+delimited line; all I/O and task orchestration stays in the manager. `uplink` is
+driven by the child's output; `downlink` by the bus. The manager takes the
+child's `stdin` and `stdout` (`SandboxedProcess::take_stdin` / `take_stdout`,
+see [sandbox](sandbox.md)) and drives them; it never inspects the bytes. A single
+task owns the stdin pipe, fed by one channel that both the downlink watcher and
+the uplink reader's replies write to, so no two writers interleave a frame.
+`Conversion::to_child` carries protocol obligations that follow a response
+(for example MCP's `notifications/initialized`), so the handshake is a two-step
+exchange the bridge can describe without holding a pipe.
 
-A `Bridge` is per-protocol. A tool with no protocol at all gets a minimal
-`StdioBridge` that turns stdout into framed events; the richer bridges
-(`McpBridge`, `LspBridge`) implement real framing and correlation.
+A `Bridge` is per-protocol. `McpBridge` is the first: it frames the Model
+Context Protocol, newline-delimited JSON-RPC 2.0, opens with `initialize`, and
+answers the server's response with `notifications/initialized`. The manager holds
+`Option<Arc<dyn Bridge>>`; with no bridge the process is a `CloudEvents` peer and
+its pipes are left untouched.
+
+The design originally floated a `Session { SandboxedProcess, Bridge }` struct and
+a minimal `StdioBridge`; both were deleted as speculative. The manager already
+owns the lifecycle and is the only thing that needs the bridge, so it holds one
+field directly, and a protocol-less tool needs no bridge at all — it is the
+`run_shell`/peer case.
 
 ## Event provenance
 
@@ -149,33 +162,32 @@ each child its own `source` was rejected: provenance would then live in two
 places (source for children, subject for everything else), and the daemon would
 lose the ability to say "the daemon mediated this".
 
-`subject` is an optional CloudEvents attribute and `Event` does not carry it
-today (`agentd-events/src/lib.rs:86`), so this is an additive field with a
-serde default and a `skip_serializing_if`, the same shape as `time`. It is not
-part of `set_provenance`: the daemon owns `source` and `time` on ingress, but
-`subject` belongs to the producer (the Bridge) and must survive a relay.
+`subject` is an optional CloudEvents attribute, added to `Event` as a field with
+a `skip_serializing_if` and set through `Event::with_subject`, the same shape as
+`time`. It is not part of `set_provenance`: the daemon owns `source` and `time`
+on ingress, but `subject` belongs to the producer (the Bridge) and survives a
+relay.
 
-There is a name collision to resolve when this lands. The sandbox's session
-events already carry a `data.subject` field holding the *command string*
-(`agentd-sandbox/src/events.rs:142`), so `subject` would denote the command in
-`data` and the session id in the context attribute. The context attribute keeps
-the CloudEvents spelling; the data field is renamed to `command` when the
-attribute is introduced, so one word stops naming two things.
+The collision the design flagged is resolved: the sandbox's session and
+permission events carried a `data.subject` field holding the *command string*;
+that field is now `data.command` (`agentd-sandbox/src/events.rs`), so the word
+`subject` names only the context attribute.
 
 ## Routing and backpressure
 
-Downlink reuses the existing client-side selection: a session declares the
-event types it wants — the `Interest` / `TypePrefixes` model in
-`agentd-node/src/filter.rs` — and the manager, or the `Bridge`, drops anything
-else before writing a byte to the child. The child does not get a mailbox of its
-own; the log already holds every candidate, and downlink is just a filtered
-projection of it.
+Downlink routes by `subject`. A `Bridge` emits, and a client addresses, an event
+whose `subject` is `session:<id>`; the manager's downlink watcher forwards only
+events whose `subject` matches its own session, so two bridged sessions of the
+same protocol never receive each other's messages. The child does not get a
+mailbox of its own: the log already holds every candidate, and downlink is a
+filtered projection of it. Type-based selection (`Interest` / `TypePrefixes` in
+`agentd-node/src/filter.rs`) remains available for a future bridge that wants it,
+but `subject` is what the first one needs and uses.
 
-Uplink must not flood the log. A `Bridge` frames the child's stream and applies
-an output budget equivalent to the sandbox's one-shot `max_output_bytes`; a
-raw stdout that never yields a frame is capped, not appended forever. Framing
-and capping are the Bridge's job precisely because only the Bridge knows what a
-"complete message" is.
+Uplink must not flood the log. The manager reads the child's stdout line by line
+and drops any line longer than `MAX_FRAME_BYTES` (64 KiB) rather than appending
+it, so a stream that never yields a frame is bounded. Framing (what counts as one
+message) is the `Bridge`'s job precisely because only it knows the protocol.
 
 ## Relationship to the existing session manager
 
@@ -193,24 +205,30 @@ the protocol, and only those.
 
 ## Testing strategy
 
-- **Bridge unit tests**: framing per protocol, a partial frame buffered across
-  reads, an oversized frame capped rather than accumulated, and `subject`
-  stamped on every emitted event.
-- **Routing tests**: a downlink event with an uninteresting type reaches no
-  byte; an interesting one reaches the child; `Interest` and the Bridge agree.
-- **Separation test**: adding a stub protocol bridge requires no change to
-  `SessionManager` — the manager stays `dyn Bridge`.
+- **Bridge unit tests**: the handshake shape, a notification and an
+  `initialize` response converting to events, the `notifications/initialized`
+  reply it owes, blank/non-JSON/foreign messages ignored, and downlink rendering
+  only this protocol's messages (see `agentd/src/bridge.rs`).
+- **End-to-end bridge tests**: a real child on `/bin/sh` completes the MCP
+  handshake and one notification over the log with `subject: session:<id>`, and
+  an outbound event addressed to the session is echoed back as an inbound event
+  (see `agentd/src/session.rs`).
+- **Routing and cap tests**: the downlink watcher forwards only its session's
+  `subject`; an oversized line is dropped rather than appended.
 - **Supervision regression**: existing `agentd::session` tests (lifecycle,
-  restart budget, lifetime kill, status, startup reconciliation) still pass with
-  the unit renamed to `Session`.
+  restart budget, lifetime kill, status, startup reconciliation) pass unchanged,
+  and the unbridged path leaves the child's pipes untouched.
 
 ## Implementation status
 
-The rename is done: `agentd_sandbox::Session` is now `SandboxedProcess`
-(`agentd-sandbox/src/sandbox.rs`), with no behavior change, so supervision and
-conversion stop sharing the word "Session".
+Implemented: the `SandboxedProcess` rename; the `subject` attribute on `Event`
+with `with_subject`; the `data.subject` -> `data.command` rename in the sandbox
+events; the `Bridge` trait and `McpBridge` (`agentd/src/bridge.rs`); the
+manager's `Option<Arc<dyn Bridge>>`, handshake, line-framed uplink, single-writer
+downlink, subject routing, and frame cap; and the `--session-bridge mcp` daemon
+flag. All of it is behind the `sandbox` feature.
 
-Still design only: the `Bridge` trait, the `Session { SandboxedProcess, Bridge }`
-unit, and `subject` stamping for bridged events are not implemented. The
-existing supervisor, its `session.*` lifecycle events, and the `agentd-node`
-CloudEvents peer path are unchanged by this design.
+Not built: `LspBridge` or any second protocol, a `StdioBridge` for protocol-less
+tools, type-based (`Interest`) downlink selection, and correlation of JSON-RPC
+request/response ids into typed events. The `agentd-node` CloudEvents peer path
+is unchanged.

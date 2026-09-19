@@ -375,6 +375,10 @@ existing dotted-type convention and `source: urn:mokmokd`:
 | `session.status.requested`    | A client asks for the active managed sessions                     |
 | `session.status`              | The list of active managed sessions                               |
 
+The payload names the command under `data.command`. (It was `data.subject`
+until the `subject` context attribute was introduced; the field was renamed so
+one word does not name both the command and the session.)
+
 Every permission event carries a `request_id` (a UUID) alongside `sandbox_id`, so
 a decision is correlated to one request even when execs run concurrently.
 `decision` in `requested` is `auto` when a static rule granted immediately and
