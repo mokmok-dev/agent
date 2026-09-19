@@ -46,27 +46,50 @@ only decide *whether a port is reachable at all*.
 
 Invert the problem: the OS grants the child a single destination — a proxy the
 daemon runs — and the proxy enforces the host allowlist. The child reaches the
-proxy on loopback TCP; the proxy opens the real connection only to an allowed
-`host:port` and tunnels bytes with HTTP `CONNECT`.
+proxy and the proxy opens the real connection only to an allowed `host:port` and
+tunnels bytes with HTTP `CONNECT`.
+
+The proxy is reached over a **Unix socket**, not loopback TCP. A Unix socket is a
+filesystem object, so it crosses a network namespace: the daemon binds it on the
+host and the child gets it bind-mounted in. That matters because it lets the
+child run in a **private network namespace** (`bwrap --unshare-all`) with *no IP
+egress at all* and still reach the proxy. Inside the namespace the child runs a
+tiny **forwarder** that listens on loopback and pipes to the Unix socket; the
+agent's `HTTP_PROXY` points at that loopback port.
 
 ```
-+---------------- sandbox (OS-confined) ----------------+
++--------- child (private network namespace) -----------+
 |  ACP agent                                            |
 |    |  loopback TCP bind (its own HTTP server)         |
-|    |  loopback TCP connect -> 127.0.0.1:PROXY_PORT    |
+|    |  HTTP_PROXY -> 127.0.0.1:FORWARD                 |
+|    v                                                  |
+|  forwarder (dumb: loopback TCP -> Unix socket)        |
 +----|--------------------------------------------------+
-     |                    OS grants: loopback bind + the proxy port only
+     |  Unix socket (bind-mounted; crosses the netns)
      v
 +---------------- daemon (trusted) ----------------------+
 |  CONNECT proxy  -- allowlist(host:port) --> provider  |
 +-------------------------------------------------------+
 ```
 
+Why the Unix socket, and not loopback TCP, is the whole point:
+
+- **No IP route exists in the namespace.** The child cannot bypass the proxy to
+  an arbitrary host, cannot reach UDP/QUIC (there is no external interface), and
+  the proxy's address is not a host-reachable port. The earlier "shared network +
+  Landlock port filter" model had all three holes; this model has none, and it
+  needs no veth (unprivileged bubblewrap cannot make one) and no userspace TCP
+  stack.
+- **The forwarder is dumb.** It knows one destination (the mounted socket) and
+  carries no allowlist or decision. The trust boundary stays on the daemon side,
+  where the proxy decides.
+
 What each layer decides:
 
 | Layer | Decides | Enforced by |
 | --- | --- | --- |
-| OS profile | loopback bind, the proxy port, everything else denied | Seatbelt / Landlock |
+| Network namespace | loopback only; no external route, TCP or UDP | bubblewrap `--unshare-all` |
+| Filesystem profile | the child sees exactly one proxy socket | Landlock / Seatbelt bind-mount |
 | Proxy | which `host:port` the tunnel may open | the daemon |
 | Provider | authentication | the agent (the tunnel does not see it) |
 
@@ -74,6 +97,11 @@ The tunnel is **opaque**: the proxy does not terminate TLS and never sees the
 provider credentials, which the agent holds and sends end to end. That is the
 simpler and safer choice; a credential-injecting proxy would need a MITM CA the
 agent must trust, and is a separate layer.
+
+The loopback TCP form remains for hosts without a private namespace (macOS
+Seatbelt), where the child reaches the proxy on `127.0.0.1`. The Unix-socket
+form is the Linux model, because only Linux has the namespace to make it a real
+boundary.
 
 ## Two network models
 

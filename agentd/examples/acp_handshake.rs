@@ -276,8 +276,11 @@ async fn configure_egress(
         name: String::from("NO_PROXY"),
         value: String::from("127.0.0.1,localhost,::1"),
     });
+    let Some(address) = proxy.address() else {
+        return Err("the egress proxy did not bind a TCP port".into());
+    };
     policy.network.proxy = Some(agentd_sandbox::Proxy {
-        port: proxy.address().port(),
+        port: address.port(),
         egress,
     });
     Ok(Some(proxy))

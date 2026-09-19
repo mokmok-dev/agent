@@ -2,17 +2,24 @@
 //! use. The design and trust model are in `docs/egress.md`.
 //!
 //! It requires a per-proxy credential so only the sandbox it was started for
-//! can use it, not any other process of the same user; it does not terminate
+//! can use it, not any other process of the same user. It does not terminate
 //! TLS, so the provider credentials stay end to end.
+//!
+//! Two transports: a loopback **TCP** port (macOS Seatbelt, where the child
+//! reaches `127.0.0.1`), and a **Unix socket** (Linux, where the child runs in a
+//! private network namespace with no IP route and reaches the mounted socket).
 
 use std::io;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader,
+};
+use tokio::net::{TcpListener, TcpStream, UnixListener};
 use tokio::sync::Semaphore;
 
 use agentd_sandbox::HostPort;
@@ -24,6 +31,9 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The most concurrent client connections the proxy serves.
 const MAX_CONNECTIONS: usize = 256;
+/// The loopback port the child's forwarder listens on, fixed so the injected
+/// proxy URL is stable.
+const FORWARD_PORT: u16 = 31_828;
 
 /// The proxy allowlist: the `host:port` destinations a tunnel may open.
 #[derive(Clone, Debug, Default)]
@@ -53,9 +63,17 @@ impl Egress {
     }
 }
 
-/// A running proxy: the address it listens on and its shutdown handle.
+/// Where the proxy listens.
+enum Transport {
+    /// A loopback TCP port (macOS Seatbelt: no private namespace).
+    Tcp(SocketAddr),
+    /// A Unix socket path (Linux: crosses the private network namespace).
+    Unix(PathBuf),
+}
+
+/// A running proxy: where it listens and its shutdown handle.
 pub struct Proxy {
-    address: SocketAddr,
+    transport: Transport,
     /// The token the client must present; embedded in [`url`](Proxy::url).
     token: String,
     shutdown: tokio::sync::watch::Sender<bool>,
@@ -73,8 +91,8 @@ impl Proxy {
         let address = listener.local_addr()?;
         let token = uuid::Uuid::now_v7().to_string();
         let expected = basic_authorization(&token);
-        let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
         let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -83,10 +101,7 @@ impl Proxy {
                         let Ok((stream, _peer)) = accepted else {
                             return;
                         };
-                        // Cap concurrency: with no bound, a local peer could open
-                        // connections until the process runs out of descriptors.
-                        let Ok(permit) = permits.clone().try_acquire_owned() else {
-                            drop(stream);
+                        let Some(permit) = take_permit(&permits, &stream) else {
                             continue;
                         };
                         let egress = egress.clone();
@@ -102,18 +117,81 @@ impl Proxy {
             }
         });
         Ok(Self {
-            address,
+            transport: Transport::Tcp(address),
             token,
             shutdown,
             task,
         })
     }
 
-    /// The loopback address the proxy listens on; its port goes into the sandbox
-    /// policy as the proxy grant.
+    /// Binds `path` and serves `egress` on that Unix socket with a fresh
+    /// credential.
+    ///
+    /// The child gets the socket bind-mounted and reaches the proxy from inside
+    /// a private network namespace, where it has no IP route at all (see
+    /// `docs/egress.md`).
+    ///
+    /// # Errors
+    ///
+    /// Returns the bind error when the socket path cannot be created.
+    pub fn start_unix(
+        path: impl AsRef<Path>,
+        egress: Egress,
+    ) -> io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let listener = UnixListener::bind(&path)?;
+        let token = uuid::Uuid::now_v7().to_string();
+        let expected = basic_authorization(&token);
+        let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => return,
+                    accepted = listener.accept() => {
+                        let Ok((stream, _peer)) = accepted else {
+                            return;
+                        };
+                        let Some(permit) = take_permit(&permits, &stream) else {
+                            continue;
+                        };
+                        let egress = egress.clone();
+                        let expected = expected.clone();
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            if let Err(error) = serve(stream, &egress, &expected).await {
+                                tracing::debug!(%error, "a proxy connection ended");
+                            }
+                        });
+                    },
+                }
+            }
+        });
+        Ok(Self {
+            transport: Transport::Unix(path),
+            token,
+            shutdown,
+            task,
+        })
+    }
+
+    /// The loopback address the proxy listens on, when it is a TCP proxy; its
+    /// port goes into the sandbox policy.
     #[must_use]
-    pub const fn address(&self) -> SocketAddr {
-        self.address
+    pub const fn address(&self) -> Option<SocketAddr> {
+        match &self.transport {
+            Transport::Tcp(address) => Some(*address),
+            Transport::Unix(_) => None,
+        }
+    }
+
+    /// The Unix socket path the proxy listens on, when it is a Unix proxy.
+    #[must_use]
+    pub fn socket_path(&self) -> Option<&Path> {
+        match &self.transport {
+            Transport::Tcp(_) => None,
+            Transport::Unix(path) => Some(path),
+        }
     }
 
     /// The proxy URL to put in the child's environment, carrying the credential
@@ -121,7 +199,15 @@ impl Proxy {
     /// logs; the token is per-proxy and dies with it.
     #[must_use]
     pub fn url(&self) -> String {
-        format!("http://agentd:{}@{}", self.token, self.address)
+        match &self.transport {
+            Transport::Tcp(address) => format!("http://agentd:{}@{address}", self.token),
+            // A Unix proxy is reached through the child's own forwarder, which
+            // listens on loopback; the URL names that loopback port, not the
+            // socket.
+            Transport::Unix(_) => {
+                format!("http://agentd:{}@127.0.0.1:{FORWARD_PORT}", self.token)
+            },
+        }
     }
 
     /// Stops serving.
@@ -141,13 +227,27 @@ impl Drop for Proxy {
     }
 }
 
-/// Serves one client: authenticate, parse `CONNECT`, enforce the allowlist, tunnel.
-async fn serve(
-    client: TcpStream,
+/// Takes a connection permit, dropping the stream when at capacity. With no
+/// bound, a local peer could open connections until the process runs out of
+/// descriptors.
+fn take_permit<S>(
+    permits: &Arc<Semaphore>,
+    _stream: &S,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    permits.clone().try_acquire_owned().ok()
+}
+
+/// Serves one client: authenticate, parse `CONNECT`, enforce the allowlist,
+/// tunnel. Generic over the transport so TCP and Unix share one path.
+async fn serve<S>(
+    client: S,
     egress: &Egress,
     expected: &str,
-) -> io::Result<()> {
-    let (read_half, mut client_write) = client.into_split();
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (read_half, mut client_write) = tokio::io::split(client);
     // The reader is buffered and may hold bytes read past the CONNECT line, so
     // the tunnel copies through it rather than the raw read half.
     let mut client_read = BufReader::new(read_half);
@@ -197,13 +297,16 @@ async fn serve(
 /// Copies bytes in both directions until *both* end, honoring half-close: when
 /// one side finishes writing it shuts its counterpart down, and the other
 /// direction keeps flowing until it too ends.
-async fn tunnel(
-    client_read: impl AsyncBufRead + Unpin,
-    mut client_write: tokio::net::tcp::OwnedWriteHalf,
+async fn tunnel<R, W>(
+    mut client_read: R,
+    mut client_write: W,
     upstream: TcpStream,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let (mut upstream_read, mut upstream_write) = upstream.into_split();
-    let mut client_read = client_read;
     let to_upstream = async {
         let result = tokio::io::copy(&mut client_read, &mut upstream_write).await;
         let _ = upstream_write.shutdown().await;
@@ -239,7 +342,7 @@ impl Head {
 }
 
 /// Reads the request head, failing if it exceeds [`MAX_HEADER_BYTES`].
-async fn read_head(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> io::Result<Head> {
+async fn read_head<R: AsyncBufRead + Unpin>(reader: &mut R) -> io::Result<Head> {
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).await? == 0 {
         return Ok(Head {
@@ -279,8 +382,8 @@ async fn read_head(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> io
 }
 
 /// Writes an empty HTTP response with `status` and no extra headers.
-async fn reply(
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+async fn reply<W: AsyncWrite + Unpin>(
+    writer: &mut W,
     status: u16,
     reason: &str,
 ) -> io::Result<()> {
@@ -288,8 +391,8 @@ async fn reply(
 }
 
 /// Writes an empty HTTP response with `status` and the given `extra` headers.
-async fn reply_with(
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+async fn reply_with<W: AsyncWrite + Unpin>(
+    writer: &mut W,
     status: u16,
     reason: &str,
     extra: &str,
@@ -378,15 +481,15 @@ mod tests {
         connect_with_authorization(proxy, host, port, &basic_authorization(&proxy.token)).await
     }
 
-    /// As [`connect_through`] but with an explicit `Proxy-Authorization` value
-    /// (`None` sends no credential).
+    /// As [`connect_through`] but with an explicit `Proxy-Authorization` value.
     async fn connect_with_authorization(
         proxy: &Proxy,
         host: &str,
         port: u16,
         authorization: &str,
     ) -> std::io::Result<(TcpStream, String)> {
-        let mut stream = TcpStream::connect(proxy.address()).await?;
+        let address = proxy.address().expect("a TCP proxy");
+        let mut stream = TcpStream::connect(address).await?;
         stream
             .write_all(
                 format!(
@@ -519,6 +622,66 @@ mod tests {
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await.expect("read reply");
         assert_eq!(response, b"ping", "the reply must survive the half-close");
+
+        proxy.stop();
+    }
+
+    #[tokio::test]
+    async fn a_unix_proxy_tunnels_to_an_allowed_destination() {
+        use tokio::net::UnixStream;
+
+        let echo = TcpListener::bind("127.0.0.1:0").await.expect("echo binds");
+        let echo_port = echo.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let (mut socket, _) = echo.accept().await.expect("accept");
+            let mut buffer = [0_u8; 64];
+            let read = socket.read(&mut buffer).await.expect("read");
+            socket.write_all(&buffer[..read]).await.expect("write");
+        });
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = dir.path().join("proxy.sock");
+        let proxy = Proxy::start_unix(
+            &socket_path,
+            Egress::new(vec![HostPort {
+                host: String::from("127.0.0.1"),
+                port: echo_port,
+            }]),
+        )
+        .expect("unix proxy starts");
+
+        let mut stream = UnixStream::connect(&socket_path).await.expect("connect");
+        stream
+            .write_all(
+                format!(
+                    "CONNECT 127.0.0.1:{echo_port} HTTP/1.1\r\nProxy-Authorization: {}\r\n\r\n",
+                    basic_authorization(&proxy.token)
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write head");
+        let mut status = Vec::new();
+        let mut byte = [0_u8; 1];
+        loop {
+            let read = stream.read(&mut byte).await.expect("read status");
+            if read == 0 {
+                break;
+            }
+            status.push(byte[0]);
+            if status.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        assert!(
+            String::from_utf8_lossy(&status).starts_with("HTTP/1.1 200"),
+            "status: {}",
+            String::from_utf8_lossy(&status)
+        );
+        stream.write_all(b"ping").await.expect("write");
+        let mut echo = [0_u8; 4];
+        stream.read_exact(&mut echo).await.expect("read");
+        assert_eq!(&echo, b"ping");
 
         proxy.stop();
     }
