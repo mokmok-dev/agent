@@ -1,5 +1,7 @@
 use agentd::auth::TokenStore;
 use agentd::server;
+#[cfg(feature = "sandbox")]
+use agentd_events::Event;
 use agentd_events::log::{self, EventLog};
 use agentd_inference::{FakeProvider, Provider, ProviderRegistry, ProvidersConfig};
 use clap::{Parser, Subcommand};
@@ -26,6 +28,9 @@ struct Args {
 #[derive(Debug, Subcommand)]
 enum Command {
     Serve(Box<ServeArgs>),
+    /// Bring the daemon and a sandboxed agent up in one shot.
+    #[cfg(feature = "sandbox")]
+    Up(Box<agentd::up::UpArgs>),
     /// Verify the event log's hash chain.
     VerifyLog {
         /// The JSONL event log. Defaults to `~/.agentd/events.jsonl`.
@@ -149,6 +154,12 @@ enum RunError {
     Init(#[from] agentd::init::InitError),
     #[error("the token file {0} does not exist; run `agentd init` to create it")]
     MissingTokens(PathBuf),
+    #[cfg(feature = "sandbox")]
+    #[error("failed to derive the one-shot launch: {0}")]
+    Up(#[from] agentd::up::UpError),
+    #[cfg(feature = "sandbox")]
+    #[error("a background task failed: {0}")]
+    Task(String),
 }
 
 /// Parses `host:port` egress destinations from the CLI, honoring a bracketed
@@ -392,20 +403,27 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
         );
     }
 
-    let providers_config = providers_config.or_else(|| {
-        let default = agentd_events::paths::default_providers();
-        default.exists().then_some(default)
-    });
-    let provider: Arc<dyn Provider> = match providers_config {
-        Some(path) => {
-            let config = ProvidersConfig::load(&path)?;
-            Arc::new(ProviderRegistry::new(config)?)
-        },
-        None => Arc::new(FakeProvider::default()),
-    };
+    let provider = load_provider(providers_config)?;
     server::run(socket, log, tokens, provider)
         .await
         .map_err(RunError::Serve)
+}
+
+/// Loads the provider from `providers_config`, or from the default provider
+/// config when it exists, falling back to the deterministic fake.
+fn load_provider(providers_config: Option<PathBuf>) -> Result<Arc<dyn Provider>, RunError> {
+    let Some(path) = providers_config.or_else(|| {
+        let default = agentd_events::paths::default_providers();
+        default.exists().then_some(default)
+    }) else {
+        tracing::warn!(
+            "no provider config: serving the deterministic fake provider; \
+             `agentd init` writes a template to edit"
+        );
+        return Ok(Arc::new(FakeProvider::default()));
+    };
+    let config = ProvidersConfig::load(&path)?;
+    Ok(Arc::new(ProviderRegistry::new(config)?))
 }
 
 async fn run() -> Result<(), RunError> {
@@ -413,6 +431,8 @@ async fn run() -> Result<(), RunError> {
 
     match args.command {
         Command::Serve(serve) => serve_command(*serve).await,
+        #[cfg(feature = "sandbox")]
+        Command::Up(up) => up_command(*up).await,
         Command::VerifyLog { log_path } => {
             let path = log_path.unwrap_or_else(agentd_events::paths::default_log);
             let count = agentd_events::verify_chain(&path).map_err(RunError::Log)?;
@@ -427,6 +447,127 @@ async fn run() -> Result<(), RunError> {
         },
     }
 }
+
+/// Runs the `up` subcommand: serve the daemon and supervise a sandboxed agent
+/// derived from a single `--workdir`.
+///
+/// Everything else the launch needs — the sandbox policy and the agent's
+/// command line — is derived from the workspace and the daemon's own paths (see
+/// [`agentd::up`]); the operator's only real choice is the workspace.
+#[cfg(feature = "sandbox")]
+async fn up_command(args: agentd::up::UpArgs) -> Result<(), RunError> {
+    let layout = agentd::up::UpPaths::resolve(&args)?;
+    let policy = layout.policy()?;
+    let command = layout.agent_command(args.model.as_deref());
+
+    let socket = layout.socket.clone();
+    let log_path = args
+        .log_path
+        .clone()
+        .unwrap_or_else(agentd_events::paths::default_log);
+    // The token file the daemon loads is the one the policy denies to the agent
+    // (`UpPaths::daemon_token`), resolved once so the two cannot disagree.
+    let token_file = layout.daemon_token.clone();
+
+    if !token_file.exists() {
+        return Err(RunError::MissingTokens(token_file));
+    }
+    let tokens = TokenStore::load(&token_file).map_err(RunError::Auth)?;
+    let log = EventLog::open(&log_path).map_err(RunError::Log)?;
+    // Loaded before any task is spawned so a bad provider config fails with
+    // nothing running.
+    let provider = load_provider(args.providers_config.clone())?;
+
+    // Claim the single-instance boundary before anything else touches shared
+    // state. The manager's startup reconciliation *fails* every session the log
+    // shows as still active, on the assumption that this daemon is the one
+    // taking over from a crashed predecessor. A second `agentd up` that reached
+    // reconciliation while another instance was serving would therefore fail the
+    // live instance's session; binding first makes "already running" a failure
+    // that changes nothing.
+    let listener = server::bind(socket).await.map_err(RunError::Serve)?;
+
+    tracing::info!(
+        workdir = %layout.workdir.display(),
+        session_db = %layout.session_db.display(),
+        agent = %layout.agent_binary.display(),
+        "starting a supervised agent session",
+    );
+
+    // Start the manager before the server so the session is launched against a
+    // subscribed, reconciled manager; `run_ready` signals once the startup
+    // snapshot is taken, so the kickoff below is a live event rather than one
+    // reconciliation would fail as a leftover.
+    let manager =
+        agentd::session::SessionManager::new(log.clone(), &policy, command, SESSION_AGENT_ID)?
+            .with_workdir(layout.workdir.clone())
+            .with_supervision(agentd::session::Supervision {
+                max_restarts: args.session_max_restarts,
+                restart_backoff: Duration::from_secs(1),
+                lifetime: args.session_lifetime_secs.map(Duration::from_secs),
+            });
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let manager_task = tokio::spawn(async move {
+        if let Err(error) = manager.run_ready(shutdown_rx, ready_tx).await {
+            tracing::error!(%error, "the session manager stopped");
+        }
+    });
+
+    let mut server_task = tokio::spawn(server::serve(listener, log.clone(), tokens, provider));
+    let ready = tokio::select! {
+        ready = ready_rx => ready,
+        // The server can only end here if serving failed; `bind` already proved
+        // the socket is ours, so this is a genuine error rather than a
+        // competitor, and no session has been launched yet.
+        result = &mut server_task => {
+            shutdown_tx.send(true).ok();
+            manager_task.abort();
+            return match result {
+                Ok(result) => result.map_err(RunError::Serve),
+                Err(error) => Err(RunError::Task(error.to_string())),
+            };
+        },
+    };
+    if ready.is_err() {
+        // The manager stopped before signalling; the kickoff would go nowhere.
+        shutdown_tx.send(true).ok();
+        manager_task.abort();
+        server_task.abort();
+        return Err(RunError::Task(String::from(
+            "the session manager stopped before becoming ready",
+        )));
+    }
+    if let Err(error) = log
+        .publish(Event::new(
+            agentd::session::SESSION_REQUESTED,
+            serde_json::json!({ "session_id": args.session_id }),
+        ))
+        .await
+    {
+        // The kickoff is the whole point of `up`; a failed durable append means
+        // the log is unusable, so it is reported rather than silently serving a
+        // daemon with no agent.
+        shutdown_tx.send(true).ok();
+        manager_task.abort();
+        server_task.abort();
+        return Err(RunError::Log(error));
+    }
+
+    // The server runs until a signal stops it; `up` returns when it does and
+    // then asks the manager to stop.
+    let result = match server_task.await {
+        Ok(result) => result.map_err(RunError::Serve),
+        Err(error) => Err(RunError::Task(error.to_string())),
+    };
+    shutdown_tx.send(true).ok();
+    let _ = manager_task.await;
+    result
+}
+
+/// The agent id recorded on `session.*` events for a one-shot launch.
+#[cfg(feature = "sandbox")]
+const SESSION_AGENT_ID: &str = "urn:mokmokd:session";
 
 /// Prints the paths that [`agentd::init::init`] created, showing the secrets
 /// once so they can be copied into client commands.
@@ -457,6 +598,11 @@ fn print_initialized(initialized: &agentd::init::Initialized) {
         agentd_events::paths::default_socket().display(),
         agentd_events::paths::default_log().display(),
         initialized.tokens_path.display(),
+    );
+    #[cfg(feature = "sandbox")]
+    println!(
+        "or run the daemon and a sandboxed agent in one shot with:\n  \
+         agentd up --workdir <workspace>"
     );
 }
 
