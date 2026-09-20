@@ -402,6 +402,20 @@ untouched — while `up` is the opinionated launcher built on top:
   daemon. It also claims the socket (via `server::bind`, split from `serve`)
   before the manager starts, so a second instance fails with `AlreadyRunning`
   without its reconciliation disturbing the live instance's session.
+- It waits (bounded) for the `agent.session.started` event naming its own
+  workdir, then prints the `agentd-publish` invocation that reaches that
+  session: the session database and the user token, which the operator cannot
+  otherwise guess, plus the conversation id it observed. When the announcement
+  does not arrive it prints the same command without `--conversation`, leaving
+  the id to `agentd-publish`'s own latest-session lookup.
+- With `--resume` it passes `--resume` through to the agent, continuing the most
+  recent session recorded for the workdir. The agent falls back to a new session
+  when none is recorded (warning on its own stdout, which `up` does not drain —
+  see [node](node.md#sandbox-deployment)), so the flag is safe on a first-ever
+  run.
+- Before launching it resolves the requested (or default) model against the
+  provider config, so an unusable model fails at startup with the config file
+  named, rather than surfacing later as an `agent.turn.failed` event.
 
 The daemon and the session run in one process: `up` serves the event API and
 supervises the agent until a signal stops the server, then signals the manager.

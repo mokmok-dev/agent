@@ -135,7 +135,11 @@ A **session** is a conversation id. On start the agent publishes
 discoverable and auditable from the log. Without `--conversation`, a new session
 gets a fresh id; with `--resume` the agent continues the most recent session
 recorded for `--workdir`, which also makes it pick up a turn interrupted by a
-restart. `agentd-publish --inbox "..."` sends a prompt to that same session.
+restart. A workdir with no recorded session starts a new one instead of failing
+(the fallback is warned about on the agent's own stdout, which a supervising
+`up` does not surface — see [Sandbox deployment](#sandbox-deployment)), so a
+supervisor can pass `--resume` unconditionally. `agentd-publish --inbox "..."`
+sends a prompt to that same session.
 
 ```sh
 # start a new session (paths default to the XDG directories)
@@ -161,6 +165,13 @@ Nodes run inside the sandbox. Everything external is a CLI argument
 (`--socket`, `--db`, `--token-file`, `--workdir`); the node assumes no host paths
 and does not read the environment for config. Its stdout and stderr carry
 diagnostics, not state.
+
+The session manager pipes the child's stdio, and except under `--session-bridge`
+(where stdout carries protocol frames) it never drains those pipes: the child's
+diagnostics are therefore **not** surfaced by a supervising `agentd up` (only
+its `CloudEvents` output over the socket is seen). To read them, run
+`agentd-agent` directly; its own diagnostics are on by default, and `RUST_LOG`
+narrows or widens them.
 
 The daemon's session manager (`agentd::session`) launches a configured node on a
 `session.requested` event, reports `session.*` lifecycle, restarts within a
