@@ -680,47 +680,102 @@ fn find_on_path(
     })
 }
 
-/// Finds the Landlock helper: the `AGENTD_SANDBOX_HELPER` override, else on
-/// `PATH`.
+/// Finds the Landlock helper: the `AGENTD_SANDBOX_HELPER` override, a sibling of
+/// the running binary, or `PATH`.
 fn find_helper(fs_policy: &FsPolicy) -> Result<PathBuf, SandboxError> {
-    if let Some(configured) = std::env::var_os(HELPER_ENV) {
-        let candidate = PathBuf::from(configured);
-        if process::is_executable(&candidate)
-            && process::is_outside_write_roots(&candidate, fs_policy)
-        {
-            return Ok(candidate);
-        }
-        return Err(SandboxError::UnsupportedPlatform(
+    match find_tool(HELPER, HELPER_ENV, fs_policy) {
+        Find::Found(path) => Ok(path),
+        Find::Untrusted => Err(SandboxError::UnsupportedPlatform(
             "the configured AGENTD_SANDBOX_HELPER is not an executable outside the workspace",
-        ));
+        )),
+        Find::Missing => Err(SandboxError::UnsupportedPlatform(
+            "no confinement backend: bubblewrap and the `agentd-sandbox-helper` are both unavailable",
+        )),
     }
-    find_on_path(HELPER, Some(fs_policy)).ok_or(SandboxError::UnsupportedPlatform(
-        "no confinement backend: bubblewrap and the `agentd-sandbox-helper` are both unavailable",
-    ))
 }
 
-/// Finds the egress forwarder: the `AGENTD_EGRESS_FORWARD` override, else on
-/// `PATH`.
+/// Finds the egress forwarder: the `AGENTD_EGRESS_FORWARD` override, a sibling
+/// of the running binary, or `PATH`.
 ///
 /// A Unix-socket proxy is reached through it, so it must be resolvable; a
 /// repository cannot supply it (the same trust rule as the helper).
 fn find_forwarder(fs_policy: &FsPolicy) -> Result<PathBuf, SandboxError> {
-    if let Some(configured) = std::env::var_os(FORWARD_ENV) {
+    match find_tool(FORWARD, FORWARD_ENV, fs_policy) {
+        Find::Found(path) => Ok(path),
+        Find::Untrusted => Err(SandboxError::InvalidPolicy(String::from(
+            "the configured AGENTD_EGRESS_FORWARD is not an executable outside the workspace",
+        ))),
+        Find::Missing => Err(SandboxError::InvalidPolicy(String::from(
+            "a Unix-socket proxy requires the `agentd-egress-forward` binary next to the daemon \
+             or on PATH",
+        ))),
+    }
+}
+
+/// The outcome of looking for a companion binary.
+enum Find {
+    /// Found and trusted.
+    Found(PathBuf),
+    /// An explicit override that is not an executable outside the workspace.
+    Untrusted,
+    /// Not found anywhere.
+    Missing,
+}
+
+/// Resolves a companion binary the daemon spawns (`bwrap` is found differently:
+/// it is a system tool, not a sibling).
+///
+/// Order: the `env` override, then a **sibling of the running binary** (the
+/// binary this crate builds sits next to the daemon), then `PATH`. A repository
+/// could otherwise supply the very binary that builds the boundary, so every
+/// candidate must be an executable outside a policy write root.
+fn find_tool(
+    name: &str,
+    env: &str,
+    fs_policy: &FsPolicy,
+) -> Find {
+    if let Some(configured) = std::env::var_os(env) {
         let candidate = PathBuf::from(configured);
-        if process::is_executable(&candidate)
+        return if process::is_executable(&candidate)
             && process::is_outside_write_roots(&candidate, fs_policy)
         {
-            return Ok(candidate);
-        }
-        return Err(SandboxError::InvalidPolicy(String::from(
-            "the configured AGENTD_EGRESS_FORWARD is not an executable outside the workspace",
-        )));
+            Find::Found(candidate)
+        } else {
+            Find::Untrusted
+        };
     }
-    find_on_path(FORWARD, Some(fs_policy)).ok_or_else(|| {
-        SandboxError::InvalidPolicy(String::from(
-            "a Unix-socket proxy requires the `agentd-egress-forward` binary, which is not on PATH",
-        ))
-    })
+    if let Some(sibling) = sibling_of_current_exe(name)
+        && process::is_outside_write_roots(&sibling, fs_policy)
+    {
+        return Find::Found(sibling);
+    }
+    find_on_path(name, Some(fs_policy)).map_or(Find::Missing, Find::Found)
+}
+
+/// The `name` binary next to the running executable.
+///
+/// A binary built by `cargo` sits beside the daemon in `target/<profile>`, but a
+/// test runs from `target/<profile>/deps`, so both the executable's directory
+/// and its parent are tried.
+fn sibling_of_current_exe(name: &str) -> Option<PathBuf> {
+    sibling_of(&std::env::current_exe().ok()?, name)
+}
+
+/// The `name` binary next to `exe`, or one directory above it.
+///
+/// Split from [`sibling_of_current_exe`] so the lookup is testable without a
+/// real `current_exe`.
+fn sibling_of(
+    exe: &Path,
+    name: &str,
+) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    let candidate = dir.join(name);
+    if process::is_executable(&candidate) {
+        return Some(candidate);
+    }
+    let candidate = dir.parent()?.join(name);
+    process::is_executable(&candidate).then_some(candidate)
 }
 
 /// Resolves the write, read, protected, and deny entries into canonical paths.
@@ -1327,6 +1382,51 @@ mod tests {
         );
         assert_eq!(result.exit_code, 124);
         assert!(result.stderr.contains("timeout"));
+    }
+
+    #[test]
+    fn a_companion_is_found_next_to_the_binary() {
+        // The installed layout puts `agentd`, its helper, and the forwarder in
+        // one `bin/`; resolution must find the sibling so NixOS packaging needs
+        // no PATH entry.
+        use super::sibling_of;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).expect("bin dir");
+        let exe = bin.join("agentd");
+        std::fs::write(&exe, b"").expect("exe");
+        let companion = bin.join("agentd-egress-forward");
+        std::fs::write(&companion, b"").expect("companion");
+        std::fs::set_permissions(
+            &companion,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .expect("chmod");
+
+        assert_eq!(sibling_of(&exe, "agentd-egress-forward"), Some(companion));
+        assert_eq!(sibling_of(&exe, "agentd-sandbox-helper"), None);
+    }
+
+    #[test]
+    fn a_companion_is_found_above_a_deps_directory() {
+        // `cargo test` runs from `target/<profile>/deps`, so the sibling is the
+        // parent's child.
+        use super::sibling_of;
+        let dir = TempDir::new().expect("tempdir");
+        let profile = dir.path().join("profile");
+        let deps = profile.join("deps");
+        std::fs::create_dir_all(&deps).expect("deps dir");
+        let exe = deps.join("agentd-sandbox-abc123");
+        std::fs::write(&exe, b"").expect("exe");
+        let companion = profile.join("agentd-sandbox-helper");
+        std::fs::write(&companion, b"").expect("companion");
+        std::fs::set_permissions(
+            &companion,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .expect("chmod");
+
+        assert_eq!(sibling_of(&exe, "agentd-sandbox-helper"), Some(companion));
     }
 
     #[test]

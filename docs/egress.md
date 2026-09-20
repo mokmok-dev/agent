@@ -182,9 +182,12 @@ Notes and gaps:
 - **The child-side forwarder is dumb.** It bridges one loopback port to the one
   mounted socket and carries no allowlist or decision; the proxy on the other
   end of the socket is the trust boundary. See `agentd-sandbox::forward`.
-- **A Unix-socket proxy needs `agentd-egress-forward` on `PATH`** (or
-  `AGENTD_EGRESS_FORWARD`). It is resolved with the same trust rule as the
-  helper: a binary inside a policy write root is rejected.
+- **A Unix-socket proxy needs `agentd-egress-forward`.** It is resolved as a
+  sibling of the running daemon (installed next to it), then on `PATH`, then via
+  the `AGENTD_EGRESS_FORWARD` override. Every candidate follows the same trust
+  rule as the helper: a binary inside a policy write root is rejected. A NixOS
+  package installs the daemon, the helper, and the forwarder in one `bin/`, so no
+  `PATH` entry is required.
 - **The loopback-TCP form is weaker and only for hosts without a namespace.**
   Landlock is port-only and host-agnostic, so the granted port is reachable on
   any address; that form is what Docker Sandboxes' host proxy avoids with a
