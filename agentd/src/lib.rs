@@ -18,3 +18,5 @@ pub mod proxy;
 pub mod server;
 #[cfg(feature = "sandbox")]
 pub mod session;
+#[cfg(feature = "sandbox")]
+pub mod up;
