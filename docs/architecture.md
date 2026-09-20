@@ -327,8 +327,11 @@ The current structure follows these rules:
   out of process, and eventually inside the sandbox; see [node](node.md) and
   [inference](inference.md).
 - `agentd-sandbox` is a first-class crate like `agentd-node`: it depends on
-  `agentd-events` only, and `agentd` exposes it behind the optional
-  `sandbox = ["dep:agentd-sandbox"]` feature.
+  `agentd-events` only, and `agentd` exposes it behind the `sandbox` feature,
+  which is **on by default**. The daemon's purpose is to supervise a confined
+  agent, so `serve --session-command` and `up` need it; a
+  `--no-default-features` build is the slim daemon that serves the event API and
+  `/inference` alone.
 - `agentd-inference` holds the provider-neutral inference contract and the
   node-side client; the real provider adapters sit behind its optional
   `providers` feature, so the daemon — which owns the credentials — is the only
@@ -365,8 +368,7 @@ node within a budget, enforces a session lifetime, reconciles its active set
 with the durable log on startup (failing a session the previous daemon left
 open), and answers a status request.
 The binary starts the manager when `--session-command` (with `--sandbox-policy`)
-is given; without it the feature only validates the dependency graph under CI's
-`--all-features`.
+is given; `up` derives both and starts it for the built-in agent.
 
 ## One-shot launch
 

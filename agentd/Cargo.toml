@@ -4,6 +4,11 @@ name = "agentd"
 version.workspace = true
 
 [features]
+# On by default: the daemon's purpose is to supervise a confined agent, and
+# `serve --session-command` and `up` both need it. `--no-default-features`
+# still builds the slim daemon that serves the event API and `/inference`
+# without any confinement.
+default = ["sandbox"]
 sandbox = ["dep:agentd-sandbox"]
 
 [[example]]

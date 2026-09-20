@@ -11,7 +11,11 @@
 //! The helpers use `expect` like the other integration tests; the workspace
 //! `allow-*-in-tests` clippy configuration does not see integration test files,
 //! so it is replicated here.
-
+//!
+//! `agentd::up` is behind the default-on `sandbox` feature; a
+//! `--no-default-features` build has no launcher to exercise, so the whole file
+//! is gated on it rather than failing to compile.
+#![cfg(feature = "sandbox")]
 #![expect(
     clippy::expect_used,
     reason = "integration tests use expect for setup and assertions"
@@ -135,8 +139,14 @@ async fn the_agent_may_read_its_own_token_and_nothing_else_of_the_daemon() {
     let log = EventLog::open(dir.path().join("events.jsonl")).expect("log");
     let sandbox = Sandbox::new(&policy, log, "test").expect("sandbox should build");
 
+    // `$(<file)` is a bash builtin, so the probe needs no external binary: the
+    // confined `PATH` holds only the system bin directories, which a Nix build
+    // sandbox may not populate with `cat`.
     let readable = sandbox
-        .exec(&format!("cat {}", layout.agent_token.display()))
+        .exec(&format!(
+            "content=$(< {}) || exit 1; printf %s \"$content\"",
+            layout.agent_token.display()
+        ))
         .await
         .expect("exec");
     assert_eq!(
@@ -149,7 +159,10 @@ async fn the_agent_may_read_its_own_token_and_nothing_else_of_the_daemon() {
     // The daemon's token file, which the agent must never read: it holds every
     // capability, including `authority`.
     let forbidden = sandbox
-        .exec(&format!("cat {}", daemon_token.display()))
+        .exec(&format!(
+            "content=$(< {}) || exit 1; printf %s \"$content\"",
+            daemon_token.display()
+        ))
         .await
         .expect("exec");
     assert_ne!(
