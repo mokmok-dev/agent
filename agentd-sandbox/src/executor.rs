@@ -97,10 +97,23 @@ pub use crate::seatbelt::ConfinedProcessExecutor;
 
 #[cfg(target_os = "linux")]
 pub use crate::linux::ConfinedProcessExecutor;
+#[cfg(target_os = "linux")]
+pub use crate::linux::private_namespace_available;
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[derive(Debug, Clone, Copy)]
 pub struct ConfinedProcessExecutor;
+
+/// Whether this host can run a command in a private network namespace.
+///
+/// Only Linux has the namespace (bubblewrap's `--unshare-all`); on every other
+/// platform a confined command shares the host network, so the egress model
+/// falls back to the weaker loopback-TCP proxy (see `docs/egress.md`).
+#[cfg(not(target_os = "linux"))]
+#[must_use]
+pub const fn private_namespace_available() -> bool {
+    false
+}
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 impl ConfinedProcessExecutor {

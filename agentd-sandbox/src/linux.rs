@@ -64,6 +64,19 @@ const SYSTEM_ROOTS: &[&str] = &[
     "/run/current-system",
 ];
 
+/// Whether this host can run a command in a private network namespace.
+///
+/// The egress model depends on it: a namespace gives the child a real boundary
+/// (loopback and no IP route) and lets a Unix-socket proxy cross it, which is
+/// what the proxy transport is chosen from (see `docs/egress.md`). True when
+/// bubblewrap is `PATH`-resolvable and trusted; a repository cannot supply the
+/// binary that builds the boundary, so the same write-root rule as the executor
+/// applies.
+#[must_use]
+pub fn private_namespace_available() -> bool {
+    find_on_path(BWRAP, None).is_some()
+}
+
 /// Character devices a command commonly needs, granted read-write.
 const DEVICES: &[&str] = &["/dev/null", "/dev/zero", "/dev/urandom", "/dev/random"];
 

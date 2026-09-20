@@ -253,9 +253,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// Starts the daemon's CONNECT proxy for `egress` and points `policy` at it: the
-/// proxy env, the `NO_PROXY` that keeps loopback off the tunnel, and the
-/// network grant. Returns the running proxy, or `None` when `egress` is empty.
+/// Starts the daemon's CONNECT proxy for `egress` and points `policy` at it.
+///
+/// A confined run lets [`Proxy::start_for_policy`] pick the transport the host
+/// supports (a Unix socket inside a private network namespace, or loopback TCP
+/// without one) and inject the proxy env and `NO_PROXY`. An unconfined run has no
+/// sandbox for the policy to reach, so it takes the host's loopback directly and
+/// only exports the URL. Returns the running proxy, or `None` when `egress` is
+/// empty.
 async fn configure_egress(
     policy: &mut Policy,
     egress: Vec<HostPort>,
@@ -264,22 +269,12 @@ async fn configure_egress(
     if egress.is_empty() {
         return Ok(None);
     }
-    // A sandboxed agent runs in a private network namespace with no IP route, so
-    // the proxy is reached over a Unix socket the daemon bind-mounts in; the
-    // child's forwarder presents it on loopback. An unconfined run takes the
-    // host's loopback directly. See `docs/egress.md`.
-    let (proxy, socket, port) = if sandboxed {
-        let socket =
-            std::env::temp_dir().join(format!("agentd-egress-{}.sock", std::process::id()));
-        let _ = std::fs::remove_file(&socket);
-        let proxy = Proxy::start_unix(&socket, Egress::new(egress.clone()))?;
-        let port = agentd::proxy::FORWARD_PORT;
-        (proxy, Some(socket), port)
-    } else {
-        let proxy = Proxy::start(Egress::new(egress.clone())).await?;
-        let address = proxy.address().ok_or("the proxy did not bind TCP")?;
-        (proxy, None, address.port())
-    };
+    if sandboxed {
+        let proxy = Proxy::start_for_policy(policy, Egress::new(egress)).await?;
+        return Ok(Some(proxy));
+    }
+    let proxy = Proxy::start(Egress::new(egress.clone())).await?;
+    let address = proxy.address().ok_or("the proxy did not bind TCP")?;
     for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
         policy.shell.env.push(EnvVar {
             name: String::from(name),
@@ -293,8 +288,8 @@ async fn configure_egress(
         value: String::from("127.0.0.1,localhost,::1"),
     });
     policy.network.proxy = Some(agentd_sandbox::Proxy {
-        port,
-        socket,
+        port: address.port(),
+        socket: None,
         egress,
     });
     Ok(Some(proxy))

@@ -23,7 +23,7 @@ use tokio::io::{
 use tokio::net::{TcpListener, TcpStream, UnixListener};
 use tokio::sync::Semaphore;
 
-use agentd_sandbox::HostPort;
+use agentd_sandbox::{EnvVar, HostPort, Policy as SandboxPolicy, Proxy as SandboxProxy};
 
 /// A client asks to reach a `host:port` that the static allowlist does not name.
 /// Reserved to daemon-authority publishers, so an agent cannot approve itself.
@@ -116,6 +116,12 @@ impl Egress {
         self.allowed.iter().any(|destination| {
             destination.port == port && destination.host.eq_ignore_ascii_case(host)
         })
+    }
+
+    /// The destinations the static allowlist names.
+    #[must_use]
+    pub fn allowed(&self) -> &[HostPort] {
+        &self.allowed
     }
 
     /// Whether a tunnel to `host:port` is permitted, asking an approver when it
@@ -321,6 +327,80 @@ impl Proxy {
             shutdown,
             task,
         })
+    }
+
+    /// Starts the proxy the sandbox's network model asks for and wires `policy`
+    /// to it.
+    ///
+    /// This is the one place the two transports are chosen, because the choice is
+    /// a property of the host rather than of the caller:
+    ///
+    /// - A host that can give the child a **private network namespace** reaches
+    ///   the proxy over a **Unix socket** (bind-mounted in, presented on loopback
+    ///   by the child's forwarder). On Linux this is the real boundary: the child
+    ///   has no IP route at all.
+    /// - Any other host (macOS Seatbelt, no namespace) reaches a **loopback TCP**
+    ///   proxy directly, the weaker form the profile grants by port.
+    ///
+    /// Either way the proxy's URL is injected as `HTTP_PROXY`/`HTTPS_PROXY`/
+    /// `ALL_PROXY`, with `NO_PROXY` so the child's own loopback traffic stays off
+    /// the tunnel (without it an ACP agent routes its internal server calls
+    /// through the proxy and its session setup fails), and the matching
+    /// `network.proxy` grant is set on `policy` so the OS permits the transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns the bind error when the socket path or loopback port cannot be
+    /// taken.
+    pub async fn start_for_policy(
+        policy: &mut SandboxPolicy,
+        egress: Egress,
+    ) -> io::Result<Self> {
+        Self::start_for_policy_with(policy, egress, agentd_sandbox::private_namespace_available())
+            .await
+    }
+
+    /// As [`start_for_policy`](Self::start_for_policy) with the host's
+    /// namespace capability supplied, so both transports are testable on one
+    /// host.
+    async fn start_for_policy_with(
+        policy: &mut SandboxPolicy,
+        egress: Egress,
+        namespace: bool,
+    ) -> io::Result<Self> {
+        // Captured before `egress` moves into the accept task.
+        let destinations = egress.allowed().to_vec();
+        let (proxy, socket, port) = if namespace {
+            let socket =
+                std::env::temp_dir().join(format!("agentd-egress-{}.sock", uuid::Uuid::now_v7()));
+            let proxy = Self::start_unix(&socket, egress)?;
+            // The child's HTTP_PROXY names the forwarder's loopback port, not the
+            // socket, so the policy port is `FORWARD_PORT`.
+            (proxy, Some(socket), FORWARD_PORT)
+        } else {
+            let proxy = Self::start(egress).await?;
+            let Some(address) = proxy.address() else {
+                return Err(io::Error::other("a TCP proxy bound no loopback address"));
+            };
+            (proxy, None, address.port())
+        };
+        let url = proxy.url();
+        for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+            policy.shell.env.push(EnvVar {
+                name: String::from(name),
+                value: url.clone(),
+            });
+        }
+        policy.shell.env.push(EnvVar {
+            name: String::from("NO_PROXY"),
+            value: String::from("127.0.0.1,localhost,::1"),
+        });
+        policy.network.proxy = Some(SandboxProxy {
+            port,
+            socket,
+            egress: destinations,
+        });
+        Ok(proxy)
     }
 
     /// The loopback address the proxy listens on, when it is a TCP proxy; its
@@ -580,13 +660,80 @@ fn parse_authority(authority: &str) -> Option<(String, u16)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EGRESS_DENIED, EGRESS_GRANTED, Egress, Proxy, basic_authorization, parse_connect};
+    use super::{
+        EGRESS_DENIED, EGRESS_GRANTED, Egress, FORWARD_PORT, Proxy, basic_authorization,
+        parse_connect,
+    };
     use agentd_events::{Event, EventLog};
-    use agentd_sandbox::HostPort;
+    use agentd_sandbox::{HostPort, Policy as SandboxPolicy};
     use serde_json::json;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
+
+    /// The `HTTP_PROXY` value a policy injects, if any.
+    fn proxy_env(policy: &SandboxPolicy) -> Option<&str> {
+        policy
+            .shell
+            .env
+            .iter()
+            .find(|variable| variable.name == "HTTP_PROXY")
+            .map(|variable| variable.value.as_str())
+    }
+
+    #[tokio::test]
+    async fn a_namespace_host_grants_a_unix_socket_proxy() {
+        let mut policy = SandboxPolicy::default();
+        let proxy = Proxy::start_for_policy_with(
+            &mut policy,
+            Egress::new(vec![HostPort {
+                host: String::from("api.example.com"),
+                port: 443,
+            }]),
+            true,
+        )
+        .await
+        .expect("the policy starts a Unix-socket proxy");
+
+        // The child reaches the forwarder's loopback port, and the socket is
+        // bind-mounted in, so the policy carries the socket.
+        let grant = policy.network.proxy.as_ref().expect("the policy grants the proxy");
+        assert_eq!(grant.port, FORWARD_PORT);
+        assert_eq!(grant.socket.as_deref(), proxy.socket_path());
+        assert!(grant.socket.is_some());
+        assert_eq!(
+            proxy_env(&policy),
+            Some(proxy.url().as_str()),
+            "the proxy URL must be injected"
+        );
+        assert!(
+            policy
+                .shell
+                .env
+                .iter()
+                .any(|variable| variable.name == "NO_PROXY"
+                    && variable.value == "127.0.0.1,localhost,::1"),
+            "NO_PROXY must keep the agent's own loopback off the tunnel"
+        );
+
+        proxy.stop();
+    }
+
+    #[tokio::test]
+    async fn a_host_without_a_namespace_grants_a_loopback_tcp_proxy() {
+        let mut policy = SandboxPolicy::default();
+        let proxy = Proxy::start_for_policy_with(&mut policy, Egress::default(), false)
+            .await
+            .expect("the policy starts a loopback TCP proxy");
+
+        let grant = policy.network.proxy.as_ref().expect("the policy grants the proxy");
+        assert!(grant.socket.is_none(), "no namespace means no Unix socket");
+        let address = proxy.address().expect("a TCP proxy binds an address");
+        assert_eq!(grant.port, address.port());
+        assert_eq!(proxy_env(&policy), Some(proxy.url().as_str()));
+
+        proxy.stop();
+    }
 
     #[tokio::test]
     async fn an_unlisted_destination_is_denied_without_an_approver() {

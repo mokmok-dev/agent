@@ -72,7 +72,9 @@ pub use events::{
     exec_completed, permission_denied, permission_granted, permission_requested, session_exited,
     session_started,
 };
-pub use executor::{ConfinedProcessExecutor, ExecResult, Executor, SpawnError};
+pub use executor::{
+    ConfinedProcessExecutor, ExecResult, Executor, SpawnError, private_namespace_available,
+};
 pub use policy::{
     Access, EnvAllowlist, EnvVar, FsEntry, FsPolicy, HostPort, Limits, NetworkPolicy, Policy,
     PolicyError, Proxy, ShellPolicy,

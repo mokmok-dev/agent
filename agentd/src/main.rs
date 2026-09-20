@@ -87,13 +87,13 @@ struct ServeArgs {
     #[arg(long, value_enum)]
     session_bridge: Option<BridgeKind>,
     /// A destination the session's CONNECT proxy may tunnel to, `host:port`.
-    /// Repeatable; empty leaves egress denied. The proxy is started and its
-    /// port granted to the session policy automatically.
+    /// Repeatable; empty leaves egress denied. The proxy is started and the
+    /// session policy is pointed at it automatically; it can be combined with
+    /// `--session-loopback` (an agent that also binds its own server).
     #[arg(long = "session-egress", value_name = "HOST:PORT")]
     session_egress: Vec<String>,
     /// Grant the session free loopback (its own server and client), for an
-    /// agent that binds an ephemeral port and talks to it. Needs bubblewrap;
-    /// cannot be combined with `--session-egress`.
+    /// agent that binds an ephemeral port and talks to it. Needs bubblewrap.
     #[arg(long = "session-loopback")]
     session_loopback: bool,
     /// Ask an approver (an authority client) before tunnelling to a `host:port`
@@ -230,7 +230,7 @@ struct SessionOptions {
 
 /// Starts the session manager and a shutdown watcher for it.
 #[cfg(feature = "sandbox")]
-fn start_session_manager(
+async fn start_session_manager(
     log: &EventLog,
     options: SessionOptions,
 ) -> Result<(), RunError> {
@@ -251,51 +251,26 @@ fn start_session_manager(
         policy.network.unix_sockets.push(socket);
     }
     policy.network.loopback |= loopback;
-    // With an egress allowlist, start the daemon's CONNECT proxy and point the
-    // session at it: the OS then grants only the proxy port, and the proxy
-    // enforces the allowlist (see `docs/egress.md`).
+    // With egress, start the daemon's CONNECT proxy and let it pick the
+    // transport the host supports: a Unix socket inside a private network
+    // namespace on Linux, loopback TCP where there is no namespace (macOS). It
+    // also injects the proxy env and the `NO_PROXY` that keeps the agent's own
+    // loopback off the tunnel (see `docs/egress.md`).
     //
-    // The proxy listens on a Unix socket, not loopback TCP: the session runs in a
-    // private network namespace with no IP route, and a Unix socket is a
-    // filesystem object that crosses the namespace, so the child reaches the
-    // proxy through its forwarder without any egress channel existing.
     // A proxy exists when there is a static allowlist or an approver to consult;
     // with neither, egress is denied outright.
     let proxy = if egress.is_empty() && egress_approval.is_none() {
         None
     } else {
-        let proxy_socket =
-            std::env::temp_dir().join(format!("agentd-egress-{}.sock", std::process::id()));
-        let _ = std::fs::remove_file(&proxy_socket);
         let mut egress_config = agentd::proxy::Egress::new(egress.clone());
         if let Some(timeout) = egress_approval {
             egress_config = egress_config.with_approver(log.clone(), timeout);
         }
-        let proxy = agentd::proxy::Proxy::start_unix(&proxy_socket, egress_config)
-            .map_err(RunError::Proxy)?;
-        // The URL carries the proxy's per-session credential; a client sends it
-        // as `Proxy-Authorization` so a different local process cannot reuse the
-        // tunnel. On the Unix transport the URL names the child's forwarder port.
-        let url = proxy.url();
-        for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
-            policy.shell.env.push(agentd_sandbox::EnvVar {
-                name: String::from(name),
-                value: url.clone(),
-            });
-        }
-        // Loopback traffic must not go through the proxy: an agent with its own
-        // internal server (an ACP agent) would otherwise route its own calls
-        // through the tunnel and break.
-        policy.shell.env.push(agentd_sandbox::EnvVar {
-            name: String::from("NO_PROXY"),
-            value: String::from("127.0.0.1,localhost,::1"),
-        });
-        policy.network.proxy = Some(agentd_sandbox::Proxy {
-            port: agentd::proxy::FORWARD_PORT,
-            socket: Some(proxy_socket),
-            egress,
-        });
-        Some(proxy)
+        Some(
+            agentd::proxy::Proxy::start_for_policy(&mut policy, egress_config)
+                .await
+                .map_err(RunError::Proxy)?,
+        )
     };
     let manager = agentd::session::SessionManager::new(log.clone(), &policy, command, agent_id)?
         .with_supervision(supervision);
@@ -386,7 +361,8 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
                 loopback: session_loopback,
                 socket: socket.clone(),
             },
-        )?;
+        )
+        .await?;
     }
     #[cfg(feature = "sandbox")]
     if session_command.is_none()
