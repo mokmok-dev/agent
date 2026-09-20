@@ -75,6 +75,24 @@
             );
           };
 
+          packages.default = craneLib.buildPackage (
+            commonArgs
+            // {
+              inherit
+                src
+                cargoArtifacts
+                ;
+              # The daemon spawns `agentd-sandbox-helper` and
+              # `agentd-egress-forward`; the executor resolves them as siblings
+              # of the running binary, so all three must land in the same
+              # `bin/`. Only the daemon and the sandbox crate are built — the
+              # node binaries are a separate deliverable. `agentd/sandbox` is
+              # what lets `agentd` supervise at all.
+              cargoBuildExtraArgs = "--bins --package agentd --package agentd-sandbox --features agentd/sandbox";
+              doCheck = false;
+            }
+          );
+
           devShells.default = pkgs.mkShell {
             inputsFrom = [ config.pre-commit.devShell ];
 
