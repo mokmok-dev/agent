@@ -190,22 +190,36 @@ A narrow host:port egress grant, the obvious fix, is **not achievable on Linux**
 
 So the honest options are a blanket reopen (rejected: it discards the boundary)
 or a **managed proxy**. The latter is designed in [egress](egress.md): the
-daemon runs a CONNECT proxy, the OS grants the proxy's loopback port (and, for an
-agent with its own server, the loopback ephemeral range), and the proxy enforces
-a `host:port` allowlist. A session opts in with `--session-loopback
---session-egress host:port`. It is an opaque tunnel — no TLS termination and no
+daemon runs a CONNECT proxy, the OS grants the child a single way to reach it,
+and the proxy enforces a `host:port` allowlist. A session opts in with
+`--session-egress host:port` (adding `--session-loopback` for an agent that also
+binds its own server). It is an opaque tunnel — no TLS termination and no
 credential injection — so the agent still holds its own provider key.
+
+The OS grant depends on the host, because only Linux has a network namespace:
+
+- On **Linux**, a networked agent runs in a **private network namespace** with
+  no IP route at all, and reaches the proxy through a Unix socket the daemon
+  bind-mounts in. A small child-side forwarder presents that socket on
+  `127.0.0.1`, which is what `HTTP_PROXY` names. There is no egress channel to
+  bypass the proxy.
+- Where there is no namespace (**macOS Seatbelt**), the profile grants the
+  proxy's loopback port and the child reaches it directly — the weaker form.
+
+`Proxy::start_for_policy` makes that choice from the host, so one call site
+serves both.
 
 An ACP agent starts and completes its handshake confined, in two ways:
 
 - `--session-loopback` alone: a private network namespace, loopback only, no
   egress. Needs bubblewrap.
-- `--session-loopback --session-egress openrouter.ai:443`: the shared network
-  with the proxy port and the ephemeral range open, so the agent reaches the
-  provider *and* keeps its own server. The daemon injects `NO_PROXY` so the
-  agent's own loopback stays off the tunnel. `agentd/examples/acp_handshake.rs`
-  drives a real `opencode2 acp` to `session.acp.ready` and through a prompt turn
-  this way; the proxy observes the agent's `CONNECT openrouter.ai:443`.
+- `--session-loopback --session-egress openrouter.ai:443`: the same private
+  namespace, with the socket proxy bind-mounted in, so the agent reaches the
+  provider through the proxy *and* keeps its own server. The daemon injects
+  `NO_PROXY` so the agent's own loopback stays off the tunnel.
+  `agentd/examples/acp_handshake.rs` drives a real `opencode2 acp` to
+  `session.acp.ready` and through a prompt turn this way; the proxy observes the
+  agent's `CONNECT openrouter.ai:443`.
 
 The agent must honour the injected proxy env (see the egress doc's gap);
 `opencode` does. A state directory it can write is a separate filesystem
@@ -239,8 +253,9 @@ builders; `SessionManager::with_protocol` and `with_workdir`; and the
 
 Not built: `fs/*` and `terminal/*` client methods (capabilities are advertised
 false, so the agent does its own work; an unsupported request is answered
-`Method not found`), `session/load`/`resume`, and the **egress gap below** — an
-ACP agent that reaches a remote model provider cannot run under the sandbox yet.
+`Method not found`), and `session/load`/`resume`. The former egress gap is
+closed: a networked agent runs confined with the daemon's proxy as its only way
+out (see [egress](egress.md)).
 
 Verified against a real agent: `agentd/examples/acp_handshake.rs` drives
 `opencode acp` through `AcpProtocol` and completes the handshake
@@ -248,8 +263,14 @@ Verified against a real agent: `agentd/examples/acp_handshake.rs` drives
 
 It runs both ways: unconfined by default, and `--sandbox` confined. The confined
 run works because the agent's internal HTTP server needs free loopback, which is
-a private network namespace (see [egress](egress.md#two-network-models)): it
+a private network namespace (see [egress](egress.md#the-two-mechanisms)): it
 binds an ephemeral port and connects to it with no external route. That needs
 bubblewrap; the Landlock fallback cannot express free loopback without opening
-egress, so it fails closed. Reaching a remote model remains the proxy model's
-job and is the open part below.
+egress, so it fails closed.
+
+With `--egress host:port` the same private namespace also carries the proxy: the
+daemon binds a CONNECT proxy on a Unix socket, the socket is bind-mounted in,
+and the child's forwarder presents it on loopback, so the agent reaches the
+provider without any IP route existing. The loopback-TCP form (a host with no
+namespace, such as macOS Seatbelt) is chosen by `Proxy::start_for_policy` and is
+unit-tested, but no macOS host has run a confined agent through it here.

@@ -182,13 +182,25 @@ sandbox profile will treat as a boundary.
 
 Egress and ingress are denied at the OS level by `deny default` (macOS) /
 bubblewrap's `--unshare-all`, or Landlock net rules in the fallback (Linux); the
-only exception is the `network.unix_sockets` list. Inference — the reason an
+only exception is the `network.unix_sockets` list, plus the opt-in managed proxy
+in [egress](egress.md).
+Inference — the reason an
 earlier design left egress open — is a daemon capability: the agent asks the
 daemon over its Unix socket, and the daemon holds the provider credentials and
 reaches the network.
 The sandbox thus has no IP exfiltration channel, so per-host rules and an SSRF
-guard are unnecessary. A future remote service reached directly would
-reintroduce the managed-proxy model as a separate opt-in.
+guard are unnecessary for a command that does not opt in.
+
+A session that must reach a provider directly — an ACP agent speaking its own
+API — opts into the **managed proxy**, which is the one place egress is granted:
+the OS still has no host allowlist, it grants only the transport to a proxy the
+daemon runs, and the proxy enforces the `host:port` allowlist (see
+[egress](egress.md)). On Linux that transport is a Unix socket inside the private
+namespace, so even that session has no IP route; on macOS, which has no
+namespace, it is the proxy's loopback port, granted by port only. The policy
+carries it as `network.proxy`, and the private namespace is what the backend
+selection keys on: a `loopback`-only or Unix-socket-proxy policy needs
+bubblewrap and fails closed without it.
 
 The daemon grants its own event socket to the session policy when it starts the
 manager, so a launched node can reach the daemon that supervises it. On macOS
@@ -221,7 +233,9 @@ A first-principles pass removed concepts that did not hold:
   enforcement is a false promise.
 - **`NetworkPolicy` as a host/IP allowlist.** With egress denied there was no
   surface to configure. It returns as a single list of Unix socket paths — the
-  narrowest form the daemon actually needs — and still has no IP grant.
+  narrowest form the daemon actually needs — and carries no IP grant; the one
+  IP-style grant, the opt-in managed proxy, is a transport to a daemon-run proxy
+  and not a host allowlist the OS could enforce (see [egress](egress.md)).
 - **Glob-based `refuse`/`hide`.** They only made sense at the deleted VFS layer.
 - **The command-count guard.** It counted `exec` calls, not processes, so it did
   not bound a fork bomb.
@@ -312,7 +326,7 @@ session. The daemon binary starts the manager when `--session-command` (with
 | Denials                | bubblewrap masks after the binds; Landlock rejects a deny it cannot subtract | `deny` read rules after the broad read grant |
 | Syscall narrowing      | seccomp deny-list in the fallback (`ptrace`, `io_uring_*`, `bpf`, `userfaultfd`, ...) | not available; profile covers most    |
 | Process isolation      | `--unshare-all`, `--die-with-parent`                          | not available                         |
-| Network                | `--unshare-all` drops the network namespace; the fallback denies TCP with Landlock net rules | `deny default`; only `network.unix_sockets` granted |
+| Network                | `--unshare-all` drops the network namespace; a proxy opt-in mounts a Unix socket in and runs the forwarder; the fallback denies TCP with Landlock net rules | `deny default`; only `network.unix_sockets` granted, plus loopback for an opt-in proxy |
 | Host binary control    | a fixed system `PATH`; the profile, not the path, confines    | same                                  |
 
 **bubblewrap is preferred over Landlock** because it gives a read-only host root,
@@ -420,7 +434,9 @@ Prevented:
 - **Self-approval.** A client cannot publish a `sandbox.permission.*` event
   without the `authority` claim, so an agent cannot approve its own command.
 - **Network egress.** A confined command cannot open an IP connection; the only
-  network reachable is a Unix socket the policy names.
+  network reachable is a Unix socket the policy names. A session that opts into
+  the managed proxy still has no IP route on Linux: it reaches the proxy through
+  a bind-mounted Unix socket (see [egress](egress.md)).
 - Reads of the paths named in `deny` entries, held against a spawned host
   binary and verified end to end.
 
@@ -437,6 +453,12 @@ Stated gaps:
   spawned host binary can read any file the user can. With egress denied outright
   the exfiltration channel is closed, but a secret read still reaches the model
   context, so operators should name credentials in `deny` entries.
+- **An opted-in egress session weakens the network boundary by design.** A
+  managed-proxy session is the one case where a confined command can reach a
+  remote host. On Linux the tunnel is the only route, so the boundary holds; on
+  macOS a loopback-TCP proxy is port-only and host-agnostic, and a same-user
+  local process can also reach the command's loopback server (see
+  [egress](egress.md)).
 - **A hard link inside a write root aliases a file outside it.** The write
   allow-list matches paths, so a pre-existing hard link under the root can be
   written through. Creating the link requires access outside the sandbox, so it

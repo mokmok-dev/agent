@@ -177,6 +177,11 @@ Backend selection:
 - neither prefers bubblewrap, falling back to Landlock for the filesystem and
   seccomp.
 
+The two are the same host property from opposite ends: the daemon picks the
+transport (`Proxy::start_for_policy`) from whether bubblewrap is available, and
+the executor then selects the backend from the policy shape that choice produced,
+so the two cannot disagree.
+
 Notes and gaps:
 
 - **The child-side forwarder is dumb.** It bridges one loopback port to the one
@@ -265,7 +270,10 @@ honours them; this was verified by observing its `CONNECT openrouter.ai:443`.
 - **Rendering tests**: Seatbelt emits the loopback clauses and the proxy connect
   clause; Landlock emits the `NetPort` connect rules for a loopback-TCP proxy; a
   private-namespace grant with no bubblewrap fails closed; a Unix-socket proxy
-  renders the socket mount and the forwarder.
+  renders the socket mount and the forwarder
+  (`linux.rs::a_unix_socket_proxy_mounts_the_socket_and_runs_the_forwarder`).
+- **Transport tests**: the transport is chosen from the host's namespace
+  capability, not the caller (`proxy.rs`, both branches).
 - **Forwarder tests**: it bridges loopback to a Unix socket, and parses its CLI.
 - **Proxy tests**: an allowed `host:port` tunnels bytes to a local listener; a
   denied host is refused with `403`; a missing or wrong credential is refused
@@ -273,7 +281,11 @@ honours them; this was verified by observing its `CONNECT openrouter.ai:443`.
   tunnels too.
 - **End-to-end**: a real ACP agent completes its handshake and a prompt turn
   inside a private network namespace with no IP route, reaching the model only
-  through the mounted socket.
+  through the mounted socket. The namespace property itself is asserted in
+  `agentd-sandbox/tests/egress_flow.rs`: inside one `bwrap --unshare-all`
+  namespace an external address is `Network is unreachable` while the
+  forwarder's loopback port carries bytes to the mounted socket (it skips where
+  no namespace can be built, as the other spawn tests do).
 
 ## Approval for unlisted destinations
 
@@ -309,16 +321,26 @@ required binary; the **egress approval flow** (`session.egress.requested` /
 `--session-egress host:port` / `--session-egress-approval-secs SECS` /
 `--session-loopback` flags with the `NO_PROXY` injection.
 
-Verified end to end:
+**Transport selection** is one decision in one place,
+`Proxy::start_for_policy`: a host that can give the child a private network
+namespace (`agentd_sandbox::private_namespace_available`, i.e. a trusted
+bubblewrap) uses the Unix-socket form, and any other host (macOS Seatbelt, no
+namespace) uses loopback TCP, which the profile grants by port. The session
+manager and the ACP example both call it, so the loopback-TCP form is reachable
+in production and not only from tests.
+
+Verified:
 
 - The proxy tunnels bytes to an allowed destination over both transports,
   refuses a denied one, and refuses a missing or wrong credential (`proxy.rs`).
 - An unlisted destination is denied with no approver, granted when an approver
   grants it, kept denied when the approver denies it, and a listed destination
   never consults the approver (`proxy.rs`).
+- The transport follows the host's namespace capability, on both branches
+  (`proxy.rs`).
 - In one `bwrap --unshare-all` namespace, external egress is `Network is
-  unreachable` while the forwarder's loopback port reaches the mounted socket
-  (`forward.rs` and a live run).
+  unreachable` while the forwarder's loopback port carries bytes to the mounted
+  socket (`forward.rs`, `linux.rs`, and `agentd-sandbox/tests/egress_flow.rs`).
 - A real agent: `agentd/examples/acp_handshake.rs` drives `opencode2 acp` to
   `session.acp.ready` and through a prompt turn, both with `--sandbox` (private
   namespace, no egress) and with `--sandbox --egress openrouter.ai:443` — the
@@ -328,3 +350,7 @@ Verified end to end:
 Not built: a private namespace with a veth to the host proxy (unprivileged
 bubblewrap cannot create one; the Unix-socket model removes the need),
 TLS-terminating credential injection, and a per-provider base-URL rewrite.
+
+Not verified in this repository: the macOS loopback-TCP path. Its Seatbelt
+clause and the transport choice are unit-tested, but no macOS host has run a
+confined agent through it here, so the profile's runtime behavior is unproven.

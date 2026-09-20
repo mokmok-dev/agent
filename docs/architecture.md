@@ -348,7 +348,12 @@ boundary is the platform's native isolation (Seatbelt on macOS;
 bubblewrap-preferred with a Landlock fallback on Linux), and the sandbox has no
 network egress: inference is a daemon capability, reached over the daemon's Unix
 socket, which is the only endpoint a confined command may connect to (granted by
-path via the policy's `network` domain; IP egress stays denied). The daemon
+path via the policy's `network` domain; IP egress stays denied). A supervised
+session that must speak a provider's own API can opt into the daemon's managed
+CONNECT proxy; the OS then grants only the transport to it — a bind-mounted Unix
+socket inside bubblewrap's private network namespace, or a loopback port on a
+host without one — and the proxy, not the OS, enforces the `host:port` allowlist
+(see [egress](egress.md)). The daemon
 serves that inference on `/inference` (see [inference](inference.md)). Its
 layer-1 executor renders a Seatbelt profile on macOS and a bubblewrap command on
 Linux, falling back to a Landlock-plus-seccomp helper when bubblewrap is absent,
