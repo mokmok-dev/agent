@@ -64,8 +64,8 @@ const SYSTEM_ROOTS: &[&str] = &[
     "/run/current-system",
 ];
 
-/// Whether this host can run a command in a private network namespace under
-/// `fs_policy`.
+/// Whether bubblewrap is installed and trusted, so a private network namespace
+/// can be requested.
 ///
 /// The egress model depends on it: a namespace gives the child a real boundary
 /// (loopback and no IP route) and lets a Unix-socket proxy cross it, which is
@@ -76,8 +76,13 @@ const SYSTEM_ROOTS: &[&str] = &[
 /// a `bwrap` inside a write root is unusable here *and* rejected by
 /// [`select_backend`], so the transport choice cannot pick a namespace the
 /// executor then refuses.
+///
+/// This is a *presence* probe, not a capability test: it does not try to build a
+/// namespace, so a host that has bubblewrap but forbids unprivileged user
+/// namespaces still reports `true`, and the failure surfaces when the command
+/// runs. Probing for real would mean executing `bwrap` on every construction.
 #[must_use]
-pub fn private_namespace_available(fs_policy: &FsPolicy) -> bool {
+pub fn bubblewrap_available(fs_policy: &FsPolicy) -> bool {
     find_on_path(BWRAP, Some(fs_policy)).is_some()
 }
 

@@ -376,7 +376,7 @@ impl Proxy {
         Self::start_for_policy_with(
             policy,
             egress,
-            agentd_sandbox::private_namespace_available(&policy.fs),
+            agentd_sandbox::bubblewrap_available(&policy.fs),
         )
         .await
     }
@@ -404,8 +404,13 @@ impl Proxy {
         // Captured before `egress` moves into the accept task.
         let destinations = egress.static_allowlist().to_vec();
         let (proxy, socket, port) = if namespace {
-            let socket =
-                std::env::temp_dir().join(format!("agentd-egress-{}.sock", uuid::Uuid::now_v7()));
+            // A private per-proxy directory rather than the shared temp dir: the
+            // socket is then reachable only by this user, and the random
+            // directory name is not the only thing hiding it. The token stays
+            // the real control.
+            let dir = std::env::temp_dir().join(format!("agentd-egress-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir(&dir)?;
+            let socket = dir.join("proxy.sock");
             let proxy = Self::start_unix(&socket, egress)?;
             // The child's HTTP_PROXY names the forwarder's loopback port, not the
             // socket, so the policy port is `FORWARD_PORT`.
@@ -506,6 +511,16 @@ impl Drop for Proxy {
             && metadata.file_type().is_socket()
         {
             let _ = std::fs::remove_file(path);
+        }
+        // The proxy owns the directory it created for its socket; removing it
+        // keeps `temp_dir` clean and cannot affect a socket it did not create.
+        if let Transport::Unix(path) = &self.transport
+            && let Some(parent) = path.parent()
+            && parent
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("agentd-egress-"))
+        {
+            let _ = std::fs::remove_dir(parent);
         }
     }
 }
@@ -1142,6 +1157,32 @@ mod tests {
         assert_eq!(response, b"ping", "the reply must survive the half-close");
 
         proxy.stop();
+    }
+
+    #[tokio::test]
+    async fn a_namespace_proxy_owns_a_private_socket_directory() {
+        // The socket lives in a private per-proxy directory rather than the
+        // shared temp dir, so it is not exposed to every local user.
+        let mut policy = SandboxPolicy::default();
+        let proxy = Proxy::start_for_policy_with(&mut policy, Egress::default(), true)
+            .await
+            .expect("the policy starts a Unix-socket proxy");
+
+        let socket = proxy.socket_path().expect("a Unix proxy has a path");
+        let dir = socket.parent().expect("the socket has a parent");
+        assert!(
+            dir.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("agentd-egress-")),
+            "the socket must live in its own directory: {dir:?}"
+        );
+
+        let dir = dir.to_path_buf();
+        proxy.stop();
+
+        assert!(
+            !dir.exists(),
+            "stopping the proxy must remove its socket directory: {dir:?}"
+        );
     }
 
     #[tokio::test]

@@ -73,7 +73,7 @@ pub use events::{
     session_started,
 };
 pub use executor::{
-    ConfinedProcessExecutor, ExecResult, Executor, SpawnError, private_namespace_available,
+    ConfinedProcessExecutor, ExecResult, Executor, SpawnError, bubblewrap_available,
 };
 pub use policy::{
     Access, EnvAllowlist, EnvVar, FsEntry, FsPolicy, HostPort, Limits, NetworkPolicy, Policy,

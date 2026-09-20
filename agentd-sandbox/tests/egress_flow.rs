@@ -30,7 +30,7 @@ use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agentd_sandbox::private_namespace_available;
+use agentd_sandbox::bubblewrap_available;
 
 /// The loopback port the forwarder listens on inside the namespace.
 ///
@@ -259,7 +259,7 @@ fn the_host_reports_whether_a_namespace_is_available() {
     // The probe the transport choice is built on: it must agree with whether
     // bubblewrap resolves outside the policy's write roots.
     assert_eq!(
-        private_namespace_available(&agentd_sandbox::FsPolicy::default()),
+        bubblewrap_available(&agentd_sandbox::FsPolicy::default()),
         bwrap().is_some()
     );
 }
@@ -289,11 +289,11 @@ fn a_bubblewrap_inside_a_write_root_is_not_a_private_namespace() {
     };
 
     assert!(
-        private_namespace_available(&agentd_sandbox::FsPolicy::default()),
+        bubblewrap_available(&agentd_sandbox::FsPolicy::default()),
         "the host's own bubblewrap must count as a namespace"
     );
     assert!(
-        !private_namespace_available(&policy),
+        !bubblewrap_available(&policy),
         "a bubblewrap inside a write root must not count as a namespace"
     );
 }
@@ -324,7 +324,12 @@ fn the_forwarder_bridges_loopback_to_a_mounted_socket() {
     // failure cannot leak a process that keeps the port bound.
     let _guard = ForwarderGuard(
         Command::new(forwarder)
-            .args(["--port", &port.to_string(), "--socket", &socket.display().to_string()])
+            .args([
+                "--port",
+                &port.to_string(),
+                "--socket",
+                &socket.display().to_string(),
+            ])
             .spawn()
             .expect("the forwarder starts"),
     );

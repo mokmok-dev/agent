@@ -20,8 +20,8 @@ The Agent Client Protocol (ACP, <https://agentclientprotocol.com>, v1 stable) is
 the JSON-RPC 2.0 protocol Zed uses to talk to coding agents. Running an ACP agent
 as a supervised child is the target: the agent is confined by the sandbox and the
 daemon is its client. This document fixes what that requires, why the existing
-[`Bridge`](session.md) shape is not enough, and the one gap — network egress —
-that is not solvable inside the sandbox.
+[`Bridge`](session.md) shape is not enough, and how the one hard part — the
+agent's own network egress — is handled with a managed proxy.
 
 ## Why ACP is not just another codec
 
@@ -166,13 +166,14 @@ Event types this adds:
 | `session.acp.failed` | uplink | the handshake or a turn failed | `bridge::ACP_FAILED` |
 | `session.acp.turn.completed` | uplink | a prompt turn ended, with its stop reason | `bridge::ACP_TURN_COMPLETED` |
 
-## The egress gap (unresolved)
+## The egress problem and its answer
 
 **An ACP coding agent reaches its own model provider over the network, and the
 sandbox denies all IP egress.** Unlike inference, which the daemon mediates
 over its Unix socket (see [inference](inference.md)), an ACP agent speaks the
 provider's own API and cannot be pointed at `/inference` unchanged. A bridge
-built on today's sandbox would supervise an agent that cannot think.
+built on today's sandbox would supervise an agent that cannot think. This section
+records why the naive fix fails and what replaced it.
 
 A narrow host:port egress grant, the obvious fix, is **not achievable on Linux**
 (verified against the current backends):
