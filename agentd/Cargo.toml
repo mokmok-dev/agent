@@ -6,6 +6,10 @@ version.workspace = true
 [features]
 sandbox = ["dep:agentd-sandbox"]
 
+[[example]]
+name = "acp_handshake"
+required-features = ["sandbox"]
+
 [dependencies]
 agentd-events = { workspace = true }
 agentd-inference = { workspace = true, features = ["providers"] }

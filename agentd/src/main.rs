@@ -46,7 +46,9 @@ enum Command {
 }
 
 /// The protocol bridges a supervised session can speak.
-#[cfg(feature = "sandbox")]
+///
+/// Defined without the `sandbox` feature too, so the CLI parses identically on
+/// a build that cannot act on it; the value is ignored when the feature is off.
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum BridgeKind {
     /// The Model Context Protocol over stdio (newline-delimited JSON-RPC 2.0).
