@@ -16,20 +16,10 @@ use std::path::Path;
 
 use crate::error::AgentError;
 
-/// A session began: the conversation id it runs and where.
-pub const AGENT_SESSION_STARTED: &str = "agent.session.started";
-/// A user prompt that starts a turn.
-pub const AGENT_INBOX: &str = "agent.inbox";
-/// A finalized assistant message.
-pub const AGENT_MESSAGE: &str = "agent.message";
-/// The result of a tool the assistant called.
-pub const AGENT_TOOL_RESULT: &str = "agent.tool_result";
-/// A turn began.
-pub const AGENT_TURN_STARTED: &str = "agent.turn.started";
-/// A turn completed without a provider error.
-pub const AGENT_TURN_COMPLETED: &str = "agent.turn.completed";
-/// A turn failed, for example because the provider returned an error.
-pub const AGENT_TURN_FAILED: &str = "agent.turn.failed";
+pub use agentd_events::agent::{
+    AGENT_INBOX, AGENT_MESSAGE, AGENT_SESSION_STARTED, AGENT_TOOL_RESULT, AGENT_TURN_COMPLETED,
+    AGENT_TURN_FAILED, AGENT_TURN_STARTED,
+};
 
 /// The conversation read model.
 ///

@@ -24,6 +24,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::broadcast;
 
+pub mod agent;
 pub mod chain;
 pub mod log;
 pub mod paths;
