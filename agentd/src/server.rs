@@ -1122,7 +1122,9 @@ mod tests {
         // therefore report the conflict on its own, without serving.
         let dir = tempfile::tempdir()?;
         let socket = dir.path().join("test.sock");
-        let first = bind(socket.clone()).await?;
+        // Held for the assertion below: `bind` probes a stale-looking path by
+        // connecting, so a live listener is what makes the conflict certain.
+        let _first = bind(socket.clone()).await?;
 
         assert!(matches!(
             bind(socket.clone()).await,
@@ -1130,9 +1132,13 @@ mod tests {
         ));
 
         // A leftover socket file that nothing is listening on is reclaimed, so a
-        // daemon killed without cleanup can be restarted.
-        drop(first);
-        let _reclaimed = bind(socket).await?;
+        // daemon killed without cleanup can be restarted. The file is never
+        // bound, so no concurrent connection can make the probe read it as a
+        // live instance; binding it still takes the `AddrInUse` -> probe ->
+        // `remove_file` -> rebind path.
+        let stale = dir.path().join("stale.sock");
+        std::fs::write(&stale, b"")?;
+        let _reclaimed = bind(stale).await?;
 
         Ok(())
     }
