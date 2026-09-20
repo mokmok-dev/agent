@@ -26,14 +26,21 @@ use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agentd_sandbox::private_namespace_available;
 
 /// The loopback port the forwarder listens on inside the namespace.
+///
+/// Only used for the in-namespace probe, where nothing else on the host can hold
+/// the port: the namespace has its own loopback.
 const FORWARD_PORT: u16 = 31_828;
+
+/// How long a helper thread may wait for a connection before the test fails,
+/// so a regression fails instead of hanging CI.
+const ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A binary from this crate's build output.
 ///
@@ -45,12 +52,84 @@ fn binary(name: &str) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+/// Whether `path` is an executable file.
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
 /// The `bwrap` on `PATH`, or `None` when the host has none.
+///
+/// Mirrors the executor's rule closely enough for a skip check: a non-executable
+/// file named `bwrap` is not a usable backend.
 fn bwrap() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|dir| dir.join("bwrap"))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable(candidate))
+}
+
+/// A forwarder process killed when the guard drops, so a panic between spawn and
+/// the assertions cannot leak a process that keeps the port bound and poisons
+/// every later run.
+struct ForwarderGuard(Child);
+
+impl Drop for ForwarderGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Accepts one connection from `listener`, or `None` if none arrives within
+/// [`ACCEPT_TIMEOUT`].
+///
+/// A blocking `accept` would hang the test forever when the behavior under test
+/// is broken, so the wait is bounded and the caller asserts on the result. The
+/// listener must be nonblocking.
+fn accept_within(listener: &UnixListener) -> Option<std::os::unix::net::UnixStream> {
+    let deadline = Instant::now() + ACCEPT_TIMEOUT;
+    while Instant::now() < deadline {
+        match listener.accept() {
+            Ok((stream, _)) => return Some(stream),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+            },
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Waits for a port to start answering, returning `None` on the deadline.
+fn connect_within(port: u16) -> Option<TcpStream> {
+    let deadline = Instant::now() + ACCEPT_TIMEOUT;
+    loop {
+        if let Ok(stream) = TcpStream::connect(("127.0.0.1", port)) {
+            return Some(stream);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Binds a Unix-socket listener at `socket` that never blocks an accept.
+fn nonblocking_listener(socket: &Path) -> UnixListener {
+    let listener = UnixListener::bind(socket).expect("bind the proxy socket");
+    listener.set_nonblocking(true).expect("nonblocking");
+    listener
+}
+
+/// A free loopback port, taken by binding and releasing it.
+///
+/// The bind-then-drop race is acceptable for a test and far better than a fixed
+/// port that collides with a concurrent run or a real daemon.
+fn free_port() -> u16 {
+    let probe = TcpListener::bind("127.0.0.1:0").expect("probe a free port");
+    probe.local_addr().expect("addr").port()
 }
 
 /// A bash on this host, for the `/dev/tcp` probe. `/bin/sh` is not enough: the
@@ -119,12 +198,14 @@ fn a_private_namespace_has_no_egress_but_reaches_the_mounted_socket() {
     // tunnel is observable from inside the namespace.
     let dir = tempfile::tempdir().expect("tempdir");
     let socket = dir.path().join("proxy.sock");
-    let listener = UnixListener::bind(&socket).expect("bind the proxy socket");
+    let listener = nonblocking_listener(&socket);
     let peer = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
+        let Some(mut stream) = accept_within(&listener) else {
+            return false;
+        };
         let mut buffer = [0_u8; 32];
         let read = stream.read(&mut buffer).expect("read");
-        stream.write_all(&buffer[..read]).expect("write");
+        stream.write_all(&buffer[..read]).is_ok()
     });
 
     // The forwarder runs inside the namespace, presenting the mounted socket on
@@ -140,10 +221,14 @@ fn a_private_namespace_has_no_egress_but_reaches_the_mounted_socket() {
     );
     let output = run_in_namespace(&socket, &script);
 
-    peer.join().expect("the proxy peer joins");
+    let echoed = peer.join().expect("the proxy peer joins");
 
     // The echo proves the round trip crossed loopback, the mounted socket, and
     // back: a TCP connect alone would not show the socket carries data.
+    assert!(
+        echoed,
+        "the proxy peer must have seen the payload and answered: {output}"
+    );
     assert!(
         output.contains("FORWARDER_ECHOED"),
         "the forwarder's loopback port must reach the mounted socket: {output}"
@@ -221,42 +306,41 @@ fn the_forwarder_bridges_loopback_to_a_mounted_socket() {
         .expect("the `agentd-egress-forward` binary must be built next to this test");
     let dir = tempfile::tempdir().expect("tempdir");
     let socket = dir.path().join("proxy.sock");
-    let listener = UnixListener::bind(&socket).expect("bind the proxy socket");
+    let listener = nonblocking_listener(&socket);
     let peer = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
+        let Some(mut stream) = accept_within(&listener) else {
+            return false;
+        };
         let mut buffer = [0_u8; 32];
         let read = stream.read(&mut buffer).expect("read");
-        stream.write_all(&buffer[..read]).expect("write");
+        stream.write_all(&buffer[..read]).is_ok()
     });
 
-    let mut child = Command::new(forwarder)
-        .args([
-            "--port",
-            &FORWARD_PORT.to_string(),
-            "--socket",
-            &socket.display().to_string(),
-        ])
-        .spawn()
-        .expect("the forwarder starts");
+    // A free loopback port rather than the fixed one: this test runs outside a
+    // namespace, so a fixed port could collide with a concurrent run or a real
+    // daemon.
+    let port = free_port();
+    // The guard kills the forwarder even if an assertion below panics, so a
+    // failure cannot leak a process that keeps the port bound.
+    let _guard = ForwarderGuard(
+        Command::new(forwarder)
+            .args(["--port", &port.to_string(), "--socket", &socket.display().to_string()])
+            .spawn()
+            .expect("the forwarder starts"),
+    );
 
-    // The listener binds at startup; retry briefly rather than race it.
-    let mut stream = None;
-    for _ in 0..50 {
-        if let Ok(connected) = TcpStream::connect(("127.0.0.1", FORWARD_PORT)) {
-            stream = Some(connected);
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    let mut stream = stream.expect("the forwarder listens on loopback");
+    let Some(mut stream) = connect_within(port) else {
+        panic!("the forwarder must listen on loopback within {ACCEPT_TIMEOUT:?}");
+    };
     stream.write_all(b"ping").expect("write through the bridge");
     let mut echo = [0_u8; 4];
     stream.read_exact(&mut echo).expect("read the reply");
     assert_eq!(&echo, b"ping");
 
-    let _ = child.kill();
-    let _ = child.wait();
-    peer.join().expect("the proxy peer joins");
+    assert!(
+        peer.join().expect("the proxy peer joins"),
+        "the proxy peer must have seen the payload and answered"
+    );
 }
 
 /// A confined command reaches an allowlisted host only through the daemon's
@@ -280,8 +364,22 @@ fn a_confined_command_reaches_a_host_only_through_the_mounted_proxy() {
     // as plain TCP, since the tunnel is opaque and never terminates TLS.
     let origin = TcpListener::bind("127.0.0.1:0").expect("bind the origin");
     let origin_port = origin.local_addr().expect("addr").port();
+    origin.set_nonblocking(true).expect("nonblocking origin");
     let responder = thread::spawn(move || {
-        let (mut stream, _) = origin.accept().expect("accept");
+        let deadline = Instant::now() + ACCEPT_TIMEOUT;
+        let mut stream = loop {
+            match origin.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                },
+                Err(_) => return false,
+            }
+        };
+        let _ = stream.set_nonblocking(false);
         // Read the request before answering: closing a socket with unread data
         // sends a reset rather than a clean EOF, which the proxy would see as an
         // error instead of the end of the reply.
@@ -289,7 +387,7 @@ fn a_confined_command_reaches_a_host_only_through_the_mounted_proxy() {
         let _ = stream.read(&mut request).expect("read the request");
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
-            .expect("write");
+            .is_ok()
     });
 
     // A minimal CONNECT proxy on the socket: read the head and tunnel to the
@@ -297,9 +395,10 @@ fn a_confined_command_reaches_a_host_only_through_the_mounted_proxy() {
     // asked for the allowlisted destination.
     let dir = tempfile::tempdir().expect("tempdir");
     let socket = dir.path().join("proxy.sock");
-    let listener = UnixListener::bind(&socket).expect("bind the proxy socket");
-    let proxy = thread::spawn(move || {
-        let (mut client, _) = listener.accept().expect("accept");
+    let listener = nonblocking_listener(&socket);
+    let proxy = thread::spawn(move || -> Option<String> {
+        let mut client = accept_within(&listener)?;
+        client.set_nonblocking(false).expect("blocking client");
         let mut head = [0_u8; 256];
         let read = client.read(&mut head).expect("read the head");
         let head = String::from_utf8_lossy(&head[..read]).into_owned();
@@ -315,7 +414,7 @@ fn a_confined_command_reaches_a_host_only_through_the_mounted_proxy() {
         origin.read_to_end(&mut reply).expect("read the reply");
         client.write_all(&reply).expect("relay the reply");
         client.flush().expect("flush");
-        head
+        Some(head)
     });
 
     // The child speaks the CONNECT handshake itself, through the forwarder, and
@@ -341,8 +440,12 @@ fn a_confined_command_reaches_a_host_only_through_the_mounted_proxy() {
     let output = run_in_namespace(&socket, &script);
 
     let head = proxy.join().expect("the proxy thread joins");
-    responder.join().expect("the origin thread joins");
+    assert!(
+        responder.join().expect("the origin thread joins"),
+        "the origin must have answered through the tunnel: {output}"
+    );
 
+    let head = head.expect("the proxy must have accepted the child's connection");
     assert!(
         head.starts_with(&format!("CONNECT 127.0.0.1:{origin_port}")),
         "the child must ask for the allowlisted destination: {head:?} / {output}"
