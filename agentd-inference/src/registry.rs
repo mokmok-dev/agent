@@ -69,10 +69,16 @@ impl ProviderRegistry {
     ///
     /// A configured alias wins; otherwise a `provider/model` pair is split;
     /// otherwise a sole provider receives the name unchanged.
-    fn resolve(
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Failed`] when `requested` is absent with no
+    /// `default_model`, or when `requested` names neither a configured alias,
+    /// a configured provider, nor a sole provider.
+    pub fn resolve(
         &self,
         requested: Option<&str>,
-    ) -> Result<(&Arc<dyn Provider>, String), ProviderError> {
+    ) -> Result<(&dyn Provider, String), ProviderError> {
         let name = requested.or(self.default_model.as_deref()).ok_or_else(|| {
             ProviderError::Failed(String::from(
                 "no model was requested and no default_model is configured",
@@ -85,17 +91,17 @@ impl ProviderRegistry {
                     route.provider
                 ))
             })?;
-            return Ok((provider, route.model.clone()));
+            return Ok((provider.as_ref(), route.model.clone()));
         }
         if let Some((provider_id, model)) = name.split_once('/')
             && let Some(provider) = self.providers.get(provider_id)
         {
-            return Ok((provider, model.to_string()));
+            return Ok((provider.as_ref(), model.to_string()));
         }
         if self.providers.len() == 1
             && let Some((_, provider)) = self.providers.iter().next()
         {
-            return Ok((provider, name.to_string()));
+            return Ok((provider.as_ref(), name.to_string()));
         }
         Err(ProviderError::Failed(format!(
             "unknown model {name:?}; configure a model route or use provider/model"
@@ -159,9 +165,9 @@ mod tests {
         let registry = registry();
         let (provider, model) = registry.resolve(Some("primary/gpt-4o")).expect("resolve");
 
-        assert!(std::sync::Arc::ptr_eq(
+        assert!(std::ptr::eq(
             provider,
-            registry.providers.get("primary").expect("primary")
+            registry.providers.get("primary").expect("primary").as_ref()
         ));
         assert_eq!(model, "gpt-4o");
     }
