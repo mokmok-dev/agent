@@ -1655,8 +1655,23 @@ mod tests {
 
         // Seccomp is installed even though it blocks no ordinary command: the
         // status file reports `Seccomp: 2` once a filter is active.
-        let seccomp = executor.blocking_exec("grep -q 'Seccomp:[[:space:]]*2' /proc/self/status");
+        //
+        // The check uses shell builtins only. An earlier version piped through
+        // `grep`, which is not guaranteed to be on the confined `PATH`: the Nix
+        // build sandbox has no system `grep` where the fixed `PATH` looks, so
+        // the test failed there for a reason unrelated to seccomp.
+        let seccomp = executor.blocking_exec(
+            "while read -r key value rest; do \
+               if [ \"$key\" = \"Seccomp:\" ] && [ \"$value\" = \"2\" ]; then echo active; fi; \
+             done < /proc/self/status",
+        );
         assert_eq!(seccomp.exit_code, 0, "stderr: {}", seccomp.stderr);
+        assert_eq!(
+            seccomp.stdout.trim(),
+            "active",
+            "the seccomp filter must be installed, seen through /proc/self/status: {}",
+            seccomp.stdout
+        );
         let allowed = executor.blocking_exec("echo ok");
         assert_eq!(allowed.exit_code, 0, "stderr: {}", allowed.stderr);
         assert_eq!(allowed.stdout, "ok\n");
