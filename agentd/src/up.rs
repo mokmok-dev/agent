@@ -15,8 +15,85 @@
 //! egress and no loopback are granted.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use agentd_events::LogEntry;
+use agentd_events::agent::AGENT_SESSION_STARTED;
 use agentd_sandbox::{Access, FsEntry, FsPolicy, Policy, ShellPolicy};
+use serde_json::Value;
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::RecvError;
+
+use crate::session::{SESSION_EXITED, SESSION_FAILED};
+
+/// How long to wait for the agent's session announcement before printing the
+/// publish command without a conversation id.
+const SESSION_ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Waits on `events` for the announcement of the session this `up` launched and
+/// returns the conversation id it carries.
+///
+/// The agent picks the id itself, so the announcement is the only way `up` can
+/// learn which conversation its session serves; pinning it means the printed
+/// command reaches *that* session even when the database already holds several
+/// for the workdir. The wait is bounded, so an agent that starts but never
+/// connects does not hold up the operator; the caller prints a usable command
+/// either way, and the reason it could not be pinned is logged here.
+///
+/// Returns `None` when the agent's session ends without announcing, when the
+/// subscription closes, or when `session_id` never announces within
+/// [`SESSION_ANNOUNCE_TIMEOUT`].
+pub async fn await_conversation(
+    events: &mut broadcast::Receiver<LogEntry>,
+    workdir: &str,
+    session_id: &str,
+) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + SESSION_ANNOUNCE_TIMEOUT;
+    loop {
+        match tokio::time::timeout_at(deadline, events.recv()).await {
+            Ok(Ok(entry))
+                if matches!(entry.event.r#type.as_str(), SESSION_EXITED | SESSION_FAILED)
+                    && entry.event.data.get("session_id").and_then(Value::as_str)
+                        == Some(session_id) =>
+            {
+                // The session is gone, so no announcement is coming and the
+                // printed command cannot reach it; saying "still starting"
+                // would misattribute the cause. `session.*` data carries no
+                // workdir, so this keys on `session_id` alone: with the default
+                // log shared by two `up` runs that both use the default
+                // `--session-id agent`, an *other* instance's session ending in
+                // this window is read as ours.
+                tracing::warn!(
+                    %session_id,
+                    "the session ended before it announced a conversation; the printed \
+                     command has no conversation to target",
+                );
+                return None;
+            },
+            Ok(Ok(entry)) if entry.event.r#type == AGENT_SESSION_STARTED => {
+                let data = &entry.event.data;
+                // Another `up` may share the log while serving a different
+                // socket and workdir; only this workspace's session is ours.
+                if data.get("workdir").and_then(Value::as_str) != Some(workdir) {
+                    continue;
+                }
+                if let Some(conversation) = data.get("conversation_id").and_then(Value::as_str) {
+                    return Some(conversation.to_owned());
+                }
+            },
+            Ok(Ok(_) | Err(RecvError::Lagged(_))) => {},
+            Ok(Err(RecvError::Closed)) => return None,
+            Err(_) => {
+                tracing::warn!(
+                    "the agent has not announced its session within {}s; the printed command \
+                     leaves --conversation to the most recent session for --workdir",
+                    SESSION_ANNOUNCE_TIMEOUT.as_secs(),
+                );
+                return None;
+            },
+        }
+    }
+}
 
 /// The `agentd up` arguments.
 #[derive(Debug, clap::Args)]
@@ -50,6 +127,11 @@ pub struct UpArgs {
     /// Without it the daemon's `default_model` is used.
     #[arg(long)]
     pub model: Option<String>,
+    /// Continue the most recent session recorded for `--workdir` instead of
+    /// starting a new one. A workdir with no recorded session starts a new one
+    /// rather than failing, so this is safe on a first-ever run.
+    #[arg(long)]
+    pub resume: bool,
     /// The session id recorded on `session.*` events.
     #[arg(long, default_value = "agent")]
     pub session_id: String,
@@ -78,6 +160,7 @@ impl Default for UpArgs {
             agent_token_file: None,
             agent: None,
             model: None,
+            resume: false,
             session_id: String::from("agent"),
             session_db: None,
             session_max_restarts: 0,
@@ -175,6 +258,7 @@ impl UpPaths {
     pub fn agent_command(
         &self,
         model: Option<&str>,
+        resume: bool,
     ) -> String {
         let mut parts = vec![
             quote(&self.agent_binary.to_string_lossy()),
@@ -191,6 +275,40 @@ impl UpPaths {
             parts.push(String::from("--model"));
             parts.push(quote(model));
         }
+        if resume {
+            parts.push(String::from("--resume"));
+        }
+        parts.join(" ")
+    }
+
+    /// The `agentd-publish` command an operator can run to prompt the session.
+    ///
+    /// Every path is named explicitly: the session database in particular is
+    /// neither `agentd-publish`'s default database nor derived from
+    /// `--workdir`, and the user token is repeated from the XDG default so the
+    /// command can be read without knowing that default.
+    #[must_use]
+    pub fn publish_command(
+        &self,
+        conversation: Option<&str>,
+    ) -> String {
+        let mut parts = vec![
+            String::from("agentd-publish"),
+            String::from("--socket"),
+            quote(&self.socket.to_string_lossy()),
+            String::from("--token-file"),
+            quote(&agentd_events::paths::default_user_token().to_string_lossy()),
+            String::from("--db"),
+            quote(&self.session_db.to_string_lossy()),
+            String::from("--workdir"),
+            quote(&self.workdir.to_string_lossy()),
+        ];
+        if let Some(conversation) = conversation {
+            parts.push(String::from("--conversation"));
+            parts.push(quote(conversation));
+        }
+        parts.push(String::from("--inbox"));
+        parts.push(String::from("'<your prompt>'"));
         parts.join(" ")
     }
 
@@ -395,7 +513,9 @@ pub enum UpError {
 
 #[cfg(test)]
 mod tests {
-    use super::{UpError, UpPaths, quote};
+    use super::{
+        AGENT_SESSION_STARTED, SESSION_EXITED, UpError, UpPaths, await_conversation, quote,
+    };
     use agentd_sandbox::Access;
     use std::path::PathBuf;
 
@@ -430,13 +550,160 @@ mod tests {
             PathBuf::from("/cfg/agent.token"),
         );
 
-        let command = layout.agent_command(None);
+        let command = layout.agent_command(None, false);
         assert_eq!(
             command,
             "/usr/bin/agentd-agent --socket /run/agentd/agentd.sock \
              --token-file /cfg/agent.token --db /data/agent.db --workdir /ws"
         );
-        assert!(layout.agent_command(Some("fast")).ends_with("--model fast"));
+        assert!(
+            layout
+                .agent_command(Some("fast"), false)
+                .ends_with("--model fast")
+        );
+    }
+
+    #[test]
+    fn resume_is_forwarded_unconditionally() {
+        let layout = layout(
+            PathBuf::from("/ws"),
+            PathBuf::from("/data/agent.db"),
+            PathBuf::from("/cfg/agent.token"),
+        );
+
+        // Whether a session exists for the workdir is the agent's question to
+        // answer (it falls back to a new session), so `up` forwards the flag
+        // without inspecting the database.
+        assert!(layout.agent_command(None, true).ends_with("--resume"));
+        assert!(!layout.agent_command(None, false).contains("--resume"));
+    }
+
+    #[test]
+    fn the_publish_command_names_the_session_database_and_the_user_token() {
+        let layout = layout(
+            PathBuf::from("/ws"),
+            PathBuf::from("/data/agent.db"),
+            PathBuf::from("/cfg/agent.token"),
+        );
+
+        let command = layout.publish_command(Some("018f6b2e-7e5c-7000-8000-000000000000"));
+        assert!(command.starts_with("agentd-publish "));
+        assert!(command.contains("--socket /run/agentd/agentd.sock"));
+        assert!(command.contains("--db /data/agent.db"));
+        assert!(command.contains("--workdir /ws"));
+        assert!(command.contains("--conversation 018f6b2e-7e5c-7000-8000-000000000000"));
+        assert!(command.ends_with("--inbox '<your prompt>'"));
+        assert!(
+            command.contains(&format!(
+                "--token-file {}",
+                agentd_events::paths::default_user_token().display()
+            )),
+            "{command}"
+        );
+    }
+
+    #[test]
+    fn the_publish_command_omits_an_unknown_conversation() {
+        let layout = layout(
+            PathBuf::from("/ws"),
+            PathBuf::from("/data/agent.db"),
+            PathBuf::from("/cfg/agent.token"),
+        );
+
+        assert!(!layout.publish_command(None).contains("--conversation"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_conversation_finds_the_announcement_for_this_workdir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = agentd_events::EventLog::open(dir.path().join("events.jsonl")).expect("log");
+        let mut events = log.subscribe();
+        log.publish(agentd_events::Event::new(
+            "agent.turn.started",
+            serde_json::json!({}),
+        ))
+        .await
+        .expect("publish");
+        // Another instance's session on the shared log must not win the race.
+        log.publish(agentd_events::Event::new(
+            AGENT_SESSION_STARTED,
+            serde_json::json!({ "conversation_id": "other", "workdir": "/elsewhere" }),
+        ))
+        .await
+        .expect("publish");
+        // A malformed announcement without an id is skipped, not accepted.
+        log.publish(agentd_events::Event::new(
+            AGENT_SESSION_STARTED,
+            serde_json::json!({ "workdir": "/ws" }),
+        ))
+        .await
+        .expect("publish");
+        log.publish(agentd_events::Event::new(
+            AGENT_SESSION_STARTED,
+            serde_json::json!({ "conversation_id": "mine", "workdir": "/ws" }),
+        ))
+        .await
+        .expect("publish");
+
+        assert_eq!(
+            await_conversation(&mut events, "/ws", "agent")
+                .await
+                .as_deref(),
+            Some("mine")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_conversation_gives_up_at_the_deadline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = agentd_events::EventLog::open(dir.path().join("events.jsonl")).expect("log");
+        let mut events = log.subscribe();
+
+        assert!(
+            await_conversation(&mut events, "/ws", "agent")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_conversation_gives_up_when_its_own_session_ends_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = agentd_events::EventLog::open(dir.path().join("events.jsonl")).expect("log");
+        let mut events = log.subscribe();
+        // Another session ending must not stop the wait for ours.
+        log.publish(agentd_events::Event::new(
+            SESSION_EXITED,
+            serde_json::json!({ "session_id": "other" }),
+        ))
+        .await
+        .expect("publish");
+        log.publish(agentd_events::Event::new(
+            SESSION_EXITED,
+            serde_json::json!({ "session_id": "agent" }),
+        ))
+        .await
+        .expect("publish");
+
+        assert!(
+            await_conversation(&mut events, "/ws", "agent")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_conversation_gives_up_when_the_subscription_closes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = agentd_events::EventLog::open(dir.path().join("events.jsonl")).expect("log");
+        let mut events = log.subscribe();
+        drop(log);
+
+        assert!(
+            await_conversation(&mut events, "/ws", "agent")
+                .await
+                .is_none()
+        );
     }
 
     #[test]

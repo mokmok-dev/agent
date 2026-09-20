@@ -43,6 +43,7 @@ fn args(
         agent_token_file: Some(agent_token.to_path_buf()),
         agent: None,
         model: None,
+        resume: false,
         session_id: String::from("test"),
         session_db: Some(session_db.to_path_buf()),
         session_max_restarts: 0,
@@ -89,7 +90,7 @@ fn the_derived_command_passes_every_absolute_path() {
     let dir = tempfile::tempdir().expect("tempdir");
     let layout = fixture(dir.path());
 
-    let command = layout.agent_command(Some("fast"));
+    let command = layout.agent_command(Some("fast"), false);
 
     // Every path the sandbox rewrites `HOME` out from under must be absolute.
     for path in [

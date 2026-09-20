@@ -6,7 +6,7 @@ use agentd_events::log::{self, EventLog};
 use agentd_inference::{FakeProvider, Provider, ProviderRegistry, ProvidersConfig};
 use clap::{Parser, Subcommand};
 use secrecy::ExposeSecret as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(feature = "sandbox")]
 use std::time::Duration;
@@ -150,6 +150,20 @@ enum RunError {
     Proxy(std::io::Error),
     #[error("failed to load the provider config: {0}")]
     Providers(#[from] agentd_inference::ConfigError),
+    /// The model an agent will ask for does not resolve, raised at startup by
+    /// `up` so a bad config fails before anything runs.
+    #[cfg(feature = "sandbox")]
+    #[error(
+        "no usable model at startup: {reason} \
+         (checked {path}); add the model under \"models\", fix \"default_model\", or pass \
+         --model naming a configured alias or a `provider/model` pair"
+    )]
+    Model {
+        /// Why resolution failed.
+        reason: String,
+        /// The provider config that was checked.
+        path: PathBuf,
+    },
     #[error("failed to initialize the runtime directory: {0}")]
     Init(#[from] agentd::init::InitError),
     #[error("the token file {0} does not exist; run `agentd init` to create it")]
@@ -403,27 +417,65 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
         );
     }
 
-    let provider = load_provider(providers_config)?;
+    let provider = load_provider(providers_config.as_deref())?;
     server::run(socket, log, tokens, provider)
         .await
         .map_err(RunError::Serve)
 }
 
-/// Loads the provider from `providers_config`, or from the default provider
-/// config when it exists, falling back to the deterministic fake.
-fn load_provider(providers_config: Option<PathBuf>) -> Result<Arc<dyn Provider>, RunError> {
-    let Some(path) = providers_config.or_else(|| {
-        let default = agentd_events::paths::default_providers();
-        default.exists().then_some(default)
-    }) else {
+/// The provider registry `providers_config` names, or `None` when neither an
+/// explicit path nor the default one exists.
+///
+/// The path is returned with the registry so a caller that rejects the config
+/// can name the file.
+fn provider_registry(
+    providers_config: Option<&Path>
+) -> Result<Option<(PathBuf, ProviderRegistry)>, RunError> {
+    let Some(path) = providers_config.map_or_else(
+        || {
+            let default = agentd_events::paths::default_providers();
+            default.exists().then_some(default)
+        },
+        |path| Some(path.to_path_buf()),
+    ) else {
         tracing::warn!(
             "no provider config: serving the deterministic fake provider; \
              `agentd init` writes a template to edit"
         );
-        return Ok(Arc::new(FakeProvider::default()));
+        return Ok(None);
     };
     let config = ProvidersConfig::load(&path)?;
-    Ok(Arc::new(ProviderRegistry::new(config)?))
+    Ok(Some((path, ProviderRegistry::new(config)?)))
+}
+
+/// Loads the provider for `serve`, which resolves the model per request.
+fn load_provider(providers_config: Option<&Path>) -> Result<Arc<dyn Provider>, RunError> {
+    Ok(match provider_registry(providers_config)? {
+        Some((_path, registry)) => Arc::new(registry),
+        None => Arc::new(FakeProvider::default()),
+    })
+}
+
+/// Loads the provider for `up`, proving `model` resolves against it first.
+///
+/// `serve` resolves the model per request, so it must serve a config it cannot
+/// resolve a model for; `up` launches an agent that asks for one specific model,
+/// and a configuration that cannot answer that request should stop the launch
+/// with the config file named, not surface after a prompt as an
+/// `agent.turn.failed` event.
+#[cfg(feature = "sandbox")]
+fn load_provider_for(
+    providers_config: Option<&Path>,
+    model: Option<&str>,
+) -> Result<Arc<dyn Provider>, RunError> {
+    let Some((path, registry)) = provider_registry(providers_config)? else {
+        return Ok(Arc::new(FakeProvider::default()));
+    };
+    registry.resolve(model).map_err(|error| RunError::Model {
+        reason: error.to_string(),
+        path,
+    })?;
+    Ok(Arc::new(registry))
 }
 
 async fn run() -> Result<(), RunError> {
@@ -458,7 +510,7 @@ async fn run() -> Result<(), RunError> {
 async fn up_command(args: agentd::up::UpArgs) -> Result<(), RunError> {
     let layout = agentd::up::UpPaths::resolve(&args)?;
     let policy = layout.policy()?;
-    let command = layout.agent_command(args.model.as_deref());
+    let command = layout.agent_command(args.model.as_deref(), args.resume);
 
     let socket = layout.socket.clone();
     let log_path = args
@@ -476,7 +528,7 @@ async fn up_command(args: agentd::up::UpArgs) -> Result<(), RunError> {
     let log = EventLog::open(&log_path).map_err(RunError::Log)?;
     // Loaded before any task is spawned so a bad provider config fails with
     // nothing running.
-    let provider = load_provider(args.providers_config.clone())?;
+    let provider = load_provider_for(args.providers_config.as_deref(), args.model.as_deref())?;
 
     // Claim the single-instance boundary before anything else touches shared
     // state. The manager's startup reconciliation *fails* every session the log
@@ -538,6 +590,8 @@ async fn up_command(args: agentd::up::UpArgs) -> Result<(), RunError> {
             "the session manager stopped before becoming ready",
         )));
     }
+    // Subscribe before the kickoff so a fast announcement is not missed.
+    let mut events = log.subscribe();
     if let Err(error) = log
         .publish(Event::new(
             agentd::session::SESSION_REQUESTED,
@@ -553,6 +607,31 @@ async fn up_command(args: agentd::up::UpArgs) -> Result<(), RunError> {
         server_task.abort();
         return Err(RunError::Log(error));
     }
+
+    // The server keeps running while the announcement is waited for, so the
+    // agent's connection is served.
+    let conversation = agentd::up::await_conversation(
+        &mut events,
+        &layout.workdir.to_string_lossy(),
+        &args.session_id,
+    )
+    .await;
+    // The path is named regardless, because it is the one `agentd init` writes
+    // and `agentd-publish` would default to anyway; when it is absent the
+    // command cannot work, so say which file `init` must create.
+    let user_token = agentd_events::paths::default_user_token();
+    if !user_token.exists() {
+        tracing::warn!(
+            path = %user_token.display(),
+            "the user token is missing; run `agentd init` in this config directory \
+             before using the printed command",
+        );
+    }
+    // A delimited block, so the copy-pasteable command is still findable among
+    // the JSON tracing lines that share this stream.
+    println!("--- prompt this session with ---");
+    println!("{}", layout.publish_command(conversation.as_deref()));
+    println!("--------------------------------");
 
     // The server runs until a signal stops it; `up` returns when it does and
     // then asks the manager to stop.
@@ -600,10 +679,20 @@ fn print_initialized(initialized: &agentd::init::Initialized) {
         initialized.tokens_path.display(),
     );
     #[cfg(feature = "sandbox")]
-    println!(
-        "or run the daemon and a sandboxed agent in one shot with:\n  \
-         agentd up --workdir <workspace>"
-    );
+    {
+        // The generated template has no `default_model`, so the model is named
+        // here; without one `up` refuses to start. The template's single
+        // provider receives a bare name unchanged, so any name resolves until
+        // the operator edits the file for their own server.
+        println!(
+            "or run the daemon and a sandboxed agent in one shot with:\n  \
+             agentd up --workdir <workspace> --model <model>"
+        );
+        println!(
+            "  (edit {} first: it names a local server and no model)",
+            initialized.providers_path.display(),
+        );
+    }
 }
 
 #[tokio::main]
@@ -622,5 +711,84 @@ async fn main() -> std::process::ExitCode {
             eprintln!("{error}");
             std::process::ExitCode::FAILURE
         },
+    }
+}
+
+#[cfg(test)]
+mod provider_tests {
+    #[cfg(feature = "sandbox")]
+    use super::RunError;
+    use super::load_provider;
+
+    /// Writes a provider config with two providers, so a bare model name is
+    /// ambiguous and cannot resolve by the sole-provider rule.
+    fn write_config(
+        dir: &std::path::Path,
+        body: &str,
+    ) -> std::path::PathBuf {
+        let path = dir.join("providers.json");
+        std::fs::write(&path, body).expect("config");
+        path
+    }
+
+    const TWO_PROVIDERS: &str = r#"{
+      "providers": {
+        "a": { "kind": "open_ai_compatible", "base_url": "http://127.0.0.1:1/v1" },
+        "b": { "kind": "open_ai_compatible", "base_url": "http://127.0.0.1:2/v1" }
+      },
+      "models": {},
+      "default_model": null
+    }"#;
+
+    /// The two-provider config with the alias `fast` routed to `a`.
+    #[cfg(feature = "sandbox")]
+    fn with_fast_alias() -> String {
+        TWO_PROVIDERS.replace(
+            r#""models": {}"#,
+            r#""models": { "fast": { "provider": "a", "model": "m" } }"#,
+        )
+    }
+
+    #[cfg(feature = "sandbox")]
+    #[test]
+    fn a_default_model_naming_no_alias_fails_with_the_config_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(
+            dir.path(),
+            &TWO_PROVIDERS.replace(r#""default_model": null"#, r#""default_model": "ghost""#),
+        );
+
+        let error = super::load_provider_for(Some(&path), None)
+            .err()
+            .expect("an unresolvable default model must fail");
+
+        let RunError::Model {
+            reason,
+            path: named,
+        } = error
+        else {
+            unreachable!("expected a model error");
+        };
+        assert!(reason.contains("ghost"), "{reason}");
+        assert_eq!(named, path);
+    }
+
+    #[cfg(feature = "sandbox")]
+    #[test]
+    fn a_model_that_resolves_through_an_alias_is_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(dir.path(), &with_fast_alias());
+
+        assert!(super::load_provider_for(Some(&path), Some("fast")).is_ok());
+    }
+
+    /// `serve` resolves the model per request, so it must accept a config for
+    /// which no bare model resolves.
+    #[test]
+    fn verification_is_off_for_serve() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(dir.path(), TWO_PROVIDERS);
+
+        assert!(load_provider(Some(&path)).is_ok());
     }
 }

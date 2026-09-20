@@ -49,4 +49,7 @@ agentd-node = { workspace = true }
 async-trait = "0.1.89"
 rusqlite = { workspace = true }
 tempfile = "3.27.0"
+# `test-util` gives the pauseable clock the announce-timeout tests need, so
+# they do not each wait the real bound.
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = { workspace = true }
