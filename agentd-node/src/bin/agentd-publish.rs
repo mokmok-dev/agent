@@ -8,7 +8,7 @@
 //! answered with).
 
 use agentd_events::Event;
-use agentd_node::{Conversation, SqliteProjection, WsClient, session_key};
+use agentd_node::{AGENT_INBOX, Conversation, SqliteProjection, WsClient, session_key};
 use clap::Parser;
 use secrecy::zeroize::Zeroizing;
 use serde_json::{Value, json};
@@ -29,7 +29,7 @@ struct Args {
     /// A file whose entire contents is the bearer token the daemon expects. The
     /// token needs the publish claim (and read, to observe the commit). Defaults
     /// to `$XDG_CONFIG_HOME/agentd/user.token`.
-    #[arg(long, default_value_os_t = default_user_token())]
+    #[arg(long, default_value_os_t = agentd_events::paths::default_user_token())]
     token_file: PathBuf,
     /// The SQLite projection used to resolve the session when `--conversation`
     /// is omitted. Defaults to `$XDG_DATA_HOME/agentd/agent.db`.
@@ -62,11 +62,6 @@ fn default_workdir() -> PathBuf {
 /// The default projection path.
 fn default_db() -> PathBuf {
     agentd_events::paths::data_dir().join("agent.db")
-}
-
-/// The default user token file.
-fn default_user_token() -> PathBuf {
-    agentd_events::paths::config_dir().join("user.token")
 }
 
 /// Errors returned by the binary.
@@ -114,7 +109,7 @@ fn resolve_event(args: &Args) -> Result<(&str, Value), RunError> {
             )
         };
         return Ok((
-            "agent.inbox",
+            AGENT_INBOX,
             json!({ "conversation_id": conversation, "content": content }),
         ));
     }

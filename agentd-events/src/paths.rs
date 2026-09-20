@@ -68,6 +68,13 @@ pub fn default_providers() -> PathBuf {
     config_dir().join("providers.json")
 }
 
+/// The default token file a `publish`-only client presents, written by
+/// [`crate::config_dir`]'s `agentd init` beside the daemon's `tokens.json`.
+#[must_use]
+pub fn default_user_token() -> PathBuf {
+    config_dir().join("user.token")
+}
+
 /// An XDG base directory, defaulting to `$HOME/<home_suffix>`.
 fn base_dir(
     variable: &str,
@@ -95,7 +102,10 @@ fn env_path(variable: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{config_dir, data_dir, default_log, default_socket, default_tokens, runtime_dir};
+    use super::{
+        config_dir, data_dir, default_log, default_socket, default_tokens, default_user_token,
+        runtime_dir,
+    };
     use std::ffi::OsStr;
 
     #[test]
@@ -115,6 +125,10 @@ mod tests {
         assert_eq!(
             default_tokens().file_name().and_then(OsStr::to_str),
             Some("tokens.json")
+        );
+        assert_eq!(
+            default_user_token().file_name().and_then(OsStr::to_str),
+            Some("user.token")
         );
     }
 
