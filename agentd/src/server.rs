@@ -45,6 +45,22 @@ pub enum ServerError {
 /// Serves the HTTP and WebSocket API over the Unix domain socket at `socket`
 /// until a SIGINT or SIGTERM is received.
 ///
+/// # Errors
+///
+/// As [`bind`] and [`serve`].
+pub async fn run(
+    socket: std::path::PathBuf,
+    log: EventLog,
+    tokens: TokenStore,
+    provider: Arc<dyn Provider>,
+) -> Result<(), ServerError> {
+    let listener = bind(socket).await?;
+    serve(listener, log, tokens, provider).await
+}
+
+/// Claims the single-instance boundary at `socket` and returns the bound
+/// listener.
+///
 /// If a socket file already exists at `socket`, it is probed before binding:
 /// a connectable socket means another instance is live and
 /// [`ServerError::AlreadyRunning`] is returned; otherwise the stale file is
@@ -53,19 +69,20 @@ pub enum ServerError {
 /// The socket's parent directory and the socket itself are made private to the
 /// daemon user (mode `0700`/`0600`) when they are created, so another local user
 /// cannot connect or inject events. Access is then decided by the bearer tokens
-/// in `tokens` (see [`crate::auth`]).
+/// in the token store (see [`crate::auth`]).
+///
+/// Binding is split from [`serve`] so a caller that does more than listen —
+/// `agentd up`, which also starts a session manager whose startup
+/// reconciliation mutates the shared log — can prove it owns the daemon before
+/// it takes any action that assumes it is the only one.
 ///
 /// # Errors
 ///
-/// Returns [`ServerError::Io`] if creating the socket, its parent directory,
-/// the listener, or the signal handlers fails, and
-/// [`ServerError::AlreadyRunning`] if a live instance already owns `socket`.
-pub async fn run(
-    socket: std::path::PathBuf,
-    log: EventLog,
-    tokens: TokenStore,
-    provider: Arc<dyn Provider>,
-) -> Result<(), ServerError> {
+/// Returns [`ServerError::Io`] if creating the socket, its parent directory, or
+/// the listener fails, [`ServerError::AlreadyRunning`] if a live instance
+/// already owns `socket`, and [`ServerError::InsecureDirectory`] if the socket's
+/// directory is writable by other users.
+pub async fn bind(socket: std::path::PathBuf) -> Result<tokio::net::UnixListener, ServerError> {
     if let Some(parent) = socket
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -90,7 +107,25 @@ pub async fn run(
         Err(e) => return Err(e.into()),
     };
     set_mode(&socket, 0o600)?;
+    Ok(listener)
+}
 
+/// Serves an already-claimed listener until a SIGINT or SIGTERM is received.
+///
+/// The signal handling and the graceful shutdown belong here rather than in
+/// [`bind`], so a caller that has claimed the socket but not yet started serving
+/// can still be stopped by a signal.
+///
+/// # Errors
+///
+/// Returns [`ServerError::Io`] if installing the signal handlers fails or
+/// serving fails.
+pub async fn serve(
+    listener: tokio::net::UnixListener,
+    log: EventLog,
+    tokens: TokenStore,
+    provider: Arc<dyn Provider>,
+) -> Result<(), ServerError> {
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
@@ -627,7 +662,7 @@ async fn send_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{ServerError, router, run};
+    use super::{ServerError, bind, router, run};
     use crate::auth::{Claim, Principal, Token, TokenStore};
     use agentd_events::{Event, EventLog, Seq, WireMessage};
     use agentd_inference::{Delta, FakeProvider, InferenceRequest, Provider};
@@ -1076,6 +1111,28 @@ mod tests {
             run(socket, open_log(dir.path()), tokens(), provider()).await,
             Err(ServerError::AlreadyRunning(_))
         ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bind_claims_the_socket_before_anything_is_served() -> Result<(), ServerError> {
+        // `agentd up` binds first and starts its session manager only after, so
+        // a second instance fails without touching the shared log. `bind` must
+        // therefore report the conflict on its own, without serving.
+        let dir = tempfile::tempdir()?;
+        let socket = dir.path().join("test.sock");
+        let first = bind(socket.clone()).await?;
+
+        assert!(matches!(
+            bind(socket.clone()).await,
+            Err(ServerError::AlreadyRunning(_))
+        ));
+
+        // A leftover socket file that nothing is listening on is reclaimed, so a
+        // daemon killed without cleanup can be restarted.
+        drop(first);
+        let _reclaimed = bind(socket).await?;
 
         Ok(())
     }
