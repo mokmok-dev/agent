@@ -712,10 +712,14 @@ fn find_helper(fs_policy: &FsPolicy) -> Result<PathBuf, SandboxError> {
     match find_tool(HELPER, HELPER_ENV, fs_policy) {
         Find::Found(path) => Ok(path),
         Find::Untrusted => Err(SandboxError::UnsupportedPlatform(
-            "the configured AGENTD_SANDBOX_HELPER is not an executable outside the workspace",
+            "the `agentd-sandbox-helper` exists but sits inside a policy write root, so it \
+             cannot be trusted to build the boundary (a workspace must not supply it); choose \
+             a --workdir that does not contain the helper, or point AGENTD_SANDBOX_HELPER at a \
+             copy outside every write root",
         )),
         Find::Missing => Err(SandboxError::UnsupportedPlatform(
-            "no confinement backend: bubblewrap and the `agentd-sandbox-helper` are both unavailable",
+            "no confinement backend: bubblewrap is not installed and the `agentd-sandbox-helper` \
+             was not found next to the daemon or on PATH",
         )),
     }
 }
@@ -729,11 +733,14 @@ fn find_forwarder(fs_policy: &FsPolicy) -> Result<PathBuf, SandboxError> {
     match find_tool(FORWARD, FORWARD_ENV, fs_policy) {
         Find::Found(path) => Ok(path),
         Find::Untrusted => Err(SandboxError::InvalidPolicy(String::from(
-            "the configured AGENTD_EGRESS_FORWARD is not an executable outside the workspace",
+            "the `agentd-egress-forward` exists but sits inside a policy write root, so it \
+             cannot be trusted to bridge egress (a workspace must not supply it); choose a \
+             --workdir that does not contain it, or point AGENTD_EGRESS_FORWARD at a copy \
+             outside every write root",
         ))),
         Find::Missing => Err(SandboxError::InvalidPolicy(String::from(
-            "a Unix-socket proxy requires the `agentd-egress-forward` binary next to the daemon \
-             or on PATH",
+            "the policy grants a tunnelled egress, which requires the `agentd-egress-forward` \
+             binary next to the daemon or on PATH",
         ))),
     }
 }
@@ -755,10 +762,36 @@ enum Find {
 /// binary this crate builds sits next to the daemon), then `PATH`. A repository
 /// could otherwise supply the very binary that builds the boundary, so every
 /// candidate must be an executable outside a policy write root.
+///
+/// An override that is not a trusted executable is [`Find::Untrusted`] at once:
+/// the operator named it, so silently resolving something else would be a
+/// surprise. For the sibling the search continues, because a copy installed on
+/// `PATH` outside the workspace is still a legitimate answer; but if nothing
+/// trusted is found and a sibling did exist under a write root, the result is
+/// [`Find::Untrusted`] rather than [`Find::Missing`], so the caller reports the
+/// real reason (a workspace that contains the helper) instead of claiming the
+/// binary is absent. A `cargo` tree under the workdir is exactly that shape.
 fn find_tool(
     name: &str,
     env: &str,
     fs_policy: &FsPolicy,
+) -> Find {
+    find_tool_in(
+        env,
+        fs_policy,
+        sibling_of_current_exe(name),
+        find_on_path(name, Some(fs_policy)),
+    )
+}
+
+/// The body of [`find_tool`], with the sibling and `PATH` candidates injected so
+/// the search order and its reporting are testable without controlling the
+/// running executable or the process environment.
+fn find_tool_in(
+    env: &str,
+    fs_policy: &FsPolicy,
+    sibling: Option<PathBuf>,
+    on_path: Option<PathBuf>,
 ) -> Find {
     if let Some(configured) = std::env::var_os(env) {
         let candidate = PathBuf::from(configured);
@@ -770,12 +803,26 @@ fn find_tool(
             Find::Untrusted
         };
     }
-    if let Some(sibling) = sibling_of_current_exe(name)
-        && process::is_outside_write_roots(&sibling, fs_policy)
-    {
+    // The sibling wins when it is trusted; otherwise the search continues, but
+    // its rejection is remembered so an empty result can say "untrusted" rather
+    // than "missing".
+    let (trusted_sibling, rejected_sibling) = sibling.map_or((None, false), |sibling| {
+        if process::is_outside_write_roots(&sibling, fs_policy) {
+            (Some(sibling), false)
+        } else {
+            (None, true)
+        }
+    });
+    if let Some(sibling) = trusted_sibling {
         return Find::Found(sibling);
     }
-    find_on_path(name, Some(fs_policy)).map_or(Find::Missing, Find::Found)
+    if let Some(found) = on_path {
+        return Find::Found(found);
+    }
+    if rejected_sibling {
+        return Find::Untrusted;
+    }
+    Find::Missing
 }
 
 /// The `name` binary next to the running executable.
@@ -1493,6 +1540,93 @@ mod tests {
         .expect("chmod");
 
         assert_eq!(sibling_of(&exe, "agentd-sandbox-helper"), Some(companion));
+    }
+
+    /// A policy whose only write root is `root`, with a trusted home elsewhere.
+    fn policy_writing(root: &Path) -> FsPolicy {
+        FsPolicy {
+            entries: vec![FsEntry {
+                path: root.to_path_buf(),
+                access: Access::Write,
+            }],
+            ..FsPolicy::default()
+        }
+    }
+
+    /// Writes an executable file and returns its path.
+    fn executable(path: &Path) -> PathBuf {
+        std::fs::write(path, b"").expect("write");
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod");
+        path.to_path_buf()
+    }
+
+    #[test]
+    fn an_untrusted_sibling_is_reported_as_untrusted_not_missing() {
+        // The regression: a `cargo` tree inside the workdir makes the daemon's
+        // sibling helper sit inside a write root. Reporting that as "missing"
+        // blamed bubblewrap for what is really a too-wide --workdir.
+        use super::{Find, find_tool_in};
+        let dir = TempDir::new().expect("tempdir");
+        let workdir = dir.path().join("workspace");
+        std::fs::create_dir_all(workdir.join("target/debug")).expect("tree");
+        let sibling = executable(&workdir.join("target/debug/agentd-sandbox-helper"));
+
+        let found = find_tool_in(
+            "AGENTD_TEST_HELPER_UNSET",
+            &policy_writing(&workdir),
+            Some(sibling),
+            None,
+        );
+
+        assert!(
+            matches!(found, Find::Untrusted),
+            "a rejected sibling must not read as missing"
+        );
+    }
+
+    #[test]
+    fn a_trusted_sibling_outside_the_write_root_is_found() {
+        use super::{Find, find_tool_in};
+        let dir = TempDir::new().expect("tempdir");
+        let workdir = dir.path().join("workspace");
+        std::fs::create_dir_all(&workdir).expect("workspace");
+        let sibling_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&sibling_dir).expect("bin");
+        let sibling = executable(&sibling_dir.join("agentd-sandbox-helper"));
+
+        let found = find_tool_in(
+            "AGENTD_TEST_HELPER_UNSET",
+            &policy_writing(&workdir),
+            Some(sibling.clone()),
+            None,
+        );
+
+        assert!(matches!(found, Find::Found(path) if path == sibling));
+    }
+
+    #[test]
+    fn a_rejected_sibling_still_allows_a_trusted_copy_on_path() {
+        // A helper beside a too-wide workdir must not shadow one installed
+        // outside it: the `PATH` fallback still resolves the trusted copy.
+        use super::{Find, find_tool_in};
+        let dir = TempDir::new().expect("tempdir");
+        let workdir = dir.path().join("workspace");
+        std::fs::create_dir_all(workdir.join("target/debug")).expect("tree");
+        let rejected = executable(&workdir.join("target/debug/agentd-sandbox-helper"));
+        let trusted = dir.path().join("trusted-bin").join("agentd-sandbox-helper");
+
+        let found = find_tool_in(
+            "AGENTD_TEST_HELPER_UNSET",
+            &policy_writing(&workdir),
+            Some(rejected),
+            Some(trusted.clone()),
+        );
+
+        assert!(
+            matches!(found, Find::Found(path) if path == trusted),
+            "the trusted PATH copy must win over a rejected sibling"
+        );
     }
 
     #[test]
