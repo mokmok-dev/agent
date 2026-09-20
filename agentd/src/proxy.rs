@@ -356,8 +356,12 @@ impl Proxy {
         policy: &mut SandboxPolicy,
         egress: Egress,
     ) -> io::Result<Self> {
-        Self::start_for_policy_with(policy, egress, agentd_sandbox::private_namespace_available())
-            .await
+        Self::start_for_policy_with(
+            policy,
+            egress,
+            agentd_sandbox::private_namespace_available(),
+        )
+        .await
     }
 
     /// As [`start_for_policy`](Self::start_for_policy) with the host's
@@ -697,7 +701,11 @@ mod tests {
 
         // The child reaches the forwarder's loopback port, and the socket is
         // bind-mounted in, so the policy carries the socket.
-        let grant = policy.network.proxy.as_ref().expect("the policy grants the proxy");
+        let grant = policy
+            .network
+            .proxy
+            .as_ref()
+            .expect("the policy grants the proxy");
         assert_eq!(grant.port, FORWARD_PORT);
         assert_eq!(grant.socket.as_deref(), proxy.socket_path());
         assert!(grant.socket.is_some());
@@ -726,7 +734,11 @@ mod tests {
             .await
             .expect("the policy starts a loopback TCP proxy");
 
-        let grant = policy.network.proxy.as_ref().expect("the policy grants the proxy");
+        let grant = policy
+            .network
+            .proxy
+            .as_ref()
+            .expect("the policy grants the proxy");
         assert!(grant.socket.is_none(), "no namespace means no Unix socket");
         let address = proxy.address().expect("a TCP proxy binds an address");
         assert_eq!(grant.port, address.port());

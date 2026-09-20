@@ -911,7 +911,7 @@ mod tests {
     use super::{BWRAP, Backend, ConfinedProcessExecutor, find_on_path};
     use crate::executor::Executor;
     use crate::helper::{PathAccess, Spec};
-    use crate::policy::{Access, EnvVar, FsEntry, FsPolicy, Policy, ShellPolicy};
+    use crate::policy::{Access, EnvVar, FsEntry, FsPolicy, HostPort, Policy, Proxy, ShellPolicy};
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
@@ -1185,6 +1185,44 @@ mod tests {
         assert_eq!(spec.connect_ports.first(), Some(&9000));
         assert_eq!(spec.connect_ports.last(), Some(&60999));
         assert_eq!(spec.bind_ports, vec![0]);
+    }
+
+    #[test]
+    fn a_unix_socket_proxy_mounts_the_socket_and_runs_the_forwarder() {
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        let socket = host.join("proxy.sock");
+        std::fs::write(&socket, b"").expect("a socket path exists on the host");
+        let mut policy = workdir_policy(&host);
+        policy.network.proxy = Some(Proxy {
+            port: 31_828,
+            socket: Some(socket.clone()),
+            egress: vec![HostPort {
+                host: String::from("api.example.com"),
+                port: 443,
+            }],
+        });
+        // Uses the bubblewrap backend directly, so the render does not depend on
+        // `bwrap` being installed (the backend-selection path is covered
+        // elsewhere).
+        let executor =
+            ConfinedProcessExecutor::with_bwrap(&policy, PathBuf::from("/usr/bin/bwrap"))
+                .expect("the policy renders");
+
+        let args = args(&executor.std_command("true"));
+        let socket_arg = socket.display().to_string();
+        // The socket crosses the private namespace as a bind mount.
+        assert!(
+            window(&args, &["--ro-bind", &socket_arg, &socket_arg]),
+            "the proxy socket must be bind-mounted in: {args:?}"
+        );
+        // The forwarder runs as the command's parent, bridging loopback to it.
+        assert!(
+            window(&args, &["--port", "31828", "--socket", &socket_arg, "--"]),
+            "the command must run under the forwarder: {args:?}"
+        );
+        // The namespace is still private: the forwarder is the only route out.
+        assert!(args.iter().any(|arg| arg == "--unshare-all"));
     }
 
     #[test]
