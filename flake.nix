@@ -89,6 +89,10 @@
               # session, resolved as a sibling, so the node binaries ship too.
               # `agentd/sandbox` is what lets `agentd` supervise at all.
               cargoBuildExtraArgs = "--bins --package agentd --package agentd-sandbox --package agentd-node --features agentd/sandbox";
+              # The package is named `agent` (from `workspace.metadata.crane`)
+              # while its entry binary is `agentd`, so `nix run` must be told
+              # which program to execute: without this it assumes `bin/agent`.
+              meta.mainProgram = "agentd";
               doCheck = false;
             }
           );
