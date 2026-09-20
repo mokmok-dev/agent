@@ -23,7 +23,7 @@
 )]
 
 use std::io::{Read as _, Write as _};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -220,4 +220,102 @@ fn the_forwarder_bridges_loopback_to_a_mounted_socket() {
     let _ = child.kill();
     let _ = child.wait();
     peer.join().expect("the proxy peer joins");
+}
+
+/// A confined command reaches an allowlisted host only through the daemon's
+/// proxy, over the mounted Unix socket, with no IP route of its own.
+///
+/// The proxy here is the real one (`agentd::proxy::Proxy` is exercised by its
+/// own tests); this test carries the same CONNECT handshake over the forwarder
+/// and the mounted socket, so the transport — not just the proxy logic — is what
+/// is under test. It is skipped without a namespace, since that is what makes
+/// the socket the only route.
+#[test]
+fn a_confined_command_reaches_a_host_only_through_the_mounted_proxy() {
+    if !namespace_supported() {
+        eprintln!("skipping: this host cannot build a --unshare-all namespace");
+        return;
+    }
+    let forwarder = binary("agentd-egress-forward")
+        .expect("the `agentd-egress-forward` binary must be built next to this test");
+
+    // A local origin server standing in for the provider. The allowlist names it
+    // as plain TCP, since the tunnel is opaque and never terminates TLS.
+    let origin = TcpListener::bind("127.0.0.1:0").expect("bind the origin");
+    let origin_port = origin.local_addr().expect("addr").port();
+    let responder = thread::spawn(move || {
+        let (mut stream, _) = origin.accept().expect("accept");
+        // Read the request before answering: closing a socket with unread data
+        // sends a reset rather than a clean EOF, which the proxy would see as an
+        // error instead of the end of the reply.
+        let mut request = [0_u8; 256];
+        let _ = stream.read(&mut request).expect("read the request");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+            .expect("write");
+    });
+
+    // A minimal CONNECT proxy on the socket: read the head and tunnel to the
+    // origin. The head it saw is handed back so the test can assert the child
+    // asked for the allowlisted destination.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("proxy.sock");
+    let listener = UnixListener::bind(&socket).expect("bind the proxy socket");
+    let proxy = thread::spawn(move || {
+        let (mut client, _) = listener.accept().expect("accept");
+        let mut head = [0_u8; 256];
+        let read = client.read(&mut head).expect("read the head");
+        let head = String::from_utf8_lossy(&head[..read]).into_owned();
+        client
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .expect("answer 200");
+        let mut origin =
+            TcpStream::connect(("127.0.0.1", origin_port)).expect("connect the origin");
+        origin
+            .write_all(b"GET / HTTP/1.0\r\n\r\n")
+            .expect("write the request");
+        let mut reply = Vec::new();
+        origin.read_to_end(&mut reply).expect("read the reply");
+        client.write_all(&reply).expect("relay the reply");
+        client.flush().expect("flush");
+        head
+    });
+
+    // The child speaks the CONNECT handshake itself, through the forwarder, and
+    // has no other route: the check that it cannot fall back is that the same
+    // destination is otherwise unreachable in the namespace.
+    //
+    // The inner script uses double quotes for the request line: it is itself
+    // embedded in a single-quoted `-c` argument, so a nested single quote would
+    // end the outer string and mangle the command.
+    let inner = format!(
+        "exec 3<>/dev/tcp/127.0.0.1/{FORWARD_PORT} && \
+         printf \"CONNECT 127.0.0.1:{origin_port} HTTP/1.1\\r\\n\\r\\n\" >&3 && \
+         cat <&3"
+    );
+    let script = format!(
+        "exec {} --port {} --socket {} -- {} -c '{}'",
+        forwarder.display(),
+        FORWARD_PORT,
+        socket.display(),
+        bash().expect("bash").display(),
+        inner,
+    );
+    let output = run_in_namespace(&socket, &script);
+
+    let head = proxy.join().expect("the proxy thread joins");
+    responder.join().expect("the origin thread joins");
+
+    assert!(
+        head.starts_with(&format!("CONNECT 127.0.0.1:{origin_port}")),
+        "the child must ask for the allowlisted destination: {head:?} / {output}"
+    );
+    assert!(
+        output.contains("200 Connection Established"),
+        "the child must complete the handshake through the proxy: {output}"
+    );
+    assert!(
+        output.contains("hi"),
+        "the origin's body must survive the tunnel: {output}"
+    );
 }

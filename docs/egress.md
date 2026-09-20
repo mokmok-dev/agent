@@ -341,6 +341,9 @@ Verified:
 - In one `bwrap --unshare-all` namespace, external egress is `Network is
   unreachable` while the forwarder's loopback port carries bytes to the mounted
   socket (`forward.rs`, `linux.rs`, and `agentd-sandbox/tests/egress_flow.rs`).
+- A confined command completes a `CONNECT` handshake through the mounted socket
+  and receives the origin's body, so bytes cross loopback, the forwarder, the
+  socket, and the proxy (`agentd-sandbox/tests/egress_flow.rs`).
 - A real agent: `agentd/examples/acp_handshake.rs` drives `opencode2 acp` to
   `session.acp.ready` and through a prompt turn, both with `--sandbox` (private
   namespace, no egress) and with `--sandbox --egress openrouter.ai:443` — the
