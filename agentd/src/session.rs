@@ -33,7 +33,7 @@ use thiserror::Error as ThisError;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::bridge::{Action, Bridge, Protocol, session_subject};
 
@@ -98,6 +98,13 @@ impl Default for Supervision {
 }
 
 /// Launches and supervises a sandboxed node per `session.requested` event.
+///
+/// Starting the manager *reconciles* the durable log, failing any session it
+/// shows as still active on the ground that a restarted daemon cannot re-adopt a
+/// process it did not spawn. That reconciliation is destructive to a session a
+/// *live* sibling daemon owns, so a caller that shares a log must claim the
+/// single-instance socket first ([`crate::server::bind`]) and start the manager
+/// only once it is the daemon being served; `agentd up` relies on this ordering.
 #[derive(Clone)]
 pub struct SessionManager {
     log: EventLog,
@@ -202,16 +209,52 @@ impl SessionManager {
     /// Runs until `shutdown` becomes `true`, launching a session for each
     /// `session.requested` event and answering `session.status.requested`.
     ///
-    /// The in-memory active set is reconciled with the durable log first, so a
-    /// restarted daemon learns about the sessions its predecessor started. That
-    /// reconciliation reads the log once, synchronously, before the loop starts.
-    ///
     /// # Errors
     ///
     /// Returns [`SessionError::Log`] when the log cannot be read to reconcile.
     pub async fn run(
         &self,
+        shutdown: watch::Receiver<bool>,
+    ) -> Result<(), SessionError> {
+        self.run_inner(shutdown, None).await
+    }
+
+    /// Runs as [`run`](Self::run) does, signalling `ready` once the startup
+    /// reconciliation has finished and the run loop is about to observe live
+    /// events. Awaiting `ready`'s receiver is how a caller proves the daemon is
+    /// the one serving before it launches a session.
+    ///
+    /// A caller that launches a session by publishing a `session.requested`
+    /// event needs this barrier. Reconciliation reads the log once through a
+    /// snapshot taken at startup and fails any session it sees as still active,
+    /// because a restarted daemon cannot re-adopt a process it did not spawn; an
+    /// event published before that snapshot would therefore be read back as a
+    /// session the *previous* daemon left open and immediately failed, while one
+    /// published after the snapshot but before the loop starts could be skipped
+    /// as already reconciled. Waiting for `ready` puts the kickoff after the
+    /// snapshot, where it is a live event like any other.
+    ///
+    /// The sender is a required argument rather than an `Option`, so a caller
+    /// cannot silence the barrier by accident; a caller that wants no barrier
+    /// calls [`run`](Self::run).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::Log`] when the log cannot be read to reconcile.
+    pub async fn run_ready(
+        &self,
+        shutdown: watch::Receiver<bool>,
+        ready: oneshot::Sender<()>,
+    ) -> Result<(), SessionError> {
+        self.run_inner(shutdown, Some(ready)).await
+    }
+
+    /// The shared run loop: reconciles, signals `ready` when one was given, then
+    /// serves live events until `shutdown` becomes `true`.
+    async fn run_inner(
+        &self,
         mut shutdown: watch::Receiver<bool>,
+        ready: Option<oneshot::Sender<()>>,
     ) -> Result<(), SessionError> {
         // Subscribe before taking the snapshot so no event can slip between the
         // replay and the live stream; entries at or below the snapshot are the
@@ -219,6 +262,11 @@ impl SessionManager {
         let mut events = self.log.subscribe();
         let snapshot = self.log.tail_seq();
         self.reconcile(snapshot).await?;
+        if let Some(ready) = ready {
+            // The barrier is the send: a dropped receiver means the caller
+            // stopped caring, which does not affect running the loop.
+            let _ = ready.send(());
+        }
         loop {
             tokio::select! {
                 _ = shutdown.changed() => return Ok(()),
@@ -954,7 +1002,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::watch;
+    use tokio::sync::{oneshot, watch};
 
     /// An executor that runs commands unconfined through `/bin/sh` so the
     /// manager can be tested without Seatbelt.
@@ -1200,6 +1248,47 @@ mod tests {
         let sessions = status.data["sessions"].as_array().expect("an array");
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0]["session_id"], "s5");
+
+        sender.send(true).expect("shutdown");
+        handle
+            .await
+            .expect("join")
+            .expect("run should stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn run_ready_signals_only_after_reconciliation() {
+        // A session the previous daemon left open is failed by reconciliation
+        // before the ready signal; a caller that waits for the signal therefore
+        // publishes its kickoff after the log has been folded, so it is not
+        // mistaken for a leftover itself.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = open_log(dir.path());
+        // A session started by an earlier daemon and never terminated.
+        log.publish(super::session_started("stale", "urn:test"))
+            .await
+            .expect("publish an interrupted session");
+
+        // Subscribe before the manager starts, so the failure reconciliation
+        // publishes is observed rather than missed.
+        let mut subscriber = log.subscribe();
+
+        let manager = manager(
+            log.clone(),
+            Arc::new(PlainExecutor),
+            "sleep 30",
+            Supervision::default(),
+        );
+        let (sender, receiver) = watch::channel(false);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move { manager.run_ready(receiver, ready_tx).await });
+
+        ready_rx.await.expect("the barrier must be signalled");
+
+        // Reconciliation ran before the signal, so the stale session is already
+        // failed durably by the time the caller can act on it.
+        let failed = wait_for(&mut subscriber, SESSION_FAILED).await;
+        assert_eq!(failed.data["session_id"], "stale");
 
         sender.send(true).expect("shutdown");
         handle
