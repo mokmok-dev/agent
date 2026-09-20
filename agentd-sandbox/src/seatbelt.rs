@@ -614,6 +614,7 @@ mod tests {
         let policy = Policy {
             network: NetworkPolicy {
                 unix_sockets: vec![socket.clone()],
+                ..NetworkPolicy::default()
             },
             ..workdir_policy(&host)
         };
@@ -1237,6 +1238,7 @@ mod tests {
             },
             network: NetworkPolicy {
                 unix_sockets: vec![granted.clone()],
+                ..NetworkPolicy::default()
             },
             ..Policy::default()
         };
