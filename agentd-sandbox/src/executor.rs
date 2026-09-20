@@ -104,14 +104,15 @@ pub use crate::linux::private_namespace_available;
 #[derive(Debug, Clone, Copy)]
 pub struct ConfinedProcessExecutor;
 
-/// Whether this host can run a command in a private network namespace.
+/// Whether this host can run a command in a private network namespace under
+/// `fs_policy`.
 ///
 /// Only Linux has the namespace (bubblewrap's `--unshare-all`); on every other
-/// platform a confined command shares the host network, so the egress model
-/// falls back to the weaker loopback-TCP proxy (see `docs/egress.md`).
+/// platform a confined command shares the host network, so the egress model falls
+/// back to the weaker loopback-TCP proxy (see `docs/egress.md`).
 #[cfg(not(target_os = "linux"))]
 #[must_use]
-pub const fn private_namespace_available() -> bool {
+pub const fn private_namespace_available(_fs_policy: &crate::policy::FsPolicy) -> bool {
     false
 }
 

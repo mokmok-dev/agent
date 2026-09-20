@@ -173,7 +173,10 @@ fn namespace_probe(port: u16) -> String {
 fn the_host_reports_whether_a_namespace_is_available() {
     // The probe the transport choice is built on: it must agree with whether
     // bubblewrap resolves.
-    assert_eq!(private_namespace_available(), bwrap().is_some());
+    assert_eq!(
+        private_namespace_available(&agentd_sandbox::FsPolicy::default()),
+        bwrap().is_some()
+    );
 }
 
 #[test]

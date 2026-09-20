@@ -11,6 +11,7 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::os::unix::fs::FileTypeExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,7 +24,7 @@ use tokio::io::{
 use tokio::net::{TcpListener, TcpStream, UnixListener};
 use tokio::sync::Semaphore;
 
-use agentd_sandbox::{EnvVar, HostPort, Policy as SandboxPolicy, Proxy as SandboxProxy};
+use agentd_sandbox::{EnvVar, HostPort, Policy, ProxyGrant};
 
 /// A client asks to reach a `host:port` that the static allowlist does not name.
 /// Reserved to daemon-authority publishers, so an agent cannot approve itself.
@@ -118,9 +119,14 @@ impl Egress {
         })
     }
 
-    /// The destinations the static allowlist names.
+    /// The destinations the **static** allowlist names.
+    ///
+    /// This is the pre-approved set, not the set the proxy will permit: with an
+    /// approver configured, a destination outside it can still be granted at run
+    /// time. A policy that carries it therefore records the static rules, not a
+    /// closed allowlist.
     #[must_use]
-    pub fn allowed(&self) -> &[HostPort] {
+    pub fn static_allowlist(&self) -> &[HostPort] {
         &self.allowed
     }
 
@@ -347,19 +353,25 @@ impl Proxy {
     /// the tunnel (without it an ACP agent routes its internal server calls
     /// through the proxy and its session setup fails), and the matching
     /// `network.proxy` grant is set on `policy` so the OS permits the transport.
+    /// Any entry the policy already had under those four names is overridden.
     ///
     /// # Errors
     ///
     /// Returns the bind error when the socket path or loopback port cannot be
     /// taken.
+    ///
+    /// The returned handle must be kept for as long as the policy is used:
+    /// dropping it stops the listener, and the injected `HTTP_PROXY` would then
+    /// name a port nothing serves.
+    #[must_use = "the policy now points at this proxy; dropping the handle stops it"]
     pub async fn start_for_policy(
-        policy: &mut SandboxPolicy,
+        policy: &mut Policy,
         egress: Egress,
     ) -> io::Result<Self> {
         Self::start_for_policy_with(
             policy,
             egress,
-            agentd_sandbox::private_namespace_available(),
+            agentd_sandbox::private_namespace_available(&policy.fs),
         )
         .await
     }
@@ -368,12 +380,12 @@ impl Proxy {
     /// namespace capability supplied, so both transports are testable on one
     /// host.
     async fn start_for_policy_with(
-        policy: &mut SandboxPolicy,
+        policy: &mut Policy,
         egress: Egress,
         namespace: bool,
     ) -> io::Result<Self> {
         // Captured before `egress` moves into the accept task.
-        let destinations = egress.allowed().to_vec();
+        let destinations = egress.static_allowlist().to_vec();
         let (proxy, socket, port) = if namespace {
             let socket =
                 std::env::temp_dir().join(format!("agentd-egress-{}.sock", uuid::Uuid::now_v7()));
@@ -383,8 +395,13 @@ impl Proxy {
             (proxy, Some(socket), FORWARD_PORT)
         } else {
             let proxy = Self::start(egress).await?;
+            // `address()` is `Some` for every TCP transport, so this is an
+            // internal-invariant check, not a runtime condition the caller can
+            // act on; the workspace forbids panicking on it.
             let Some(address) = proxy.address() else {
-                return Err(io::Error::other("a TCP proxy bound no loopback address"));
+                return Err(io::Error::other(
+                    "internal error: a loopback TCP proxy bound no address",
+                ));
             };
             (proxy, None, address.port())
         };
@@ -399,7 +416,7 @@ impl Proxy {
             name: String::from("NO_PROXY"),
             value: String::from("127.0.0.1,localhost,::1"),
         });
-        policy.network.proxy = Some(SandboxProxy {
+        policy.network.proxy = Some(ProxyGrant {
             port,
             socket,
             egress: destinations,
@@ -456,6 +473,15 @@ impl Drop for Proxy {
         // outlive the caller's intent.
         let _ = self.shutdown.send(true);
         self.task.abort();
+        // A Unix socket is a filesystem object: unlinking it here keeps the
+        // runtime directory from filling with one file per session. A socket
+        // another process has already replaced is left alone.
+        if let Transport::Unix(path) = &self.transport
+            && let Ok(metadata) = std::fs::metadata(path)
+            && metadata.file_type().is_socket()
+        {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -1007,6 +1033,22 @@ mod tests {
         assert_eq!(response, b"ping", "the reply must survive the half-close");
 
         proxy.stop();
+    }
+
+    #[tokio::test]
+    async fn a_unix_proxy_removes_its_socket_when_it_stops() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("proxy.sock");
+        let proxy = Proxy::start_unix(&path, Egress::default()).expect("unix proxy starts");
+        assert!(path.exists(), "the socket must exist while the proxy runs");
+
+        proxy.stop();
+
+        assert!(
+            !path.exists(),
+            "stopping the proxy must unlink its socket, or the runtime directory \
+             fills with one file per session"
+        );
     }
 
     #[tokio::test]

@@ -77,7 +77,7 @@ pub use executor::{
 };
 pub use policy::{
     Access, EnvAllowlist, EnvVar, FsEntry, FsPolicy, HostPort, Limits, NetworkPolicy, Policy,
-    PolicyError, Proxy, ShellPolicy,
+    PolicyError, ProxyGrant, ShellPolicy,
 };
 pub use sandbox::{Approval, Sandbox, SandboxedProcess};
 pub use violation::{

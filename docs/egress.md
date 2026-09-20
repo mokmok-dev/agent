@@ -140,14 +140,15 @@ pub struct NetworkPolicy {
     pub proxy: Option<Proxy>,
 }
 
-pub struct Proxy {
+pub struct ProxyGrant {
     /// The loopback port the child's `HTTP_PROXY` names (the forwarder on
     /// Linux, the proxy itself on macOS).
     pub port: u16,
     /// The proxy's Unix socket (Linux). When set, the child reaches it through
     /// the forwarder; when `None`, the proxy is loopback TCP (macOS).
     pub socket: Option<PathBuf>,
-    /// Hosts the proxy may open a tunnel to. Enforced by the proxy.
+    /// The `host:port` destinations the static allowlist names. With an
+    /// approver configured this is the pre-approved subset, not a closed set.
     pub egress: Vec<HostPort>,
 }
 

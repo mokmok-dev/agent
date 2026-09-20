@@ -33,8 +33,8 @@ use agentd::proxy::{Egress, Proxy};
 use agentd::session::{SessionManager, Supervision};
 use agentd_events::Event;
 use agentd_sandbox::{
-    Access, EnvVar, ExecResult, Executor, FsEntry, FsPolicy, HostPort, Policy, Sandbox,
-    ShellPolicy, SpawnError,
+    Access, ExecResult, Executor, FsEntry, FsPolicy, HostPort, Policy, Sandbox, ShellPolicy,
+    SpawnError,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -255,44 +255,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Starts the daemon's CONNECT proxy for `egress` and points `policy` at it.
 ///
-/// A confined run lets [`Proxy::start_for_policy`] pick the transport the host
-/// supports (a Unix socket inside a private network namespace, or loopback TCP
-/// without one) and inject the proxy env and `NO_PROXY`. An unconfined run has no
-/// sandbox for the policy to reach, so it takes the host's loopback directly and
-/// only exports the URL. Returns the running proxy, or `None` when `egress` is
-/// empty.
+/// [`Proxy::start_for_policy`] picks the transport the host supports (a Unix
+/// socket inside a private network namespace, or loopback TCP without one) and
+/// injects the proxy env and `NO_PROXY`. Egress is a confined-only concern: an
+/// unconfined run has no sandbox to reach the network through, so it needs no
+/// proxy and `--egress` is ignored there. Returns the running proxy, or `None`
+/// when there is none to start.
 async fn configure_egress(
     policy: &mut Policy,
     egress: Vec<HostPort>,
     sandboxed: bool,
 ) -> Result<Option<Proxy>, Box<dyn std::error::Error>> {
-    if egress.is_empty() {
+    if !sandboxed || egress.is_empty() {
+        if !sandboxed && !egress.is_empty() {
+            eprintln!(
+                "--egress only applies with --sandbox; an unconfined run reaches the network directly"
+            );
+        }
         return Ok(None);
     }
-    if sandboxed {
-        let proxy = Proxy::start_for_policy(policy, Egress::new(egress)).await?;
-        return Ok(Some(proxy));
-    }
-    let proxy = Proxy::start(Egress::new(egress.clone())).await?;
-    let address = proxy.address().ok_or("the proxy did not bind TCP")?;
-    for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
-        policy.shell.env.push(EnvVar {
-            name: String::from(name),
-            value: proxy.url(),
-        });
-    }
-    // Loopback traffic must not go through the proxy, or an agent's own internal
-    // server calls would be tunnelled and break.
-    policy.shell.env.push(EnvVar {
-        name: String::from("NO_PROXY"),
-        value: String::from("127.0.0.1,localhost,::1"),
-    });
-    policy.network.proxy = Some(agentd_sandbox::Proxy {
-        port: address.port(),
-        socket: None,
-        egress,
-    });
-    Ok(Some(proxy))
+    Ok(Some(
+        Proxy::start_for_policy(policy, Egress::new(egress)).await?,
+    ))
 }
 
 /// Prints session events until the handshake completes or times out.

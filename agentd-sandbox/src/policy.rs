@@ -186,7 +186,7 @@ pub struct NetworkPolicy {
     pub loopback: bool,
     /// The daemon's CONNECT proxy, when the command may reach the network
     /// through it. The proxy enforces the allowlist.
-    pub proxy: Option<Proxy>,
+    pub proxy: Option<ProxyGrant>,
 }
 
 /// The daemon's CONNECT proxy as it appears to one sandbox.
@@ -197,7 +197,7 @@ pub struct NetworkPolicy {
 /// listens on loopback TCP (`socket` is `None`) and the profile grants the port.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Proxy {
+pub struct ProxyGrant {
     /// The loopback port the command's `HTTP_PROXY` names. On Linux this is the
     /// child's forwarder; on macOS the proxy's own port.
     pub port: u16,
@@ -291,7 +291,7 @@ mod duration_seconds {
 mod tests {
     use super::{
         Access, EnvVar, FsEntry, FsPolicy, HostPort, Limits, NetworkPolicy, Policy, PolicyError,
-        Proxy, ShellPolicy,
+        ProxyGrant, ShellPolicy,
     };
     use serde_json::{Value, from_value, json, to_value};
     use std::path::PathBuf;
@@ -313,7 +313,7 @@ mod tests {
     fn validate_rejects_an_empty_or_unrepresentable_egress_host() {
         let empty = Policy {
             network: NetworkPolicy {
-                proxy: Some(Proxy {
+                proxy: Some(ProxyGrant {
                     port: 9000,
                     socket: None,
                     egress: vec![HostPort {
@@ -332,7 +332,7 @@ mod tests {
 
         let quoted = Policy {
             network: NetworkPolicy {
-                proxy: Some(Proxy {
+                proxy: Some(ProxyGrant {
                     port: 9000,
                     socket: None,
                     egress: vec![HostPort {
@@ -359,7 +359,7 @@ mod tests {
         let both = Policy {
             network: NetworkPolicy {
                 loopback: true,
-                proxy: Some(Proxy {
+                proxy: Some(ProxyGrant {
                     port: 9000,
                     socket: None,
                     egress: Vec::new(),
@@ -423,7 +423,7 @@ mod tests {
             network: NetworkPolicy {
                 unix_sockets: vec![PathBuf::from("/run/agentd.sock")],
                 loopback: false,
-                proxy: Some(Proxy {
+                proxy: Some(ProxyGrant {
                     port: 9000,
                     socket: None,
                     egress: vec![HostPort {

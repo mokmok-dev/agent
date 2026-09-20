@@ -671,7 +671,7 @@ mod tests {
         let host = dir.path().canonicalize().expect("canonical tempdir");
         let policy = Policy {
             network: NetworkPolicy {
-                proxy: Some(crate::policy::Proxy {
+                proxy: Some(crate::policy::ProxyGrant {
                     port: 9000,
                     socket: None,
                     egress: vec![crate::policy::HostPort {

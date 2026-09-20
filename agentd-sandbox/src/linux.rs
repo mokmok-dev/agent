@@ -64,17 +64,21 @@ const SYSTEM_ROOTS: &[&str] = &[
     "/run/current-system",
 ];
 
-/// Whether this host can run a command in a private network namespace.
+/// Whether this host can run a command in a private network namespace under
+/// `fs_policy`.
 ///
 /// The egress model depends on it: a namespace gives the child a real boundary
 /// (loopback and no IP route) and lets a Unix-socket proxy cross it, which is
 /// what the proxy transport is chosen from (see `docs/egress.md`). True when
 /// bubblewrap is `PATH`-resolvable and trusted; a repository cannot supply the
-/// binary that builds the boundary, so the same write-root rule as the executor
-/// applies.
+/// binary that builds the boundary, so this applies the same write-root rule as
+/// the executor. Taking the policy is what keeps the two probes from disagreeing:
+/// a `bwrap` inside a write root is unusable here *and* rejected by
+/// [`select_backend`], so the transport choice cannot pick a namespace the
+/// executor then refuses.
 #[must_use]
-pub fn private_namespace_available() -> bool {
-    find_on_path(BWRAP, None).is_some()
+pub fn private_namespace_available(fs_policy: &FsPolicy) -> bool {
+    find_on_path(BWRAP, Some(fs_policy)).is_some()
 }
 
 /// Character devices a command commonly needs, granted read-write.
@@ -911,7 +915,9 @@ mod tests {
     use super::{BWRAP, Backend, ConfinedProcessExecutor, find_on_path};
     use crate::executor::Executor;
     use crate::helper::{PathAccess, Spec};
-    use crate::policy::{Access, EnvVar, FsEntry, FsPolicy, HostPort, Policy, Proxy, ShellPolicy};
+    use crate::policy::{
+        Access, EnvVar, FsEntry, FsPolicy, HostPort, Policy, ProxyGrant, ShellPolicy,
+    };
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
@@ -1077,7 +1083,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
         let mut policy = workdir_policy(&host);
-        policy.network.proxy = Some(crate::policy::Proxy {
+        policy.network.proxy = Some(crate::policy::ProxyGrant {
             port: 9000,
             socket: None,
             egress: vec![crate::policy::HostPort {
@@ -1141,7 +1147,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
         let mut policy = workdir_policy(&host);
-        policy.network.proxy = Some(crate::policy::Proxy {
+        policy.network.proxy = Some(crate::policy::ProxyGrant {
             port: 9000,
             socket: None,
             egress: Vec::new(),
@@ -1165,7 +1171,7 @@ mod tests {
         let host = dir.path().canonicalize().expect("canonical tempdir");
         let mut policy = workdir_policy(&host);
         policy.network.loopback = true;
-        policy.network.proxy = Some(crate::policy::Proxy {
+        policy.network.proxy = Some(crate::policy::ProxyGrant {
             port: 9000,
             socket: None,
             egress: Vec::new(),
@@ -1194,7 +1200,7 @@ mod tests {
         let socket = host.join("proxy.sock");
         std::fs::write(&socket, b"").expect("a socket path exists on the host");
         let mut policy = workdir_policy(&host);
-        policy.network.proxy = Some(Proxy {
+        policy.network.proxy = Some(ProxyGrant {
             port: 31_828,
             socket: Some(socket.clone()),
             egress: vec![HostPort {
@@ -1562,7 +1568,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let host = dir.path().canonicalize().expect("canonical tempdir");
         let mut policy = workdir_policy(&host);
-        policy.network.proxy = Some(crate::policy::Proxy {
+        policy.network.proxy = Some(crate::policy::ProxyGrant {
             port: allowed_port,
             socket: None,
             egress: Vec::new(),
