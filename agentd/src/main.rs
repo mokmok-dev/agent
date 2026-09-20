@@ -93,7 +93,8 @@ struct ServeArgs {
     #[arg(long = "session-egress", value_name = "HOST:PORT")]
     session_egress: Vec<String>,
     /// Grant the session free loopback (its own server and client), for an
-    /// agent that binds an ephemeral port and talks to it. Needs bubblewrap.
+    /// agent that binds an ephemeral port and talks to it. Needs bubblewrap on
+    /// Linux.
     #[arg(long = "session-loopback")]
     session_loopback: bool,
     /// Ask an approver (an authority client) before tunnelling to a `host:port`
@@ -252,9 +253,10 @@ async fn start_session_manager(
     }
     policy.network.loopback |= loopback;
     // With egress, start the daemon's CONNECT proxy and let it pick the
-    // transport the host supports: a Unix socket inside a private network
-    // namespace on Linux, loopback TCP where there is no namespace (macOS). It
-    // also injects the proxy env and the `NO_PROXY` that keeps the agent's own
+    // transport the host's capabilities allow: a Unix socket inside a private
+    // network namespace, or loopback TCP where there is no namespace (macOS).
+    // Linux without bubblewrap fails closed rather than downgrading. It also
+    // injects the proxy env and the `NO_PROXY` that keeps the agent's own
     // loopback off the tunnel (see `docs/egress.md`).
     //
     // A proxy exists when there is a static allowlist or an approver to consult;
@@ -262,7 +264,7 @@ async fn start_session_manager(
     let proxy = if egress.is_empty() && egress_approval.is_none() {
         None
     } else {
-        let mut egress_config = agentd::proxy::Egress::new(egress.clone());
+        let mut egress_config = agentd::proxy::Egress::new(egress);
         if let Some(timeout) = egress_approval {
             egress_config = egress_config.with_approver(log.clone(), timeout);
         }

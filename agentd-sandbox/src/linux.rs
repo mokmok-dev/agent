@@ -436,16 +436,20 @@ enum ForcedBackend {
 /// - **Loopback alone** is a *private network namespace*: only loopback exists,
 ///   so there is no egress path at all. That is bubblewrap's `--unshare-all`;
 ///   without `bwrap` construction fails closed.
-/// - **A proxy** needs the *shared* network with only the proxy port (and, if
+/// - **A Unix-socket proxy** (the Linux form, chosen by the daemon whenever it
+///   can) also runs in that private namespace: the socket crosses it as a bind
+///   mount, so the child still has no IP route and needs no port filter.
+/// - **A loopback TCP proxy** (the macOS-style form, on a host with no
+///   namespace) needs the *shared* network with only the proxy port (and, if
 ///   `loopback` is also granted, the ephemeral range for the command's own
 ///   server) open. Only the Landlock helper can filter by port; without it
 ///   construction fails closed.
 /// - Neither: prefer bubblewrap (namespaces plus mounts) and fall back to
 ///   Landlock for the filesystem and seccomp.
 ///
-/// `Policy::validate` allows `loopback` with `proxy`; that combination takes the
-/// shared network and the port filter, so it uses the helper (not a private
-/// namespace, which could not reach the host proxy).
+/// `Policy::validate` allows `loopback` with `proxy`; the pairing that matters
+/// is the proxy's own form: a Unix-socket proxy takes the private namespace, and
+/// only a loopback-TCP proxy takes the shared network with the port filter.
 fn select_backend(
     policy: &Policy,
     forced: Option<ForcedBackend>,

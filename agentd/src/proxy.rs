@@ -345,8 +345,12 @@ impl Proxy {
     ///   the proxy over a **Unix socket** (bind-mounted in, presented on loopback
     ///   by the child's forwarder). On Linux this is the real boundary: the child
     ///   has no IP route at all.
-    /// - Any other host (macOS Seatbelt, no namespace) reaches a **loopback TCP**
-    ///   proxy directly, the weaker form the profile grants by port.
+    /// - A host that has no namespace at all (macOS Seatbelt) reaches a
+    ///   **loopback TCP** proxy directly, the weaker form the profile grants by
+    ///   port.
+    /// - **Linux without bubblewrap fails closed.** The loopback-TCP form is for
+    ///   a platform that cannot do better; Linux can, so egress is refused rather
+    ///   than downgraded to a host-agnostic port grant.
     ///
     /// Either way the proxy's URL is injected as `HTTP_PROXY`/`HTTPS_PROXY`/
     /// `ALL_PROXY`, with `NO_PROXY` so the child's own loopback traffic stays off
@@ -358,7 +362,8 @@ impl Proxy {
     /// # Errors
     ///
     /// Returns the bind error when the socket path or loopback port cannot be
-    /// taken.
+    /// taken, and an error when Linux lacks the bubblewrap a private namespace
+    /// needs.
     ///
     /// The returned handle must be kept for as long as the policy is used:
     /// dropping it stops the listener, and the injected `HTTP_PROXY` would then
@@ -384,6 +389,18 @@ impl Proxy {
         egress: Egress,
         namespace: bool,
     ) -> io::Result<Self> {
+        // On Linux the private namespace is what makes the Unix socket the only
+        // route out. Without bubblewrap there is no namespace, and the alternate
+        // transport is weaker in a way Linux can avoid: Landlock's port rule has
+        // no address dimension, so the granted port is reachable on any address.
+        // Fail closed rather than silently downgrade the boundary on a host that
+        // can express it correctly.
+        if !namespace && cfg!(target_os = "linux") {
+            return Err(io::Error::other(
+                "egress needs a private network namespace, which requires bubblewrap; \
+                 bubblewrap is unavailable",
+            ));
+        }
         // Captured before `egress` moves into the accept task.
         let destinations = egress.static_allowlist().to_vec();
         let (proxy, socket, port) = if namespace {
@@ -406,6 +423,14 @@ impl Proxy {
             (proxy, None, address.port())
         };
         let url = proxy.url();
+        // Drop any entry the policy already had under these names before
+        // pushing: the executor renders env as a list, so leaving a duplicate
+        // would make the effective value depend on ordering.
+        let injected = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
+        policy
+            .shell
+            .env
+            .retain(|variable| !injected.contains(&variable.name.as_str()));
         for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
             policy.shell.env.push(EnvVar {
                 name: String::from(name),
@@ -755,6 +780,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_host_without_a_namespace_grants_a_loopback_tcp_proxy() {
+        // The loopback-TCP form is the non-Linux path (macOS Seatbelt). Linux
+        // has the namespace and must fail closed instead, so this branch is
+        // exercised only where it is the real one.
+        if cfg!(target_os = "linux") {
+            eprintln!("skipping: Linux uses the private-namespace transport");
+            return;
+        }
         let mut policy = SandboxPolicy::default();
         let proxy = Proxy::start_for_policy_with(&mut policy, Egress::default(), false)
             .await
@@ -769,6 +801,83 @@ mod tests {
         let address = proxy.address().expect("a TCP proxy binds an address");
         assert_eq!(grant.port, address.port());
         assert_eq!(proxy_env(&policy), Some(proxy.url().as_str()));
+
+        proxy.stop();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_without_a_namespace_fails_closed() {
+        // Linux can express the strong form, where the port-only grant is
+        // host-agnostic (Landlock has no address dimension), so egress must be
+        // refused rather than silently weakened.
+        let mut policy = SandboxPolicy::default();
+        let Err(error) = Proxy::start_for_policy_with(&mut policy, Egress::default(), false).await
+        else {
+            panic!("Linux must refuse egress without a private namespace");
+        };
+
+        assert!(
+            error.to_string().contains("bubblewrap"),
+            "the failure must name bubblewrap: {error}"
+        );
+        assert!(
+            policy.network.proxy.is_none(),
+            "a refused proxy must leave the policy unwired"
+        );
+        assert!(
+            proxy_env(&policy).is_none(),
+            "a refused proxy must inject no proxy env"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_existing_proxy_env_is_replaced_not_duplicated() {
+        // The policy comes from an operator-written file, and the executor
+        // renders its env verbatim, so a duplicate would make the effective
+        // value depend on ordering.
+        let mut policy = SandboxPolicy {
+            shell: agentd_sandbox::ShellPolicy {
+                env: vec![
+                    agentd_sandbox::EnvVar {
+                        name: String::from("HTTP_PROXY"),
+                        value: String::from("http://stale.invalid:1"),
+                    },
+                    agentd_sandbox::EnvVar {
+                        name: String::from("NO_PROXY"),
+                        value: String::from("internal.corp"),
+                    },
+                ],
+                ..agentd_sandbox::ShellPolicy::default()
+            },
+            ..SandboxPolicy::default()
+        };
+        let proxy = Proxy::start_for_policy_with(&mut policy, Egress::default(), true)
+            .await
+            .expect("the policy starts a Unix-socket proxy");
+
+        for name in ["HTTP_PROXY", "NO_PROXY"] {
+            let matches = policy
+                .shell
+                .env
+                .iter()
+                .filter(|variable| variable.name == name)
+                .count();
+            assert_eq!(matches, 1, "{name} must appear exactly once");
+        }
+        assert_eq!(
+            proxy_env(&policy),
+            Some(proxy.url().as_str()),
+            "the injected URL must win over the operator's stale value"
+        );
+        assert!(
+            !policy
+                .shell
+                .env
+                .iter()
+                .any(|variable| variable.value == "internal.corp"),
+            "NO_PROXY must be replaced, not appended to"
+        );
 
         proxy.stop();
     }

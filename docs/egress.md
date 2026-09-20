@@ -178,10 +178,12 @@ Backend selection:
 - neither prefers bubblewrap, falling back to Landlock for the filesystem and
   seccomp.
 
-The two are the same host property from opposite ends: the daemon picks the
-transport (`Proxy::start_for_policy`) from whether bubblewrap is available, and
-the executor then selects the backend from the policy shape that choice produced,
-so the two cannot disagree.
+**The loopback-TCP form is chosen only where there is no namespace to be had.**
+On Linux the daemon refuses egress outright when bubblewrap is missing rather
+than falling back to it: the namespace is what makes the Unix socket the only
+route, and the Landlock port rule has no address dimension, so the Linux
+fallback would widen the boundary on the one host that can express it correctly.
+
 
 Notes and gaps:
 
@@ -198,7 +200,8 @@ Notes and gaps:
   Landlock is port-only and host-agnostic, so the granted port is reachable on
   any address; that form is what Docker Sandboxes' host proxy avoids with a
   microVM. The Linux Unix-socket form has no such gap, which is why Linux uses
-  it.
+  it — and why Linux **refuses egress instead of falling back** when bubblewrap
+  is unavailable: the weaker form is for a platform that cannot do better.
 - **Landlock network rules need ABI v4 (Linux 6.7).** On an older kernel the
   crate would drop the handling silently and the `NetPort` rules would become
   no-ops, so a loopback-TCP session would run **unfiltered**. The helper requests
@@ -324,11 +327,12 @@ required binary; the **egress approval flow** (`session.egress.requested` /
 
 **Transport selection** is one decision in one place,
 `Proxy::start_for_policy`: a host that can give the child a private network
-namespace (`agentd_sandbox::private_namespace_available`, i.e. a trusted
-bubblewrap) uses the Unix-socket form, and any other host (macOS Seatbelt, no
-namespace) uses loopback TCP, which the profile grants by port. The session
-manager and the ACP example both call it, so the loopback-TCP form is reachable
-in production and not only from tests.
+namespace (`agentd_sandbox::private_namespace_available`, i.e. a bubblewrap that
+resolves outside the policy's write roots) uses the Unix-socket form, and a host
+with no namespace at all (macOS Seatbelt) uses loopback TCP, which the profile
+grants by port. On Linux the second case fails closed rather than downgrading.
+The session manager and the ACP example both call it, so the loopback-TCP form is
+reachable in production and not only from tests.
 
 Verified:
 
@@ -337,8 +341,11 @@ Verified:
 - An unlisted destination is denied with no approver, granted when an approver
   grants it, kept denied when the approver denies it, and a listed destination
   never consults the approver (`proxy.rs`).
-- The transport follows the host's namespace capability, on both branches
-  (`proxy.rs`).
+- The transport follows the host's namespace capability, and Linux fails closed
+  without one (`proxy.rs`); a bubblewrap inside a policy write root is not a
+  namespace (`agentd-sandbox/tests/egress_flow.rs`).
+- An operator-authored `HTTP_PROXY`/`NO_PROXY` is replaced, not duplicated, so
+  the injected value cannot be shadowed by ordering (`proxy.rs`).
 - In one `bwrap --unshare-all` namespace, external egress is `Network is
   unreachable` while the forwarder's loopback port carries bytes to the mounted
   socket (`forward.rs`, `linux.rs`, and `agentd-sandbox/tests/egress_flow.rs`).

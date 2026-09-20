@@ -25,9 +25,11 @@
 //!     --sandbox --egress openrouter.ai:443 -- opencode2 acp
 //! ```
 //!
-//! That combined model is the shared network with the proxy port and the
-//! ephemeral range open (see `docs/egress.md`); the injected `NO_PROXY` keeps the
-//! agent's own loopback off the tunnel.
+//! That combined model stays inside the private network namespace: the proxy is
+//! reached over a bind-mounted Unix socket, which the child's forwarder presents
+//! on loopback, so no IP route exists (see `docs/egress.md`). The injected
+//! `NO_PROXY` keeps the agent's own loopback off the tunnel. `--egress` requires
+//! `--sandbox`, since an unconfined run reaches the network directly.
 
 use agentd::proxy::{Egress, Proxy};
 use agentd::session::{SessionManager, Supervision};
@@ -176,8 +178,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sandbox = if sandboxed {
         // An ACP agent binds its own loopback HTTP server and talks to it. With
         // no proxy that is a private network namespace (loopback, no egress);
-        // with a proxy the network is shared and the ephemeral range is opened
-        // alongside the proxy port (see `docs/egress.md`).
+        // with a proxy the same namespace stays private and the mounted socket
+        // is the only route out (see `docs/egress.md`).
         policy.network.loopback = true;
         Arc::new(Sandbox::new(&policy, log.clone(), "acp-demo")?)
     } else {

@@ -172,10 +172,44 @@ fn namespace_probe(port: u16) -> String {
 #[test]
 fn the_host_reports_whether_a_namespace_is_available() {
     // The probe the transport choice is built on: it must agree with whether
-    // bubblewrap resolves.
+    // bubblewrap resolves outside the policy's write roots.
     assert_eq!(
         private_namespace_available(&agentd_sandbox::FsPolicy::default()),
         bwrap().is_some()
+    );
+}
+
+#[test]
+fn a_bubblewrap_inside_a_write_root_is_not_a_private_namespace() {
+    // The executor rejects a `bwrap` under a write root, so the probe must too:
+    // otherwise the daemon would pick the Unix-socket transport for a namespace
+    // the executor then refuses to build, leaving the proxy wired to a policy
+    // that cannot run.
+    let Some(real) = bwrap() else {
+        eprintln!("skipping: no bubblewrap to place under a write root");
+        return;
+    };
+    let Some(parent) = real.parent() else {
+        eprintln!("skipping: the bubblewrap has no parent directory");
+        return;
+    };
+    // The host's own bubblewrap directory as a policy write root: the same
+    // binary, now untrusted, exactly as a repository-supplied one would be.
+    let policy = agentd_sandbox::FsPolicy {
+        entries: vec![agentd_sandbox::FsEntry {
+            path: parent.to_path_buf(),
+            access: agentd_sandbox::Access::Write,
+        }],
+        ..agentd_sandbox::FsPolicy::default()
+    };
+
+    assert!(
+        private_namespace_available(&agentd_sandbox::FsPolicy::default()),
+        "the host's own bubblewrap must count as a namespace"
+    );
+    assert!(
+        !private_namespace_available(&policy),
+        "a bubblewrap inside a write root must not count as a namespace"
     );
 }
 
