@@ -368,6 +368,45 @@ The binary starts the manager when `--session-command` (with `--sandbox-policy`)
 is given; without it the feature only validates the dependency graph under CI's
 `--all-features`.
 
+## One-shot launch
+
+`agentd serve --session-command <cmd> --sandbox-policy <json>` is the general
+form: it composes any command under any policy. Bringing the *built-in* agent up
+through it, though, forces the operator to hand-write a policy and to repeat the
+daemon's socket, token, and database paths inside `--session-command`, because
+the sandbox rewrites `HOME` and the node therefore cannot find them through the
+XDG defaults. None of those values is a real choice; only the workspace is.
+
+`agentd up --workdir <dir>` is that composition with the duplication removed. It
+is a separate subcommand rather than a bundle of `serve` defaults because
+`serve` stays the faithful primitive — every flag it takes is passed through
+untouched — while `up` is the opinionated launcher built on top:
+
+- It derives the agent's command line from the resolved paths, so the socket,
+  the agent's token, the session database, and the workspace are all absolute
+  (`agentd::up::UpPaths`).
+- It derives the sandbox policy: the workspace and the session database's
+  directory are the two write roots; the agent's own token file and the
+  directory holding the `agentd-agent` binary are readable; and the daemon's
+  other capability files (`tokens.json`, `providers.json`, and any sibling
+  `*.token`) are denied, so the confined agent cannot read a capability it does
+  not hold. The built-in agent reaches inference over the daemon's Unix socket,
+  so no egress and no loopback are granted.
+- It resolves `agentd-agent` as a sibling of the daemon binary, then on `PATH`,
+  so the packaged layout needs no path argument.
+- It starts the manager, waits for its startup reconciliation to finish, and
+  only then publishes the `session.requested` kickoff, so the launch is a live
+  event rather than one reconciliation would fail as a leftover from a previous
+  daemon. It also claims the socket (via `server::bind`, split from `serve`)
+  before the manager starts, so a second instance fails with `AlreadyRunning`
+  without its reconciliation disturbing the live instance's session.
+
+The daemon and the session run in one process: `up` serves the event API and
+supervises the agent until a signal stops the server, then signals the manager.
+The Nix package ships `agentd`, its sandbox companions, and the node binaries
+(`agentd-agent`, `agentd-node`, `agentd-publish`) in one `bin/`, which is the
+layout the sibling resolution assumes.
+
 Further structural steps keep explicit triggers and are not taken early:
 
 1. An external Rust consumer of the contract appears: start versioning and
