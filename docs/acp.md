@@ -205,6 +205,7 @@ The OS grant depends on the host, because only Linux has a network namespace:
   bypass the proxy.
 - Where there is no namespace (**macOS Seatbelt**), the profile grants the
   proxy's loopback port and the child reaches it directly — the weaker form.
+  Linux refuses egress rather than fall back to it, since it can do better.
 
 `Proxy::start_for_policy` makes that choice from the host, so one call site
 serves both.
