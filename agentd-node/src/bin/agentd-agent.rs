@@ -39,8 +39,9 @@ struct Args {
     /// created unless `--resume` is given.
     #[arg(long)]
     conversation: Option<String>,
-    /// Resume the most recent session recorded for `--workdir` instead of
-    /// starting a new one.
+    /// Continue the most recent session recorded for `--workdir` instead of
+    /// starting a new one. A workdir with no recorded session starts a new one
+    /// rather than failing, so a supervisor may pass this unconditionally.
     #[arg(long)]
     resume: bool,
     /// The workspace directory the shell tool runs in.
@@ -95,9 +96,6 @@ enum RunError {
     /// The agent run loop failed.
     #[error(transparent)]
     Agent(AgentError),
-    /// `--resume` found no session for the workdir.
-    #[error("no session to resume for this workdir; start without --resume to create one")]
-    NoSession,
 }
 
 async fn run() -> Result<(), RunError> {
@@ -111,11 +109,20 @@ async fn run() -> Result<(), RunError> {
         SqliteProjection::<Conversation>::open(&args.db).map_err(RunError::Projection)?;
     let conversation = match args.conversation {
         Some(conversation) => conversation,
+        // A workdir with no recorded session is not an error: a supervisor
+        // passes `--resume` on every launch, including the first, and failing
+        // there would kill a session that has nothing to resume yet.
         None if args.resume => {
             let key = session_key(&args.workdir);
             Conversation::latest_session(projection.connection(), &key)
                 .map_err(RunError::Projection)?
-                .ok_or(RunError::NoSession)?
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        workdir = %key,
+                        "no session to resume for this workdir; starting a new one",
+                    );
+                    Uuid::new_v4().to_string()
+                })
         },
         None => Uuid::new_v4().to_string(),
     };
@@ -164,8 +171,11 @@ fn remove_projection(path: &Path) -> Result<(), std::io::Error> {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("agentd_node=info"));
+    // The binary's own diagnostics live under the `agentd_agent` target (the
+    // bin name), which `agentd_node=info` alone does not enable; without it a
+    // fatal `error!` here is swallowed and the process exits silently.
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("agentd_node=info,agentd_agent=info"));
     let json_layer = tracing_subscriber::fmt::layer().json();
     tracing_subscriber::registry()
         .with(env_filter)
