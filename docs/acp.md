@@ -51,6 +51,16 @@ Three consequences:
    — at minimum the baseline `session/request_permission`, and optionally
    `fs/read_text_file`, `fs/write_text_file`, and the `terminal/*` methods.
 
+```mermaid
+flowchart LR
+    P["AcpProtocol<br/>shared factory"] -. "connect(context)" .-> B
+    B["AcpBridge<br/>per-session state machine"] -- "initialize, session/new,<br/>session/prompt, id N" --> A["ACP agent<br/>confined child"]
+    A -- "session/request_permission, id N" --> B
+    B -- "events under subject session:id" --> L["EventBus / event log"]
+    L -- "session.permission.decided, id N" --> B
+    A -. "runs its own fs and shell work<br/>inside the sandbox" .-> W["workspace, workdir = cwd"]
+```
+
 ## Bridge shape change
 
 The `Bridge` trait becomes session-scoped and stateful. A shared `Protocol`
@@ -133,6 +143,29 @@ same id. A response line is matched to its `pending` entry and never treated as
 a new request; an inbound request whose method is not one the daemon implements
 is answered with a JSON-RPC `Method not found`, so the agent never blocks on an
 id.
+
+```mermaid
+sequenceDiagram
+    participant M as SessionManager
+    participant B as AcpBridge
+    participant A as ACP agent (child)
+    participant L as EventBus / log
+    participant U as approver (authority)
+
+    M->>B: start()
+    B->>A: initialize (id 0, client capabilities)
+    A-->>B: the response for id 0
+    B->>A: session/new (cwd, empty mcpServers)
+    A-->>B: sessionId
+    B->>L: session.acp.ready
+    M->>B: on_event(session.bridge.prompt)
+    B->>A: session/prompt
+    A->>B: session/request_permission (id N)
+    B->>L: session.permission.requested (request_id N)
+    U->>L: session.permission.decided (request_id N)
+    L-->>B: the decision routed to this session
+    B->>A: request_permission response under id N
+```
 
 ## Permission, human-in-the-loop
 

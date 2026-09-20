@@ -57,6 +57,16 @@ can be swapped without touching conversion.
 | Supervision       | "own one child: spawn, liveness, restart, lifetime" | `agentd` (`session`) |
 | Conversion        | "translate between a byte stream and CloudEvents" | `agentd` (`session`) |
 
+```mermaid
+flowchart LR
+    M["SessionManager<br/>supervision"] -- "spawn + liveness" --> C["third-party tool<br/>confined child"]
+    M -. "holds one field" .-> BR["Bridge<br/>per-session conversion"]
+    C -- "stdio lines" --> BR
+    BR -- "events, subject session:id" --> BUS["EventBus / event log"]
+    BUS -- "subject session:id" --> BR
+    K["agentd-sandbox<br/>confinement"] -. "Policy + SandboxedProcess" .-> M
+```
+
 The bus is the actor system. The log is the mailbox; `EventBus` is the fanout.
 A node that speaks CloudEvents is a first-class actor on it. A third-party tool
 is a peripheral device with a fixed protocol; a **`Bridge`** is the facade that
@@ -183,6 +193,27 @@ mailbox of its own: the log already holds every candidate, and downlink is a
 filtered projection of it. Type-based selection (`Interest` / `TypePrefixes` in
 `agentd-node/src/filter.rs`) remains available for a future bridge that wants it,
 but `subject` is what the first one needs and uses.
+
+```mermaid
+sequenceDiagram
+    participant C as confined child
+    participant S as SessionManager
+    participant BR as Bridge (per session)
+    participant L as EventBus / log
+
+    S->>C: spawn (SandboxedProcess under a Policy)
+    S->>BR: start()
+    BR-->>S: Action::Write(handshake lines)
+    S->>C: handshake on stdin
+    C-->>S: one output line
+    S->>BR: on_line(line)
+    BR-->>S: Action::Publish(event) plus owed replies
+    S->>L: append the event with subject session:id
+    L-->>S: event carrying subject session:id
+    S->>BR: on_event(event)
+    BR-->>S: Action::Write(line for this session)
+    S->>C: line on stdin (the single writer task)
+```
 
 Uplink must not flood the log. The manager reads the child's stdout line by line
 and drops any line longer than `MAX_FRAME_BYTES` (64 KiB) rather than appending

@@ -312,6 +312,33 @@ unlisted destination cannot be reached by bypassing the request, so the detectio
 is complete. Approval is opt-in; without `--session-egress-approval-secs` an
 unlisted destination is denied outright, to avoid prompt fatigue.
 
+```mermaid
+sequenceDiagram
+    participant A as confined agent
+    participant F as child-side forwarder
+    participant P as CONNECT proxy (daemon)
+    participant V as approver (authority)
+    participant O as provider
+
+    A->>F: CONNECT host:port (HTTP_PROXY)
+    F->>P: same request over the mounted Unix socket
+    alt host:port on the policy allowlist
+        P->>O: open the TCP connection
+        P-->>A: 200, then the tunnel (ciphertext only)
+    else unlisted and an approver is configured
+        P->>P: publish session.egress.requested (request_id)
+        V->>P: session.egress.granted / denied (same request_id)
+        alt granted
+            P->>O: open the TCP connection
+            P-->>A: 200, then the tunnel
+        else denied or no decision in time
+            P-->>A: 403
+        end
+    else unlisted and no approver
+        P-->>A: 403
+    end
+```
+
 ## Implementation status
 
 Implemented: the `loopback`/`proxy`/`HostPort` policy fields with validation;
