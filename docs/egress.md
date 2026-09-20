@@ -353,10 +353,13 @@ Verified:
   and receives the origin's body, so bytes cross loopback, the forwarder, the
   socket, and the proxy (`agentd-sandbox/tests/egress_flow.rs`).
 - A real agent: `agentd/examples/acp_handshake.rs` drives `opencode2 acp` to
-  `session.acp.ready` and through a prompt turn, both with `--sandbox` (private
-  namespace, no egress) and with `--sandbox --egress openrouter.ai:443` — the
-  latter inside the same no-egress namespace, reaching the model only through
-  the socket.
+  `session.acp.ready` in all three modes — unconfined, `--sandbox` (private
+  namespace, no egress), and `--sandbox --egress openrouter.ai:443` inside the
+  same no-egress namespace, reaching the proxy only through the socket.
+
+A real *model call* through the proxy is not covered here: the confined agent
+has no provider credentials in this repository's test environment, so an
+end-to-end prompt turn that actually leaves for a provider has not been run.
 
 Not built: a private namespace with a veth to the host proxy (unprivileged
 bubblewrap cannot create one; the Unix-socket model removes the need),
