@@ -4,7 +4,9 @@
 //!
 //! Events conform to [CloudEvents] 1.0: every event carries the required
 //! context attributes (`id`, `source`, `specversion`, `type`) serialized with
-//! their spec-defined names, plus the event `data`.
+//! their spec-defined names, plus the event `data`. Optional attributes such as
+//! `subject` and the [`trace`](crate::trace) `traceparent` extension travel with
+//! the event and are validated on ingress.
 //!
 //! An internal live fanout delivers each committed event to subscribers;
 //! [`EventLog`] is the durable append-only JSONL log that is the source of
@@ -29,9 +31,11 @@ pub mod chain;
 pub mod log;
 pub mod paths;
 pub mod projection;
+pub mod trace;
 
 pub use log::{EventLog, LogError, LogReader, Seq, verify_chain};
 pub use projection::{Projection, ProjectionError, catch_up};
+pub use trace::{TRACEPARENT_ATTR, Traceparent, TraceparentError};
 
 /// Capacity of the channel buffering events per subscriber before it lags.
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
@@ -77,6 +81,10 @@ pub enum InvalidEvent {
     /// The `time` attribute is present but is not an RFC 3339 timestamp.
     #[error("time must be an RFC 3339 timestamp")]
     Time,
+    /// The `traceparent` extension attribute is present but is not a valid W3C
+    /// Trace Context value.
+    #[error("traceparent must be a valid W3C Trace Context")]
+    Traceparent,
 }
 
 /// An event exchanged between agentd components and connected clients.
@@ -105,6 +113,12 @@ pub struct Event {
     /// are tolerated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+    /// The `CloudEvents` extension attribute `traceparent`: the W3C Trace
+    /// Context of the work that produced the event, so a consumer can correlate
+    /// it with the spans on the same journey (see [`trace`](crate::trace)).
+    /// Optional; when present it is validated on ingress.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traceparent: Option<String>,
     /// The `CloudEvents` `data` payload.
     #[serde(default)]
     pub data: serde_json::Value,
@@ -130,6 +144,7 @@ impl Event {
             r#type: r#type.into(),
             time: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
             subject: None,
+            traceparent: None,
             data,
         }
     }
@@ -149,6 +164,32 @@ impl Event {
     ) -> Self {
         self.subject = Some(subject.into());
         self
+    }
+
+    /// Sets the `traceparent` extension attribute from a parsed W3C Trace
+    /// Context, and returns `self` for chaining after [`Event::new`].
+    ///
+    /// The value is rendered from [`Traceparent`], so a caller cannot attach an
+    /// unvalidated trace context.
+    #[must_use]
+    pub fn with_traceparent(
+        mut self,
+        traceparent: &Traceparent,
+    ) -> Self {
+        self.traceparent = Some(traceparent.to_header());
+        self
+    }
+
+    /// The parsed `traceparent` extension attribute, or `None` when it is absent
+    /// or malformed.
+    ///
+    /// A value that is present but malformed is reported by [`Event::validate`]
+    /// on ingress, so this only has to tolerate absence.
+    #[must_use]
+    pub fn traceparent(&self) -> Option<Traceparent> {
+        self.traceparent
+            .as_deref()
+            .and_then(|value| Traceparent::parse(value).ok())
     }
 
     /// Whether this event's `type` is reserved to daemon-authority publishers
@@ -196,6 +237,13 @@ impl Event {
             .is_some_and(|time| OffsetDateTime::parse(time, &Rfc3339).is_err())
         {
             return Err(InvalidEvent::Time);
+        }
+        if self
+            .traceparent
+            .as_deref()
+            .is_some_and(|value| Traceparent::parse(value).is_err())
+        {
+            return Err(InvalidEvent::Traceparent);
         }
         Ok(())
     }
@@ -321,6 +369,7 @@ mod tests {
     use super::{
         DAEMON_SOURCE, Event, EventBus, InvalidEvent, LogEntry, SPEC_VERSION, is_reserved_type,
     };
+    use crate::trace::Traceparent;
     use serde_json::json;
     use tokio::sync::broadcast::error::RecvError;
 
@@ -368,6 +417,42 @@ mod tests {
 
         let without = serde_json::to_string(&test_event("test.event")).expect("serialize");
         assert!(!without.contains("subject"));
+    }
+
+    #[test]
+    fn with_traceparent_sets_an_optional_extension_that_round_trips() {
+        let traceparent =
+            Traceparent::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+                .expect("valid");
+        let event = test_event("test.event").with_traceparent(&traceparent);
+
+        assert_eq!(event.traceparent(), Some(traceparent));
+        let raw = serde_json::to_string(&event).expect("should serialize");
+        assert!(raw.contains("\"traceparent\":"));
+        let decoded: Event = serde_json::from_str(&raw).expect("should deserialize");
+        assert_eq!(decoded.traceparent(), event.traceparent());
+    }
+
+    #[test]
+    fn absent_traceparent_is_omitted_and_parses_to_none() {
+        let event = test_event("test.event");
+
+        assert_eq!(event.traceparent(), None);
+        let raw = serde_json::to_string(&event).expect("serialize");
+        assert!(!raw.contains("traceparent"));
+    }
+
+    #[test]
+    fn validate_rejects_a_malformed_traceparent() {
+        let mut event = test_event("test.event");
+        event.traceparent = Some(String::from("not-a-traceparent"));
+        assert_eq!(event.validate(), Err(InvalidEvent::Traceparent));
+
+        let mut event = test_event("test.event");
+        event.traceparent = Some(String::from(
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        ));
+        assert_eq!(event.validate(), Ok(()));
     }
 
     #[tokio::test]
