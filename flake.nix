@@ -71,6 +71,11 @@
                   src
                   cargoArtifacts
                   ;
+                # `reqwest` builds a rustls platform verifier for every client,
+                # including the plain-HTTP loopback endpoint `agentd-telemetry`
+                # exports to, and panics when the platform exposes no roots. The
+                # build sandbox has no system CA bundle, so hand it one.
+                preCheck = "export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
               }
             );
           };
