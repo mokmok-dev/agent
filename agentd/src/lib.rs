@@ -15,10 +15,12 @@ pub mod bridge;
 pub mod init;
 #[cfg(feature = "sandbox")]
 pub mod proxy;
-pub mod semconv;
 pub mod server;
 #[cfg(feature = "sandbox")]
 pub mod session;
-pub mod telemetry;
 #[cfg(feature = "sandbox")]
 pub mod up;
+
+/// The shared OpenTelemetry semantic conventions, re-exported for the daemon's
+/// call sites.
+pub use agentd_telemetry::semconv;

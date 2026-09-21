@@ -6,8 +6,6 @@
 //! is never allowed to rewrite the trace context it carried: it is attached to
 //! the current span as a *link*, and the context of the work that *emits* an
 //! event is injected into it as the `traceparent` extension.
-//!
-//! [`CloudEvents`]: https://opentelemetry.io/docs/specs/semconv/cloudevents/cloudevents-spans/
 
 use agentd_events::{Event, Traceparent};
 use opentelemetry::KeyValue;

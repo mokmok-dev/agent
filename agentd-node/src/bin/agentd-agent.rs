@@ -15,9 +15,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::watch;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
@@ -174,19 +171,23 @@ async fn main() -> std::process::ExitCode {
     // The binary's own diagnostics live under the `agentd_agent` target (the
     // bin name), which `agentd_node=info` alone does not enable; without it a
     // fatal `error!` here is swallowed and the process exits silently.
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("agentd_node=info,agentd_agent=info"));
-    let json_layer = tracing_subscriber::fmt::layer().json();
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(json_layer)
-        .init();
+    let telemetry = match agentd_telemetry::init("agentd_node=info,agentd_agent=info") {
+        Ok(telemetry) => telemetry,
+        Err(error) => {
+            eprintln!("{error}");
+            return std::process::ExitCode::FAILURE;
+        },
+    };
 
-    match run().await {
+    let code = match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             tracing::error!("{error}");
             std::process::ExitCode::FAILURE
         },
+    };
+    if let Some(telemetry) = telemetry {
+        telemetry.shutdown();
     }
+    code
 }

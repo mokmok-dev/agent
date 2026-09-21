@@ -12,9 +12,6 @@ use secrecy::zeroize::Zeroizing;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::sync::watch;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Debug, Parser)]
 #[command(name = "agentd-node", version = env!("CARGO_PKG_VERSION"))]
@@ -120,19 +117,23 @@ fn remove_projection(path: &Path) -> Result<(), std::io::Error> {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("agentd_node=info"));
-    let json_layer = tracing_subscriber::fmt::layer().json();
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(json_layer)
-        .init();
+    let telemetry = match agentd_telemetry::init("agentd_node=info") {
+        Ok(telemetry) => telemetry,
+        Err(error) => {
+            eprintln!("{error}");
+            return std::process::ExitCode::FAILURE;
+        },
+    };
 
-    match run().await {
+    let code = match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             tracing::error!("{error}");
             std::process::ExitCode::FAILURE
         },
+    };
+    if let Some(telemetry) = telemetry {
+        telemetry.shutdown();
     }
+    code
 }

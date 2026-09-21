@@ -10,14 +10,13 @@ dependencies = [
  "agentd-inference",
  "agentd-node",
  "agentd-sandbox",
+ "agentd-telemetry",
  "async-trait",
  "axum",
  "base64",
  "clap",
  "futures-util",
  "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
  "rusqlite",
  "secrecy",
  "serde",
@@ -28,8 +27,6 @@ dependencies = [
  "tokio-tungstenite 0.30.0",
  "tower-http 0.7.1",
  "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -72,6 +69,7 @@ version = "0.0.0"
 dependencies = [
  "agentd-events",
  "agentd-inference",
+ "agentd-telemetry",
  "clap",
  "futures-util",
  "rusqlite",
@@ -83,7 +81,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -103,6 +100,21 @@ dependencies = [
  "thiserror",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "agentd-telemetry"
+version = "0.0.0"
+dependencies = [
+ "agentd-events",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]

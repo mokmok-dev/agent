@@ -1,15 +1,20 @@
-//! OpenTelemetry tracing export for the daemon.
+//! OpenTelemetry tracing export and `CloudEvents` semantic conventions shared
+//! by the daemon and its node binaries.
 //!
 //! Tracing is exported over OTLP/HTTP to a collector (Jaeger accepts OTLP
 //! directly) when an OTLP endpoint is configured, and is inert otherwise: the
-//! daemon's JSON logs are always emitted, and a deployment that names no
+//! process's JSON logs are always emitted, and a deployment that names no
 //! collector pays for no exporter. The endpoint and resource are read from the
 //! standard OpenTelemetry environment variables (`OTEL_EXPORTER_OTLP_ENDPOINT`,
 //! `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_SERVICE_NAME`), so no new flag is
 //! introduced.
 //!
-//! The received `traceparent` on an event is correlated with the current span as
-//! a link, never adopted as a parent; see [`crate::semconv`].
+//! [`semconv`] follows the `CloudEvents` span conventions: a received
+//! `traceparent` is correlated with the current span as a link, never adopted as
+//! a parent, and the context of the work that emits an event is injected into
+//! it.
+
+pub mod semconv;
 
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::Resource;
@@ -55,6 +60,9 @@ impl Telemetry {
 /// Installs the tracing subscriber: always the JSON log layer, plus an
 /// OpenTelemetry export layer when a collector is configured.
 ///
+/// `default_filter` is the [`EnvFilter`] directive used when `RUST_LOG` is
+/// unset, so each binary keeps its own diagnostic target.
+///
 /// Returns `None` when no OTLP endpoint is set, so there is no exporter to shut
 /// down.
 ///
@@ -62,9 +70,9 @@ impl Telemetry {
 ///
 /// Returns [`TelemetryError::Exporter`] when a collector is configured but the
 /// exporter cannot be built.
-pub fn init() -> Result<Option<Telemetry>, TelemetryError> {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("agentd=info,tower_http=debug"));
+pub fn init(default_filter: &str) -> Result<Option<Telemetry>, TelemetryError> {
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
     let json_layer = tracing_subscriber::fmt::layer().json();
     let base = tracing_subscriber::registry()
         .with(env_filter)

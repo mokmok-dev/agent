@@ -694,7 +694,7 @@ fn print_initialized(initialized: &agentd::init::Initialized) {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let telemetry = match agentd::telemetry::init() {
+    let telemetry = match agentd_telemetry::init("agentd=info,tower_http=debug") {
         Ok(telemetry) => telemetry,
         Err(error) => {
             eprintln!("{error}");

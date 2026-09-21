@@ -5,6 +5,7 @@ members = [
   "agentd-inference",
   "agentd-node",
   "agentd-sandbox",
+  "agentd-telemetry",
 ]
 resolver = "3"
 
@@ -13,6 +14,7 @@ agentd-events = { path = "agentd-events" }
 agentd-inference = { path = "agentd-inference" }
 agentd-node = { path = "agentd-node" }
 agentd-sandbox = { path = "agentd-sandbox" }
+agentd-telemetry = { path = "agentd-telemetry" }
 async-stream = "0.3"
 async-trait = "0.1.89"
 axum = { version = "0.8.9" }
