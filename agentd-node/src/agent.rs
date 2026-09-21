@@ -259,9 +259,8 @@ impl Agent {
                                     model: self.model.as_deref(),
                                 };
                                 if let Err(error) = turn.run(client, &mut history).await {
-                                    tracing::warn!(%error, "the agent turn failed");
-                                }
-                            }
+                                    tracing::debug!(%error, "the agent turn failed");
+                                }                            }
                         },
                         Ok(None) => return Ok(received),
                         Err(error) => {
@@ -356,6 +355,26 @@ struct Turn<'a> {
 impl Turn<'_> {
     /// Runs one turn, publishing its lifecycle around the inference/tool loop.
     async fn run(
+        &self,
+        client: &mut WsClient,
+        history: &mut Vec<Message>,
+    ) -> Result<(), AgentError> {
+        use tracing::Instrument as _;
+        let span = tracing::info_span!(
+            "agent.turn",
+            conversation_id = %self.conversation_id,
+            agent_id = %self.source,
+        );
+        let result = self.run_inner(client, history).instrument(span).await;
+        match &result {
+            Ok(()) => tracing::info!("the agent turn completed"),
+            Err(error) => tracing::warn!(%error, "the agent turn failed"),
+        }
+        result
+    }
+
+    /// The turn body, run inside the turn's span.
+    async fn run_inner(
         &self,
         client: &mut WsClient,
         history: &mut Vec<Message>,
@@ -563,13 +582,20 @@ fn tool_result_data(
 }
 
 /// Publishes a `CloudEvents` message to the daemon.
+///
+/// The event carries the current span's trace context, when tracing is active,
+/// so its downstream consumers can correlate with the turn it belongs to.
 async fn publish(
     client: &mut WsClient,
     r#type: &str,
     data: serde_json::Value,
 ) -> Result<(), AgentError> {
     tracing::debug!(r#type, "publishing an event");
-    client.send(&Event::new(r#type, data)).await?;
+    let mut event = Event::new(r#type, data);
+    if let Some(traceparent) = agentd_telemetry::semconv::current_traceparent() {
+        event = event.with_traceparent(&traceparent);
+    }
+    client.send(&event).await?;
     tracing::debug!(r#type, "the event was sent");
     Ok(())
 }

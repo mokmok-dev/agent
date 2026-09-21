@@ -20,3 +20,7 @@ pub mod server;
 pub mod session;
 #[cfg(feature = "sandbox")]
 pub mod up;
+
+/// The shared OpenTelemetry semantic conventions, re-exported for the daemon's
+/// call sites.
+pub use agentd_telemetry::semconv;

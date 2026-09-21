@@ -332,8 +332,6 @@ impl ConfinedProcessExecutor {
             .arg("/dev")
             .arg("--proc")
             .arg("/proc")
-            .arg("--tmpfs")
-            .arg("/tmp")
             .arg("--bind")
             .arg(&self.scratch)
             .arg(&self.scratch);
@@ -1114,6 +1112,65 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--unshare-all"));
         assert!(args.iter().any(|arg| arg == "--die-with-parent"));
         assert!(args.iter().any(|arg| arg == "--chdir"));
+    }
+
+    #[test]
+    fn bwrap_masks_only_an_explicit_deny() {
+        let dir = TempDir::new().expect("tempdir");
+        let host = dir.path().canonicalize().expect("canonical tempdir");
+        let policy = workdir_policy(&host);
+        let executor =
+            ConfinedProcessExecutor::with_bwrap(&policy, PathBuf::from("/usr/bin/bwrap"))
+                .expect("the policy renders");
+
+        // Masking the temp directory hid a granted read that lives under it —
+        // and the daemon socket, which defaults to `$TMPDIR/agentd/agentd.sock`
+        // when `XDG_RUNTIME_DIR` is unset — and left `/tmp` writable inside the
+        // sandbox where the Landlock fallback leaves it outside the allowlist.
+        // Reads are broad, so a read entry needs no mount of its own and a
+        // `deny` is the only reason to mask a path.
+        let plain = args(&executor.std_command("true"));
+        assert!(
+            !window(&plain, &["--tmpfs", "/tmp"]),
+            "the temp directory must not be masked: {plain:?}"
+        );
+
+        // The one mask that remains is the named deny, which is what the
+        // invariant above is about.
+        let denied = host.join("secret");
+        std::fs::create_dir(&denied).expect("deny dir");
+        let policy = Policy {
+            fs: FsPolicy {
+                entries: vec![
+                    FsEntry {
+                        path: host.clone(),
+                        access: Access::Write,
+                    },
+                    FsEntry {
+                        path: denied.clone(),
+                        access: Access::Deny,
+                    },
+                ],
+                ..FsPolicy::default()
+            },
+            shell: ShellPolicy {
+                workdir: host,
+                ..ShellPolicy::default()
+            },
+            ..Policy::default()
+        };
+        let executor =
+            ConfinedProcessExecutor::with_bwrap(&policy, PathBuf::from("/usr/bin/bwrap"))
+                .expect("the policy renders");
+        let masked = args(&executor.std_command("true"));
+        assert!(
+            window(&masked, &["--tmpfs", &denied.display().to_string()]),
+            "a deny must still be masked: {masked:?}"
+        );
+        assert!(
+            !window(&masked, &["--tmpfs", "/tmp"]),
+            "the temp directory must not be masked: {masked:?}"
+        );
     }
 
     #[test]

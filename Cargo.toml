@@ -5,6 +5,7 @@ members = [
   "agentd-inference",
   "agentd-node",
   "agentd-sandbox",
+  "agentd-telemetry",
 ]
 resolver = "3"
 
@@ -13,12 +14,24 @@ agentd-events = { path = "agentd-events" }
 agentd-inference = { path = "agentd-inference" }
 agentd-node = { path = "agentd-node" }
 agentd-sandbox = { path = "agentd-sandbox" }
+agentd-telemetry = { path = "agentd-telemetry" }
 async-stream = "0.3"
 async-trait = "0.1.89"
 axum = { version = "0.8.9" }
 base64 = "0.22"
 clap = { version = "4.6.6" }
 futures-util = { version = "0.3.34", features = ["sink"] }
+opentelemetry = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+  "http-proto",
+  "reqwest-client",
+  "reqwest-rustls",
+  "trace",
+] }
+opentelemetry_sdk = { version = "0.32", features = [
+  "experimental_trace_batch_span_processor_with_async_runtime",
+  "rt-tokio",
+] }
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
@@ -37,6 +50,7 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
 ] }
 tower-http = { version = "0.7.1" }
 tracing = { version = "0.1.44" }
+tracing-opentelemetry = "0.33"
 tracing-subscriber = { version = "0.3.23" }
 uuid = { version = "1.26.1", features = ["v4", "v7"] }
 

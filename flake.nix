@@ -71,6 +71,11 @@
                   src
                   cargoArtifacts
                   ;
+                # `reqwest` builds a rustls platform verifier for every client,
+                # including the plain-HTTP loopback endpoint `agentd-telemetry`
+                # exports to, and panics when the platform exposes no roots. The
+                # build sandbox has no system CA bundle, so hand it one.
+                preCheck = "export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
               }
             );
           };
@@ -106,8 +111,19 @@
                 skills
                 rustToolchain
                 sccache
+                # The OTLP collector the daemon exports spans to. `otelcol` with
+                # `nix/otelcol.yaml` prints spans to its stdout; point the
+                # daemon's `OTEL_EXPORTER_OTLP_ENDPOINT` at it to see a trace.
+                opentelemetry-collector
               ]
-              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ mold ];
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                # The confinement backend. On Linux a policy that needs a
+                # private network namespace fails closed without bubblewrap
+                # (`agentd-sandbox/src/linux.rs`), so the dev shell ships it
+                # rather than leaving the strongest confinement to the host.
+                bubblewrap
+                mold
+              ];
 
             shellHook = ''
               export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
