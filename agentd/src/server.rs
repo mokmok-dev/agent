@@ -563,6 +563,9 @@ async fn handle_inbound(
                 );
                 return send_notice(sink, reply).await.is_ok();
             }
+            // Correlate the event with the trace it carried without adopting or
+            // rewriting that context: the convention is a link, not a parent.
+            crate::semconv::link_event(&event);
             event.set_provenance(principal.source());
             if let Err(error) = log.publish(event).await {
                 tracing::error!(%error, "failed to durably publish an event");
@@ -1250,6 +1253,45 @@ mod tests {
         assert_eq!(seq, Some(1));
         assert_eq!(received.source, "urn:test:writer");
         assert_ne!(received.time, event.time);
+
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_valid_traceparent_is_preserved_on_the_event() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let socket = dir.path().join("test.sock");
+        let server = spawn_server(socket.clone(), open_log(dir.path()));
+
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let mut client = connect_writer(&socket).await;
+        let mut event = test_event("test.event");
+        event.traceparent = Some(String::from(traceparent));
+        send_event(&mut client, &event).await;
+
+        let (seq, received) = recv_wire(&mut client).await;
+        assert_eq!(seq, Some(1));
+        assert_eq!(received.traceparent.as_deref(), Some(traceparent));
+
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_malformed_traceparent_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let socket = dir.path().join("test.sock");
+        let log = open_log(dir.path());
+        let server = spawn_server(socket.clone(), log.clone());
+
+        let mut client = connect_writer(&socket).await;
+        let mut event = test_event("test.event");
+        event.traceparent = Some(String::from("not-a-traceparent"));
+        send_event(&mut client, &event).await;
+
+        let (seq, received) = recv_wire(&mut client).await;
+        assert_eq!(seq, None);
+        assert_eq!(received.r#type, "error.invalid_event");
+        assert_eq!(log.tail_seq(), 0, "nothing should have been appended");
 
         server.abort();
     }

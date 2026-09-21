@@ -11,9 +11,6 @@ use std::sync::Arc;
 #[cfg(feature = "sandbox")]
 use std::time::Duration;
 use thiserror::Error;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -697,21 +694,25 @@ fn print_initialized(initialized: &agentd::init::Initialized) {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("agentd=info,tower_http=debug"));
-    let json_layer = tracing_subscriber::fmt::layer().json();
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(json_layer)
-        .init();
+    let telemetry = match agentd::telemetry::init() {
+        Ok(telemetry) => telemetry,
+        Err(error) => {
+            eprintln!("{error}");
+            return std::process::ExitCode::FAILURE;
+        },
+    };
 
-    match run().await {
+    let code = match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
             std::process::ExitCode::FAILURE
         },
+    };
+    if let Some(telemetry) = telemetry {
+        telemetry.shutdown();
     }
+    code
 }
 
 #[cfg(test)]

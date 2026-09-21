@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentd_events::{Event, EventLog, LogEntry};
+use agentd_events::{Event, EventLog, LogEntry, Traceparent};
 use base64::Engine as _;
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader,
@@ -136,6 +136,7 @@ impl Egress {
         &self,
         host: &str,
         port: u16,
+        traceparent: Option<&str>,
     ) -> bool {
         if self.listed(host, port) {
             return true;
@@ -143,24 +144,32 @@ impl Egress {
         let Some((log, timeout)) = &self.approver else {
             return false;
         };
-        self.ask(log, host, port, *timeout).await
+        self.ask(log, host, port, *timeout, traceparent).await
     }
 
     /// Publishes a request and waits for a decision, denying on timeout.
+    ///
+    /// The child's `traceparent`, when it sent one, is recorded on the approval
+    /// event so the request, the approval, and the child's own span share one
+    /// trace.
     async fn ask(
         &self,
         log: &EventLog,
         host: &str,
         port: u16,
         timeout: Duration,
+        traceparent: Option<&str>,
     ) -> bool {
         // Subscribe before publishing, so a fast decision is not missed.
         let mut decisions = log.subscribe();
         let request_id = uuid::Uuid::now_v7().to_string();
-        let event = Event::new(
+        let mut event = Event::new(
             EGRESS_REQUESTED,
             serde_json::json!({ "request_id": request_id, "host": host, "port": port }),
         );
+        if let Some(traceparent) = traceparent.and_then(|value| Traceparent::parse(value).ok()) {
+            event = event.with_traceparent(&traceparent);
+        }
         if let Err(error) = log.publish(event).await {
             tracing::error!(%error, "failed to record an egress request");
             return false;
@@ -170,7 +179,7 @@ impl Egress {
         }
         // Record the denial (a timeout, or the approver's own denial is already
         // in the log).
-        let denied = Event::new(
+        let mut denied = Event::new(
             EGRESS_DENIED,
             serde_json::json!({
                 "request_id": request_id,
@@ -179,6 +188,9 @@ impl Egress {
                 "reason": "no approval within the timeout",
             }),
         );
+        if let Some(traceparent) = traceparent.and_then(|value| Traceparent::parse(value).ok()) {
+            denied = denied.with_traceparent(&traceparent);
+        }
         if let Err(error) = log.publish(denied).await {
             tracing::error!(%error, "failed to record an egress denial");
         }
@@ -561,6 +573,20 @@ where
     let Some((host, port)) = parse_connect(head.request_line()) else {
         return reply(&mut client_write, 400, "Bad Request").await;
     };
+    // Correlate the request with the child's own span when it carried a trace
+    // context, so the tunnel and any approval share its trace.
+    if let Some(traceparent) = head
+        .traceparent()
+        .and_then(|value| Traceparent::parse(value).ok())
+    {
+        crate::semconv::link_traceparent(
+            &traceparent,
+            vec![
+                opentelemetry::KeyValue::new("server.address", host.clone()),
+                opentelemetry::KeyValue::new("server.port", i64::from(port)),
+            ],
+        );
+    }
     // Authenticate before revealing anything about the allowlist.
     if head.authorization() != Some(expected) {
         tracing::warn!(%host, %port, "the proxy refused an unauthenticated client");
@@ -572,7 +598,7 @@ where
         )
         .await;
     }
-    if !egress.allows(&host, port).await {
+    if !egress.allows(&host, port, head.traceparent()).await {
         tracing::warn!(%host, %port, "the proxy refused an egress destination");
         return reply(&mut client_write, 403, "Forbidden").await;
     }
@@ -625,6 +651,7 @@ where
 struct Head {
     request_line: String,
     authorization: Option<String>,
+    traceparent: Option<String>,
 }
 
 impl Head {
@@ -637,6 +664,12 @@ impl Head {
     fn authorization(&self) -> Option<&str> {
         self.authorization.as_deref()
     }
+
+    /// The W3C `traceparent` the client sent, if any, so the proxy continues
+    /// the caller's trace rather than starting an unrelated one.
+    fn traceparent(&self) -> Option<&str> {
+        self.traceparent.as_deref()
+    }
 }
 
 /// Reads the request head, failing if it exceeds [`MAX_HEADER_BYTES`].
@@ -646,9 +679,11 @@ async fn read_head<R: AsyncBufRead + Unpin>(reader: &mut R) -> io::Result<Head> 
         return Ok(Head {
             request_line,
             authorization: None,
+            traceparent: None,
         });
     }
     let mut authorization = None;
+    let mut traceparent = None;
     let mut header = String::new();
     let mut total = request_line.len();
     loop {
@@ -667,15 +702,18 @@ async fn read_head<R: AsyncBufRead + Unpin>(reader: &mut R) -> io::Result<Head> 
         if line.is_empty() {
             break;
         }
-        if let Some((name, value)) = line.split_once(':')
-            && name.eq_ignore_ascii_case("proxy-authorization")
-        {
-            authorization = Some(value.trim().to_string());
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("proxy-authorization") {
+                authorization = Some(value.trim().to_string());
+            } else if name.eq_ignore_ascii_case("traceparent") {
+                traceparent = Some(value.trim().to_string());
+            }
         }
     }
     Ok(Head {
         request_line,
         authorization,
+        traceparent,
     })
 }
 
@@ -900,7 +938,38 @@ mod tests {
     #[tokio::test]
     async fn an_unlisted_destination_is_denied_without_an_approver() {
         let egress = Egress::default();
-        assert!(!egress.allows("evil.example.com", 443).await);
+        assert!(!egress.allows("evil.example.com", 443, None).await);
+    }
+
+    #[tokio::test]
+    async fn the_child_traceparent_reaches_the_approval_event() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = EventLog::open(dir.path().join("events.jsonl")).expect("log");
+        let egress = Egress::default().with_approver(log.clone(), Duration::from_millis(50));
+
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let mut events = log.subscribe();
+        // No approver answers: the request is recorded, then the timeout denies.
+        assert!(
+            !egress
+                .allows("api.example.com", 443, Some(traceparent))
+                .await
+        );
+
+        let mut seen = Vec::new();
+        while let Ok(entry) = events.try_recv() {
+            seen.push(entry.event);
+        }
+        let requested = seen
+            .iter()
+            .find(|event| event.r#type == super::EGRESS_REQUESTED)
+            .expect("an egress request must be recorded");
+        assert_eq!(requested.traceparent.as_deref(), Some(traceparent));
+        let denied = seen
+            .iter()
+            .find(|event| event.r#type == super::EGRESS_DENIED)
+            .expect("a denial must be recorded");
+        assert_eq!(denied.traceparent.as_deref(), Some(traceparent));
     }
 
     #[tokio::test]
@@ -926,7 +995,7 @@ mod tests {
             }
         });
 
-        assert!(egress.allows("api.example.com", 443).await);
+        assert!(egress.allows("api.example.com", 443, None).await);
         decider.await.expect("decider joins");
     }
 
@@ -952,7 +1021,7 @@ mod tests {
             }
         });
 
-        assert!(!egress.allows("evil.example.com", 443).await);
+        assert!(!egress.allows("evil.example.com", 443, None).await);
         decider.await.expect("decider joins");
     }
 
@@ -967,7 +1036,7 @@ mod tests {
         }])
         .with_approver(log, Duration::from_millis(1));
 
-        assert!(egress.allows("api.example.com", 443).await);
+        assert!(egress.allows("api.example.com", 443, None).await);
     }
 
     #[test]

@@ -15,8 +15,10 @@ pub mod bridge;
 pub mod init;
 #[cfg(feature = "sandbox")]
 pub mod proxy;
+pub mod semconv;
 pub mod server;
 #[cfg(feature = "sandbox")]
 pub mod session;
+pub mod telemetry;
 #[cfg(feature = "sandbox")]
 pub mod up;
