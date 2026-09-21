@@ -109,6 +109,22 @@ fn the_derived_command_passes_every_absolute_path() {
     assert!(command.contains("--model fast"));
 }
 
+/// Whether `sandbox-exec` installed the profile, rather than refusing to install
+/// one.
+///
+/// macOS answers `sandbox_apply: Operation not permitted` when it will not apply
+/// a profile, which is what the macOS Nix build sandbox does with this policy, and
+/// such a result says nothing about the confinement. `agentd-sandbox`'s macOS
+/// spawn tests skip inside the Nix build sandbox for the same reason, and no Linux
+/// backend reports this message.
+fn confinement_was_applied(stderr: &str) -> bool {
+    let applied = !stderr.contains("sandbox_apply");
+    if !applied {
+        eprintln!("skipping: this host refused to apply a Seatbelt profile");
+    }
+    applied
+}
+
 #[test]
 fn the_workdir_is_a_write_root_and_egress_is_denied() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -150,6 +166,9 @@ async fn the_agent_may_read_its_own_token_and_nothing_else_of_the_daemon() {
         ))
         .await
         .expect("exec");
+    if !confinement_was_applied(&readable.stderr) {
+        return;
+    }
     assert_eq!(
         readable.exit_code, 0,
         "the agent's own token must be readable: {}",
@@ -190,6 +209,9 @@ async fn the_workspace_is_writable_and_the_host_is_not() {
         .exec(&format!("printf ok > {}", inside.display()))
         .await
         .expect("exec");
+    if !confinement_was_applied(&write.stderr) {
+        return;
+    }
     assert_eq!(
         write.exit_code, 0,
         "the workspace must be writable: {}",
