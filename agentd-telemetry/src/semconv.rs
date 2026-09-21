@@ -13,6 +13,8 @@ use opentelemetry::propagation::TextMapPropagator as _;
 use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceId};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 
+pub use opentelemetry::KeyValue as Attribute;
+
 /// The `cloudevents.event_id` attribute.
 pub const EVENT_ID: &str = "cloudevents.event_id";
 /// The `cloudevents.event_type` attribute.
@@ -23,7 +25,7 @@ pub const EVENT_SOURCE: &str = "cloudevents.event_source";
 pub const EVENT_SUBJECT: &str = "cloudevents.event_subject";
 
 /// The W3C `traceparent` header name the propagator injects.
-const TRACEPARENT_HEADER: &str = "traceparent";
+const TRACEPARENT_HEADER: &str = agentd_events::TRACEPARENT_ATTR;
 
 /// Converts a validated [`Traceparent`] into an OpenTelemetry [`SpanContext`].
 ///
@@ -31,15 +33,15 @@ const TRACEPARENT_HEADER: &str = "traceparent";
 /// already rejects but OpenTelemetry would otherwise treat as no context.
 #[must_use]
 pub fn remote_span_context(traceparent: &Traceparent) -> Option<SpanContext> {
-    let trace_id = TraceId::from_hex(&traceparent.trace_id).ok()?;
-    let span_id = SpanId::from_hex(&traceparent.span_id).ok()?;
+    let trace_id = TraceId::from_hex(traceparent.trace_id()).ok()?;
+    let span_id = SpanId::from_hex(traceparent.span_id()).ok()?;
     if trace_id == TraceId::INVALID || span_id == SpanId::INVALID {
         return None;
     }
     Some(SpanContext::new(
         trace_id,
         span_id,
-        TraceFlags::new(traceparent.flags),
+        TraceFlags::new(traceparent.flags()),
         true,
         opentelemetry::trace::TraceState::default(),
     ))
@@ -62,8 +64,9 @@ pub fn event_values(event: &Event) -> Vec<KeyValue> {
 /// The `traceparent` of the current span, for injecting into an event the daemon
 /// is about to produce.
 ///
-/// Returns `None` when there is no sampled/valid active span, so callers can
-/// leave the extension unset.
+/// Returns `None` when there is no valid active span. The value is taken from
+/// the active context regardless of the sampled flag, so an event can be
+/// correlated even when the trace is not exported.
 #[must_use]
 pub fn current_traceparent() -> Option<Traceparent> {
     let mut carrier = std::collections::HashMap::<String, String>::new();
@@ -142,5 +145,36 @@ mod tests {
     #[test]
     fn linking_an_event_without_a_traceparent_is_a_noop() {
         link_event(&Event::new("agent.inbox", json!({})));
+    }
+
+    #[test]
+    fn a_link_is_recorded_on_the_active_span() {
+        use opentelemetry::trace::{TraceContextExt as _, Tracer as _, TracerProvider as _};
+        use opentelemetry_sdk::trace::InMemorySpanExporterBuilder;
+
+        let exporter = InMemorySpanExporterBuilder::new().build();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let tracer = provider.tracer("test");
+
+        // Make a span current and attach a link to it.
+        let span = tracer.start("test.span");
+        let context = opentelemetry::Context::current_with_span(span);
+        let guard = context.clone().attach();
+        link_event(&Event::new("agent.inbox", json!({})).with_traceparent(&traceparent()));
+        context.span().end();
+        drop(guard);
+
+        let spans = exporter.get_finished_spans().expect("finished spans");
+        let recorded = spans
+            .iter()
+            .find(|span| span.name == "test.span")
+            .expect("the span must be exported");
+        assert_eq!(recorded.links.len(), 1, "the event link must be recorded");
+        assert_eq!(
+            recorded.links[0].span_context.trace_id().to_string(),
+            "4bf92f3577b34da6a3ce929d0e0e4736"
+        );
     }
 }

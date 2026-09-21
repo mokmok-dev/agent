@@ -259,7 +259,7 @@ impl Agent {
                                     model: self.model.as_deref(),
                                 };
                                 if let Err(error) = turn.run(client, &mut history).await {
-                                    tracing::warn!(%error, "the agent turn failed");
+                                    tracing::debug!(%error, "the agent turn failed");
                                 }                            }
                         },
                         Ok(None) => return Ok(received),

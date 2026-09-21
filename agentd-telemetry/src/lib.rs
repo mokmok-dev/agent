@@ -40,6 +40,9 @@ pub enum TelemetryError {
     /// The OTLP exporter could not be built.
     #[error("failed to build the OTLP span exporter: {0}")]
     Exporter(#[from] opentelemetry_otlp::ExporterBuildError),
+    /// [`init_with_endpoint`] was called without an endpoint.
+    #[error("a traces endpoint is required")]
+    MissingEndpoint,
 }
 
 /// The live tracing provider, kept so it can be shut down explicitly at exit
@@ -64,6 +67,12 @@ impl Telemetry {
 /// `default_filter` is the [`EnvFilter`] directive used when `RUST_LOG` is
 /// unset, so each binary keeps its own diagnostic target.
 ///
+/// The endpoint follows the OpenTelemetry environment-variable rules:
+/// `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, when set, names the traces endpoint
+/// verbatim; otherwise `OTEL_EXPORTER_OTLP_ENDPOINT` names the base collector
+/// and the `/v1/traces` path is appended by the exporter. With neither set there
+/// is no exporter and no spans are sent.
+///
 /// Returns `None` when no OTLP endpoint is set, so there is no exporter to shut
 /// down.
 ///
@@ -72,20 +81,73 @@ impl Telemetry {
 /// Returns [`TelemetryError::Exporter`] when a collector is configured but the
 /// exporter cannot be built.
 pub fn init(default_filter: &str) -> Result<Option<Telemetry>, TelemetryError> {
-    init_with_endpoint(default_filter, collector_endpoint().as_deref())
+    match endpoint_choice(
+        non_empty_env(OTLP_TRACES_ENDPOINT),
+        non_empty_env(OTLP_ENDPOINT),
+    ) {
+        Endpoint::Unset => {
+            install_logs_only(default_filter);
+            Ok(None)
+        },
+        Endpoint::FromEnvironment => install(default_filter, None),
+        Endpoint::Verbatim(endpoint) => install(default_filter, Some(&endpoint)),
+    }
 }
 
-/// As [`init`] with the collector endpoint supplied explicitly instead of read
-/// from the environment, so the exporter can be exercised without mutating
-/// process-global state.
+/// Which endpoint to give the exporter.
+enum Endpoint {
+    /// Neither variable is set: no exporter.
+    Unset,
+    /// Only the base variable is set: let the exporter resolve it and append
+    /// `/v1/traces`.
+    FromEnvironment,
+    /// The traces variable is set: use it verbatim.
+    Verbatim(String),
+}
+
+/// Chooses the endpoint from the two variables, preserving the distinction
+/// between "use this URL verbatim" and "let the exporter resolve the base URL".
+fn endpoint_choice(
+    traces: Option<String>,
+    base: Option<String>,
+) -> Endpoint {
+    match (traces, base) {
+        (None, None) => Endpoint::Unset,
+        (Some(traces), _) => Endpoint::Verbatim(traces),
+        (None, Some(_)) => Endpoint::FromEnvironment,
+    }
+}
+
+/// Installs the subscriber with a **verbatim** traces endpoint, for tests and
+/// callers that hold a complete URL (including the `/v1/traces` path) rather
+/// than the standard environment.
 ///
 /// # Errors
 ///
-/// Returns [`TelemetryError::Exporter`] when `endpoint` is set but the exporter
-/// cannot be built.
+/// Returns [`TelemetryError::Exporter`] when the exporter cannot be built.
 pub fn init_with_endpoint(
     default_filter: &str,
-    endpoint: Option<&str>,
+    endpoint: &str,
+) -> Result<Telemetry, TelemetryError> {
+    install(default_filter, Some(endpoint))?.ok_or(TelemetryError::MissingEndpoint)
+}
+
+/// Installs the log-only subscriber when no collector is configured.
+fn install_logs_only(default_filter: &str) {
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
+    let json_layer = tracing_subscriber::fmt::layer().json();
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(json_layer)
+        .init();
+}
+
+/// Installs the JSON log layer plus the OTLP layer, with `traces_endpoint`
+/// passed verbatim when `Some` and resolved from the environment otherwise.
+fn install(
+    default_filter: &str,
+    traces_endpoint: Option<&str>,
 ) -> Result<Option<Telemetry>, TelemetryError> {
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
@@ -94,15 +156,11 @@ pub fn init_with_endpoint(
         .with(env_filter)
         .with(json_layer);
 
-    let Some(endpoint) = endpoint.filter(|value| !value.trim().is_empty()) else {
-        base.init();
-        return Ok(None);
+    let builder = opentelemetry_otlp::SpanExporter::builder().with_http();
+    let exporter = match traces_endpoint {
+        Some(endpoint) => builder.with_endpoint(endpoint).build()?,
+        None => builder.build()?,
     };
-
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_http()
-        .with_endpoint(endpoint)
-        .build()?;
     // The default batch processor batches on its own thread, which has no tokio
     // reactor for the async HTTP client; the async-runtime processor batches on
     // the runtime that is driving the process.
@@ -125,15 +183,11 @@ pub fn init_with_endpoint(
     Ok(Some(Telemetry { provider }))
 }
 
-/// The OTLP endpoint named in the environment, if any.
-fn collector_endpoint() -> Option<String> {
-    [OTLP_TRACES_ENDPOINT, OTLP_ENDPOINT]
-        .iter()
-        .find_map(|name| {
-            std::env::var(name)
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
+/// The value of `name` when it is set and not blank.
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 /// The resource describing this process, with the service name from
@@ -148,15 +202,46 @@ fn resource() -> Resource {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_SERVICE_NAME, OTLP_ENDPOINT, OTLP_TRACES_ENDPOINT, collector_endpoint};
+    use super::{
+        DEFAULT_SERVICE_NAME, Endpoint, OTLP_ENDPOINT, OTLP_TRACES_ENDPOINT, endpoint_choice,
+        non_empty_env,
+    };
 
     #[test]
     fn no_endpoint_means_no_exporter() {
         // The test binary does not set the OTLP variables; assert the negative
         // branch so the default stays inert.
         if std::env::var(OTLP_ENDPOINT).is_err() && std::env::var(OTLP_TRACES_ENDPOINT).is_err() {
-            assert!(collector_endpoint().is_none());
+            assert!(non_empty_env(OTLP_ENDPOINT).is_none());
+            assert!(non_empty_env(OTLP_TRACES_ENDPOINT).is_none());
         }
+    }
+
+    #[test]
+    fn the_traces_variable_is_passed_verbatim() {
+        let choice = endpoint_choice(
+            Some(String::from("http://collector:4318/v1/traces")),
+            Some(String::from("http://ignored:4318")),
+        );
+        let Endpoint::Verbatim(endpoint) = choice else {
+            unreachable!("the traces variable wins");
+        };
+        assert_eq!(endpoint, "http://collector:4318/v1/traces");
+    }
+
+    #[test]
+    fn the_base_variable_is_left_for_the_exporter_to_resolve() {
+        // `FromEnvironment` means "do not pass an endpoint", so the exporter
+        // appends `/v1/traces` to the base variable itself.
+        assert!(matches!(
+            endpoint_choice(None, Some(String::from("http://collector:4318"))),
+            Endpoint::FromEnvironment
+        ));
+    }
+
+    #[test]
+    fn neither_variable_means_no_exporter() {
+        assert!(matches!(endpoint_choice(None, None), Endpoint::Unset));
     }
 
     #[test]

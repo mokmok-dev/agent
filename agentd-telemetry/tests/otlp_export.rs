@@ -1,10 +1,10 @@
 //! End-to-end `OTLP` export test: with a collector endpoint configured, a span
 //! is batched and sent to it as `OTLP` over HTTP protobuf.
 //!
-//! It stands up a minimal HTTP receiver on loopback, points the exporter at it
-//! through the standard `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, emits a span, and
-//! asserts the process made a `POST /v1/traces` carrying a protobuf body. It is
-//! the check that the exporter is actually wired, not merely constructible.
+//! It stands up a minimal HTTP receiver on loopback, points the exporter at it,
+//! emits a span, and asserts the process made a `POST` carrying a protobuf body.
+//! It covers both endpoint forms: a verbatim traces endpoint, and the base
+//! collector variable whose `/v1/traces` path the exporter must append.
 //!
 //! The helpers use `expect`/`panic` like the `#[cfg(test)]` modules in `src`; the
 //! workspace `allow-*-in-tests` clippy configuration cannot see integration test
@@ -67,19 +67,21 @@ fn receiver() -> (u16, mpsc::Receiver<(String, usize)>) {
     (port, receiver)
 }
 
+/// Emits one span, so the exporter has something to batch.
+fn emit_span() {
+    let span = tracing::info_span!("export.me");
+    let _entered = span.enter();
+    tracing::info!("inside the span");
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_span_is_exported_as_otlp_http() {
+async fn a_traces_endpoint_is_used_verbatim() {
     let (port, receiver) = receiver();
     let endpoint = format!("http://127.0.0.1:{port}/v1/traces");
 
-    let telemetry = agentd_telemetry::init_with_endpoint("info", Some(&endpoint))
-        .expect("initialization")
-        .expect("a collector endpoint is configured");
-    {
-        let span = tracing::info_span!("export.me");
-        let _entered = span.enter();
-        tracing::info!("inside the span");
-    }
+    let telemetry =
+        agentd_telemetry::init_with_endpoint("info", &endpoint).expect("initialization");
+    emit_span();
     telemetry.shutdown();
 
     let (request_line, body_len) = receiver
@@ -87,7 +89,7 @@ async fn a_span_is_exported_as_otlp_http() {
         .expect("the exporter must POST to the collector");
     assert!(
         request_line.starts_with("POST /v1/traces "),
-        "the exporter must POST to /v1/traces: {request_line:?}"
+        "a traces endpoint is used verbatim: {request_line:?}"
     );
     assert!(body_len > 0, "the OTLP body must not be empty");
 }

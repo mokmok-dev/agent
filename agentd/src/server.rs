@@ -527,6 +527,21 @@ async fn handle_inbound(
     message: Message,
     principal: &crate::auth::Principal,
 ) -> bool {
+    use tracing::Instrument as _;
+    let span = tracing::info_span!("event.inbound", source = %principal.source());
+    handle_inbound_inner(sink, log, message, principal)
+        .instrument(span)
+        .await
+}
+
+/// The body of [`handle_inbound`], run inside the `event.inbound` span so a
+/// received trace context has a span to attach its link to.
+async fn handle_inbound_inner(
+    sink: &mut SplitSink<WebSocket, Message>,
+    log: &EventLog,
+    message: Message,
+    principal: &crate::auth::Principal,
+) -> bool {
     match message {
         Message::Text(text) => {
             if !principal.has(Claim::Publish) {
@@ -566,6 +581,7 @@ async fn handle_inbound(
             // Correlate the event with the trace it carried without adopting or
             // rewriting that context: the convention is a link, not a parent.
             crate::semconv::link_event(&event);
+            event.normalize_traceparent();
             event.set_provenance(principal.source());
             if let Err(error) = log.publish(event).await {
                 tracing::error!(%error, "failed to durably publish an event");

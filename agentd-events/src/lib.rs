@@ -192,6 +192,17 @@ impl Event {
             .and_then(|value| Traceparent::parse(value).ok())
     }
 
+    /// Rewrites the `traceparent` extension attribute into the canonical W3C
+    /// form (lowercase ids, unknown flag bits zeroed) when it is present and
+    /// valid, so the stored value matches what [`Event::traceparent`] parses.
+    ///
+    /// A malformed value is left untouched for [`Event::validate`] to reject.
+    pub fn normalize_traceparent(&mut self) {
+        if let Some(parsed) = self.traceparent() {
+            self.traceparent = Some(parsed.to_header());
+        }
+    }
+
     /// Whether this event's `type` is reserved to daemon-authority publishers
     /// (see [`is_reserved_type`]).
     #[must_use]
@@ -453,6 +464,21 @@ mod tests {
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
         ));
         assert_eq!(event.validate(), Ok(()));
+    }
+
+    #[test]
+    fn normalize_traceparent_canonicalises_uppercase_and_flags() {
+        let mut event = test_event("test.event");
+        event.traceparent = Some(String::from(
+            "00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-FF",
+        ));
+
+        event.normalize_traceparent();
+
+        assert_eq!(
+            event.traceparent.as_deref(),
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+        );
     }
 
     #[tokio::test]

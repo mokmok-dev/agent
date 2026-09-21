@@ -557,6 +557,22 @@ async fn serve<S>(
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
+    use tracing::Instrument as _;
+    serve_inner(client, egress, expected)
+        .instrument(tracing::info_span!("egress.proxy"))
+        .await
+}
+
+/// The body of [`serve`], run inside the `egress.proxy` span so a child's trace
+/// context has a span to attach its link to.
+async fn serve_inner<S>(
+    client: S,
+    egress: &Egress,
+    expected: &str,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
     let (read_half, mut client_write) = tokio::io::split(client);
     // The reader is buffered and may hold bytes read past the CONNECT line, so
     // the tunnel copies through it rather than the raw read half.
@@ -582,8 +598,8 @@ where
         crate::semconv::link_traceparent(
             &traceparent,
             vec![
-                opentelemetry::KeyValue::new("server.address", host.clone()),
-                opentelemetry::KeyValue::new("server.port", i64::from(port)),
+                crate::semconv::Attribute::new("server.address", host.clone()),
+                crate::semconv::Attribute::new("server.port", i64::from(port)),
             ],
         );
     }

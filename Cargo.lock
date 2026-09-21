@@ -16,7 +16,6 @@ dependencies = [
  "base64",
  "clap",
  "futures-util",
- "opentelemetry",
  "rusqlite",
  "secrecy",
  "serde",
