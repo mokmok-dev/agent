@@ -17,6 +17,7 @@
 pub mod semconv;
 
 use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig as _;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::SdkTracerProvider;
@@ -71,6 +72,21 @@ impl Telemetry {
 /// Returns [`TelemetryError::Exporter`] when a collector is configured but the
 /// exporter cannot be built.
 pub fn init(default_filter: &str) -> Result<Option<Telemetry>, TelemetryError> {
+    init_with_endpoint(default_filter, collector_endpoint().as_deref())
+}
+
+/// As [`init`] with the collector endpoint supplied explicitly instead of read
+/// from the environment, so the exporter can be exercised without mutating
+/// process-global state.
+///
+/// # Errors
+///
+/// Returns [`TelemetryError::Exporter`] when `endpoint` is set but the exporter
+/// cannot be built.
+pub fn init_with_endpoint(
+    default_filter: &str,
+    endpoint: Option<&str>,
+) -> Result<Option<Telemetry>, TelemetryError> {
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
     let json_layer = tracing_subscriber::fmt::layer().json();
@@ -78,16 +94,26 @@ pub fn init(default_filter: &str) -> Result<Option<Telemetry>, TelemetryError> {
         .with(env_filter)
         .with(json_layer);
 
-    if !collector_configured() {
+    let Some(endpoint) = endpoint.filter(|value| !value.trim().is_empty()) else {
         base.init();
         return Ok(None);
-    }
+    };
 
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
+        .with_endpoint(endpoint)
         .build()?;
+    // The default batch processor batches on its own thread, which has no tokio
+    // reactor for the async HTTP client; the async-runtime processor batches on
+    // the runtime that is driving the process.
+    let processor =
+        opentelemetry_sdk::trace::span_processor_with_async_runtime::BatchSpanProcessor::builder(
+            exporter,
+            opentelemetry_sdk::runtime::Tokio,
+        )
+        .build();
     let provider = SdkTracerProvider::builder()
-        .with_batch_exporter(exporter)
+        .with_span_processor(processor)
         .with_resource(resource())
         .build();
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
@@ -99,11 +125,15 @@ pub fn init(default_filter: &str) -> Result<Option<Telemetry>, TelemetryError> {
     Ok(Some(Telemetry { provider }))
 }
 
-/// Whether an OTLP endpoint is named in the environment.
-fn collector_configured() -> bool {
+/// The OTLP endpoint named in the environment, if any.
+fn collector_endpoint() -> Option<String> {
     [OTLP_TRACES_ENDPOINT, OTLP_ENDPOINT]
         .iter()
-        .any(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()))
+        .find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
 }
 
 /// The resource describing this process, with the service name from
@@ -118,14 +148,14 @@ fn resource() -> Resource {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_SERVICE_NAME, OTLP_ENDPOINT, OTLP_TRACES_ENDPOINT, collector_configured};
+    use super::{DEFAULT_SERVICE_NAME, OTLP_ENDPOINT, OTLP_TRACES_ENDPOINT, collector_endpoint};
 
     #[test]
     fn no_endpoint_means_no_exporter() {
         // The test binary does not set the OTLP variables; assert the negative
         // branch so the default stays inert.
         if std::env::var(OTLP_ENDPOINT).is_err() && std::env::var(OTLP_TRACES_ENDPOINT).is_err() {
-            assert!(!collector_configured());
+            assert!(collector_endpoint().is_none());
         }
     }
 

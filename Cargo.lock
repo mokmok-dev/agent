@@ -112,6 +112,7 @@ dependencies = [
  "opentelemetry_sdk",
  "serde_json",
  "thiserror",
+ "tokio",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",

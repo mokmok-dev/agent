@@ -106,6 +106,10 @@
                 skills
                 rustToolchain
                 sccache
+                # The OTLP collector the daemon exports spans to. `otelcol` with
+                # `nix/otelcol.yaml` prints spans to its stdout; point the
+                # daemon's `OTEL_EXPORTER_OTLP_ENDPOINT` at it to see a trace.
+                opentelemetry-collector
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ mold ];
 
