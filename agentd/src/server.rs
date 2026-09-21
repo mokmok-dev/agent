@@ -580,7 +580,9 @@ async fn handle_inbound_inner(
             }
             // Correlate the event with the trace it carried without adopting or
             // rewriting that context: the convention is a link, not a parent.
-            crate::semconv::link_event(&event);
+            if !crate::semconv::link_event(&event) && event.traceparent.is_some() {
+                tracing::debug!("an event traceparent could not be linked to the current span");
+            }
             event.normalize_traceparent();
             event.set_provenance(principal.source());
             if let Err(error) = log.publish(event).await {

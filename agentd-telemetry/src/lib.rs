@@ -38,11 +38,18 @@ const DEFAULT_SERVICE_NAME: &str = "agentd";
 #[derive(Debug, Error)]
 pub enum TelemetryError {
     /// The OTLP exporter could not be built.
+    ///
+    /// The cause is a boxed error rather than the exporter's own type, so this
+    /// crate does not force consumers to depend on `opentelemetry-otlp` to read
+    /// or match the failure.
     #[error("failed to build the OTLP span exporter: {0}")]
-    Exporter(#[from] opentelemetry_otlp::ExporterBuildError),
-    /// [`init_with_endpoint`] was called without an endpoint.
-    #[error("a traces endpoint is required")]
-    MissingEndpoint,
+    Exporter(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl From<opentelemetry_otlp::ExporterBuildError> for TelemetryError {
+    fn from(error: opentelemetry_otlp::ExporterBuildError) -> Self {
+        Self::Exporter(Box::new(error))
+    }
 }
 
 /// The live tracing provider, kept so it can be shut down explicitly at exit
@@ -80,6 +87,11 @@ impl Telemetry {
 ///
 /// Returns [`TelemetryError::Exporter`] when a collector is configured but the
 /// exporter cannot be built.
+///
+/// # Panics
+///
+/// Panics if a global tracing subscriber is already installed, like
+/// `tracing_subscriber::util::SubscriberInitExt::init`. Call it once, at startup.
 pub fn init(default_filter: &str) -> Result<Option<Telemetry>, TelemetryError> {
     match endpoint_choice(
         non_empty_env(OTLP_TRACES_ENDPOINT),
@@ -89,8 +101,8 @@ pub fn init(default_filter: &str) -> Result<Option<Telemetry>, TelemetryError> {
             install_logs_only(default_filter);
             Ok(None)
         },
-        Endpoint::FromEnvironment => install(default_filter, None),
-        Endpoint::Verbatim(endpoint) => install(default_filter, Some(&endpoint)),
+        Endpoint::FromEnvironment => install(default_filter, None).map(Some),
+        Endpoint::Verbatim(endpoint) => install(default_filter, Some(&endpoint)).map(Some),
     }
 }
 
@@ -119,17 +131,24 @@ fn endpoint_choice(
 }
 
 /// Installs the subscriber with a **verbatim** traces endpoint, for tests and
-/// callers that hold a complete URL (including the `/v1/traces` path) rather
-/// than the standard environment.
+/// callers that hold a complete URL (including the `/v1/traces` path).
+///
+/// This is not the base collector URL: unlike [`init`], the path is not
+/// appended. For a base URL, set `OTEL_EXPORTER_OTLP_ENDPOINT` and call
+/// [`init`] instead.
 ///
 /// # Errors
 ///
 /// Returns [`TelemetryError::Exporter`] when the exporter cannot be built.
-pub fn init_with_endpoint(
+///
+/// # Panics
+///
+/// Panics if a global tracing subscriber is already installed; see [`init`].
+pub fn init_with_traces_endpoint(
     default_filter: &str,
     endpoint: &str,
 ) -> Result<Telemetry, TelemetryError> {
-    install(default_filter, Some(endpoint))?.ok_or(TelemetryError::MissingEndpoint)
+    install(default_filter, Some(endpoint))
 }
 
 /// Installs the log-only subscriber when no collector is configured.
@@ -148,7 +167,7 @@ fn install_logs_only(default_filter: &str) {
 fn install(
     default_filter: &str,
     traces_endpoint: Option<&str>,
-) -> Result<Option<Telemetry>, TelemetryError> {
+) -> Result<Telemetry, TelemetryError> {
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
     let json_layer = tracing_subscriber::fmt::layer().json();
@@ -180,7 +199,7 @@ fn install(
 
     base.with(tracing_opentelemetry::layer().with_tracer(tracer))
         .init();
-    Ok(Some(Telemetry { provider }))
+    Ok(Telemetry { provider })
 }
 
 /// The value of `name` when it is set and not blank.

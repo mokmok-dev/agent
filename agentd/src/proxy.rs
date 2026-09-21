@@ -595,7 +595,7 @@ where
         .traceparent()
         .and_then(|value| Traceparent::parse(value).ok())
     {
-        crate::semconv::link_traceparent(
+        let _linked = crate::semconv::link_traceparent(
             &traceparent,
             vec![
                 crate::semconv::Attribute::new("server.address", host.clone()),

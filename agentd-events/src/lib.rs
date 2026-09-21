@@ -116,7 +116,8 @@ pub struct Event {
     /// The `CloudEvents` extension attribute `traceparent`: the W3C Trace
     /// Context of the work that produced the event, so a consumer can correlate
     /// it with the spans on the same journey (see [`trace`](crate::trace)).
-    /// Optional; when present it is validated on ingress.
+    /// Optional; when present it is validated on ingress. Use
+    /// [`parsed_traceparent`](Event::parsed_traceparent) for the parsed view.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub traceparent: Option<String>,
     /// The `CloudEvents` `data` payload.
@@ -180,13 +181,24 @@ impl Event {
         self
     }
 
-    /// The parsed `traceparent` extension attribute, or `None` when it is absent
-    /// or malformed.
+    /// Sets the `traceparent` extension attribute in place, mirroring
+    /// [`set_provenance`](Event::set_provenance) for a caller holding `&mut self`.
+    pub fn set_traceparent(
+        &mut self,
+        traceparent: &Traceparent,
+    ) {
+        self.traceparent = Some(traceparent.to_header());
+    }
+
+    /// The parsed `traceparent` extension attribute, or `None` when the field is
+    /// absent or malformed.
     ///
-    /// A value that is present but malformed is reported by [`Event::validate`]
-    /// on ingress, so this only has to tolerate absence.
+    /// This is the parsed view of the public [`traceparent`](Event::traceparent)
+    /// field, which holds the raw string. A value that is present but malformed
+    /// is reported by [`Event::validate`] on ingress, so this only has to
+    /// tolerate absence.
     #[must_use]
-    pub fn traceparent(&self) -> Option<Traceparent> {
+    pub fn parsed_traceparent(&self) -> Option<Traceparent> {
         self.traceparent
             .as_deref()
             .and_then(|value| Traceparent::parse(value).ok())
@@ -194,11 +206,12 @@ impl Event {
 
     /// Rewrites the `traceparent` extension attribute into the canonical W3C
     /// form (lowercase ids, unknown flag bits zeroed) when it is present and
-    /// valid, so the stored value matches what [`Event::traceparent`] parses.
+    /// valid, so the stored value matches what
+    /// [`parsed_traceparent`](Event::parsed_traceparent) returns.
     ///
     /// A malformed value is left untouched for [`Event::validate`] to reject.
     pub fn normalize_traceparent(&mut self) {
-        if let Some(parsed) = self.traceparent() {
+        if let Some(parsed) = self.parsed_traceparent() {
             self.traceparent = Some(parsed.to_header());
         }
     }
@@ -437,18 +450,18 @@ mod tests {
                 .expect("valid");
         let event = test_event("test.event").with_traceparent(&traceparent);
 
-        assert_eq!(event.traceparent(), Some(traceparent));
+        assert_eq!(event.parsed_traceparent(), Some(traceparent));
         let raw = serde_json::to_string(&event).expect("should serialize");
         assert!(raw.contains("\"traceparent\":"));
         let decoded: Event = serde_json::from_str(&raw).expect("should deserialize");
-        assert_eq!(decoded.traceparent(), event.traceparent());
+        assert_eq!(decoded.parsed_traceparent(), event.parsed_traceparent());
     }
 
     #[test]
     fn absent_traceparent_is_omitted_and_parses_to_none() {
         let event = test_event("test.event");
 
-        assert_eq!(event.traceparent(), None);
+        assert_eq!(event.parsed_traceparent(), None);
         let raw = serde_json::to_string(&event).expect("serialize");
         assert!(!raw.contains("traceparent"));
     }

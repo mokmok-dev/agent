@@ -80,7 +80,7 @@ async fn a_traces_endpoint_is_used_verbatim() {
     let endpoint = format!("http://127.0.0.1:{port}/v1/traces");
 
     let telemetry =
-        agentd_telemetry::init_with_endpoint("info", &endpoint).expect("initialization");
+        agentd_telemetry::init_with_traces_endpoint("info", &endpoint).expect("initialization");
     emit_span();
     telemetry.shutdown();
 

@@ -22,6 +22,10 @@ pub const TRACEPARENT_ATTR: &str = "traceparent";
 const VERSION: &str = "00";
 
 /// A parsed W3C Trace Context `traceparent`.
+///
+/// Only version `00` is accepted: the daemon and its nodes all speak it, and a
+/// newer version's leading fields cannot be assumed to have the same layout, so
+/// an unknown version is rejected rather than parsed speculatively.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Traceparent {
     /// The 16-byte trace id, as 32 lowercase hex digits.
@@ -142,6 +146,15 @@ impl std::fmt::Display for Traceparent {
         formatter: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         formatter.write_str(&self.to_header())
+    }
+}
+
+impl std::str::FromStr for Traceparent {
+    type Err = TraceparentError;
+
+    /// Parses a `traceparent` value; see [`Traceparent::parse`].
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
     }
 }
 

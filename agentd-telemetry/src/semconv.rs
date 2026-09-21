@@ -75,30 +75,35 @@ pub fn current_traceparent() -> Option<Traceparent> {
     Traceparent::parse(&header).ok()
 }
 
-/// Attaches `event`'s remote trace context to the current span as a link.
+/// Attaches `event`'s remote trace context to the current span as a link,
+/// returning whether a link was attached.
 ///
 /// This is the consumer side of the convention: the event's context is not
-/// adopted as a parent and is not modified, only correlated.
-pub fn link_event(event: &Event) {
-    let Some(traceparent) = event.traceparent() else {
-        return;
+/// adopted as a parent and is not modified, only correlated. `false` means the
+/// event carried no valid trace context.
+#[must_use]
+pub fn link_event(event: &Event) -> bool {
+    let Some(traceparent) = event.parsed_traceparent() else {
+        return false;
     };
-    link_traceparent(&traceparent, event_values(event));
+    link_traceparent(&traceparent, event_values(event))
 }
 
 /// Attaches a remote trace context to the current span as a link, with `values`
-/// describing what it came from.
+/// describing what it came from. Returns `false` when the context is invalid.
+#[must_use]
 pub fn link_traceparent(
     traceparent: &Traceparent,
     values: Vec<KeyValue>,
-) {
+) -> bool {
     use opentelemetry::trace::TraceContextExt as _;
     let Some(span_context) = remote_span_context(traceparent) else {
-        return;
+        return false;
     };
     opentelemetry::Context::current()
         .span()
         .add_link(span_context, values);
+    true
 }
 
 #[cfg(test)]
@@ -144,7 +149,7 @@ mod tests {
 
     #[test]
     fn linking_an_event_without_a_traceparent_is_a_noop() {
-        link_event(&Event::new("agent.inbox", json!({})));
+        assert!(!link_event(&Event::new("agent.inbox", json!({}))));
     }
 
     #[test]
@@ -162,7 +167,9 @@ mod tests {
         let span = tracer.start("test.span");
         let context = opentelemetry::Context::current_with_span(span);
         let guard = context.clone().attach();
-        link_event(&Event::new("agent.inbox", json!({})).with_traceparent(&traceparent()));
+        assert!(link_event(
+            &Event::new("agent.inbox", json!({})).with_traceparent(&traceparent())
+        ));
         context.span().end();
         drop(guard);
 
