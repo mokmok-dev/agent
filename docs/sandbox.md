@@ -340,7 +340,12 @@ root is re-bound read-only; a `deny` nested in a write root is masked after the
 binds, so a later mount overrides the earlier grant. Unlike macOS, that mask
 hides a denied directory entirely rather than carving it out read-only, and
 `AF_UNIX` sockets are not path-scoped because `--unshare-net` does not isolate
-them — stated gaps.
+them — stated gaps. The temp directory is not masked: a `tmpfs` over `/tmp`
+would hide a granted read under it, and the daemon socket itself, which defaults
+to `$TMPDIR/agentd/agentd.sock` when `XDG_RUNTIME_DIR` is unset. `/tmp` is the
+host directory like any other: read-only through the broad read grant, readable
+unless a `deny` names it, and writable only through a `write` entry or the
+scratch directory a command gets as its `TMPDIR`.
 
 **When bubblewrap is absent**, the [`agentd-sandbox-helper`](#the-landlock-helper)
 binary applies a Landlock allowlist and a seccomp deny-list before `exec`. The
