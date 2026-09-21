@@ -116,7 +116,14 @@
                 # daemon's `OTEL_EXPORTER_OTLP_ENDPOINT` at it to see a trace.
                 opentelemetry-collector
               ]
-              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ mold ];
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                # The confinement backend. On Linux a policy that needs a
+                # private network namespace fails closed without bubblewrap
+                # (`agentd-sandbox/src/linux.rs`), so the dev shell ships it
+                # rather than leaving the strongest confinement to the host.
+                bubblewrap
+                mold
+              ];
 
             shellHook = ''
               export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
