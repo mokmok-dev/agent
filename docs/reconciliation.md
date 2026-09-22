@@ -173,9 +173,9 @@ These are recorded so they are not re-proposed as gaps.
 | --- | --- | --- | --- |
 | 0 | This document: the adopt/reject record | — | Done |
 | 1 | Observability: `traceparent` propagation and OTLP export | High | Done (`71dd695`, `f6b4c10`, `b969086`, `c8ca532`) |
-| 2 | Isolation reproducibility: ship `bubblewrap` in the dev shell | High | Done (`b6414a1`; the package was already in the Linux dev shell when this row was still marked Open — the document was written against `c8ca532`) |
+| 2 | Isolation reproducibility: ship `bubblewrap` in the dev shell | High | Done (`b6414a1`; the package was already in the Linux dev shell when this row was written, against `c8ca532`) |
 | 3 | Approval usability: bound the wait, ship an approver client | High | Done (`352e67d`, `d15d14a`, `f9eb1a2`) |
-| 4 | Unified-diff patcher: parse, `apply`, `inverse`, recount, dry-run | Medium | Done (`dfbd778`, `8c84328`, `f512342`) |
+| 4 | Unified-diff patcher: parse, `apply`, `inverse`, recount, dry-run | Medium | Done (`dfbd778`, `8c84328`, `f512342`, `5d06995`, `e40d85c`) |
 | 5 | Deferred: `process-compose`, a plugin registry, remote child restart | Low | Not started |
 
 No phase starts until its predecessor is agreed.
