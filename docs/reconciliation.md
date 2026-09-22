@@ -203,7 +203,7 @@ No phase starts until its predecessor is agreed.
 ### Phase 3 detail: approval usability
 
 - Bound the wait: when `session.permission.requested` is published, start a
-  deadline and publish `session.permission.decided` (`cancelled`) on expiry,
+  deadline and publish `session.permission.cancelled` on expiry,
   mirroring the egress timeout. The deadline belongs to the stateful side — the
   `SessionManager` (`agentd/src/session.rs`), not the pure `AcpBridge` — and a
   late human decision stays harmless because an unknown `request_id` is ignored
@@ -245,7 +245,7 @@ Re-establishing the ledger from a clean tree:
 | OverlayFS, pause, `process-compose` are absent | `rg -i 'overlay\|lowerdir\|sigstop\|process-compose' --glob '!target'` |
 | The patcher parses, applies, and inverts | `cargo test -p agentd-node --lib -- patch::` |
 | `bubblewrap` ships in the dev shell | `rg -n bubblewrap flake.nix`, `nix develop -c bwrap --version` |
-| The one-command launch starts, under bubblewrap | `nix run . -- up --workdir <dir> …` with `bwrap` on `PATH`: the process tree holds `bwrap --unshare-all … agentd-agent …` and no `agentd-sandbox-helper`, and the log runs `session.started` → `sandbox.session.started` → `agent.session.started` |
+| The one-command launch starts, under bubblewrap | `nix run . -- up --workdir <dir> …` with `bwrap` on `PATH`: the process tree holds `bwrap --unshare-all … agentd-agent …` and no `agentd-sandbox-helper`, and the log runs `session.started` → `sandbox.process.started` → `agent.conversation.started` |
 | The tests that need `bubblewrap` run, rather than skip | `cargo test -p agentd-sandbox --test egress_flow` with `bwrap` on `PATH` **outside** the dev shell: `nix develop` sets `NIX_BUILD_TOP`, which the test's own probe reads as "cannot nest a user namespace" |
 | The permission wait is bounded | `rg -n 'permission-approval-secs' agentd/src/main.rs`, `cargo test -p agentd --lib -- session::tests` |
 | An approver binary ships | `ls agentd-node/src/bin`, `cargo test -p agentd --test approve` |
@@ -255,7 +255,7 @@ Re-establishing the ledger from a clean tree:
 
 - Phase 3: **resolved** — the deadline is `serve`-side
   (`--session-permission-approval-secs`), because only a bridged session
-  (`--session-bridge`) can ask for a permission and `up` starts no bridge; the
+  (`--session-protocol`) can ask for a permission and `up` starts no bridge; the
   wait stays opt-in, so an operator who wants a bound sets one rather than
   inheriting it.
 - Phase 4: **resolved** — one `apply_patch` tool beside `shell` is enough. The

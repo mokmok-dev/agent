@@ -36,9 +36,8 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::bridge::{
-    Action, Bridge, Protocol, SESSION_PERMISSION_CANCELLED, SESSION_PERMISSION_DENIED,
-    SESSION_PERMISSION_GRANTED, SESSION_PERMISSION_REQUESTED, permission_cancelled,
-    session_subject,
+    Action, Bridge, Protocol, SESSION_PERMISSION_REQUESTED, is_permission_decision,
+    permission_cancelled, session_subject,
 };
 
 /// The largest protocol frame accepted from a bridged child before the frame is
@@ -325,9 +324,7 @@ impl SessionManager {
             SESSION_REQUESTED => self.launch(event),
             SESSION_STATUS_REQUESTED => self.report_status().await,
             SESSION_PERMISSION_REQUESTED => self.await_approval(event, pending),
-            SESSION_PERMISSION_GRANTED
-            | SESSION_PERMISSION_DENIED
-            | SESSION_PERMISSION_CANCELLED => {
+            r#type if is_permission_decision(r#type) => {
                 if let Some(key) = RequestKey::of(event) {
                     pending.remove(&key);
                 }
@@ -1135,8 +1132,8 @@ mod tests {
         SESSION_STATUS_REQUESTED, SessionManager, Supervision,
     };
     use crate::bridge::{
-        McpProtocol, PROTOCOL_INBOUND, SESSION_PERMISSION_CANCELLED, SESSION_PERMISSION_DENIED,
-        SESSION_PERMISSION_GRANTED, SESSION_PERMISSION_REQUESTED, permission_granted,
+        McpProtocol, PROTOCOL_INBOUND, SESSION_PERMISSION_CANCELLED, SESSION_PERMISSION_REQUESTED,
+        is_permission_decision, permission_granted,
     };
     use agentd_events::{Event, EventLog, LogEntry};
     use agentd_sandbox::{
@@ -1637,16 +1634,12 @@ mod tests {
         events
             .iter()
             .filter(|event| {
-                matches!(
-                    event.r#type.as_str(),
-                    SESSION_PERMISSION_GRANTED
-                        | SESSION_PERMISSION_DENIED
-                        | SESSION_PERMISSION_CANCELLED
-                ) && event
-                    .data
-                    .get("request_id")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(request_id)
+                is_permission_decision(&event.r#type)
+                    && event
+                        .data
+                        .get("request_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(request_id)
             })
             .cloned()
             .collect()
@@ -1673,7 +1666,7 @@ mod tests {
         // No approver answers, so the manager cancels the request itself.
         let decided = wait_for(&mut subscriber, SESSION_PERMISSION_CANCELLED).await;
         assert_eq!(decided.data["request_id"], "7");
-        assert_eq!(decided.data["cancelled"], true);
+        assert_eq!(decided.data["decision"], "cancelled");
         assert_eq!(
             decided.subject.as_deref(),
             Some("session:perm-1"),
@@ -1770,7 +1763,7 @@ mod tests {
         for _ in 0..2 {
             let decided = wait_for(&mut subscriber, SESSION_PERMISSION_CANCELLED).await;
             assert_eq!(decided.data["request_id"], "7");
-            assert_eq!(decided.data["cancelled"], true);
+            assert_eq!(decided.data["decision"], "cancelled");
             cancelled.push(decided.subject.clone().expect("a subject"));
         }
         cancelled.sort();
@@ -1808,7 +1801,7 @@ mod tests {
         let asked = wait_for(&mut subscriber, SESSION_PERMISSION_REQUESTED).await;
         assert_eq!(asked.data["request_id"], "7");
         let cancelled = wait_for(&mut subscriber, SESSION_PERMISSION_CANCELLED).await;
-        assert_eq!(cancelled.data["cancelled"], true);
+        assert_eq!(cancelled.data["decision"], "cancelled");
         assert_eq!(wait_for_reply(&replies).await.lines().count(), 1);
 
         // The late decision is recorded, but the bridge no longer holds the
@@ -1823,7 +1816,7 @@ mod tests {
         assert_eq!(
             decisions
                 .iter()
-                .filter(|event| event.data["cancelled"] == true)
+                .filter(|event| event.data["decision"] == "cancelled")
                 .count(),
             1,
             "only the deadline cancels the request"

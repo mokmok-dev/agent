@@ -101,12 +101,27 @@ where a design doc names a protocol's own concept: an ACP `sessionId` returned b
 
 ## Event types
 
-An event `type` is `<emitter>.<noun>.<verb>`. The noun comes from this document
-— never a mechanism (`bridge`) or a protocol (`acp`) — and the verb is one of
-`requested`, `granted`, `denied`, `cancelled`, `started`, `exited`, `completed`,
-`failed`, `ready`. The emitter is who is accountable for the event, not who
-wrote the bytes: the daemon appends and therefore owns `sandbox.*`, `session.*`,
-`error.*`, and `daemon.*`.
+An event `type` is `<emitter>.<noun>.<verb>`. The emitter is who is accountable
+for the event, not who wrote the bytes: the daemon appends and therefore owns
+`sandbox.*`, `session.*`, `error.*`, and `daemon.*`.
+
+The rule binds the `agent.*`, `sandbox.*`, and `session.*` families:
+
+- The noun comes from this document — never a mechanism (`bridge`) or one
+  protocol's name (`acp`). `session.protocol.*` is the channel, not a protocol:
+  the payload's `protocol` field names which one.
+- The verb is one of `requested`, `granted`, `denied`, `cancelled`, `started`,
+  `exited`, `completed`, `failed`, `ready`.
+- A request is answered by exactly one decision, and a decision's outcome is its
+  verb: never `decided`.
+
+Two kinds of name sit outside the rule, and neither may be extended casually:
+
+- **Notices** — `error.*` and `daemon.*` are transient wire messages, not
+  recorded events, and name a condition (`error.lagged`) rather than a verb.
+- **Noun-only types** — `agent.inbox`, `agent.message`, `agent.tool_result`,
+  `agent.patch.applied`, `session.status`, and `sandbox.violation.*` name what
+  the event *is*; there is one event per thing, so no verb is needed.
 
 ### Daemon-produced (reserved to `authority`)
 
@@ -121,10 +136,10 @@ wrote the bytes: the daemon appends and therefore owns `sandbox.*`, `session.*`,
 | `session.protocol.inbound` / `session.protocol.outbound` | One protocol message from / to a bridged child |
 | `session.protocol.ready` / `session.protocol.failed` | The child's protocol handshake completed, or failed |
 | `session.prompt.requested` | A client asks a bridged agent to start a prompt turn |
-| `session.prompt.completed` | That prompt turn ended, carrying its stop reason |
+| `session.prompt.completed` / `session.prompt.failed` | That prompt turn ended with its stop reason, or the child answered it with an error |
 | `session.permission.requested` | A bridged child asks for permission for a tool call |
 | `session.permission.granted` / `.denied` / `.cancelled` | The approver allowed / refused / withdrew it |
-| `session.egress.requested` / `.granted` / `.denied` | A destination outside the egress allowlist, and its decision |
+| `session.egress.requested` / `.granted` / `.denied` / `.cancelled` | A destination outside the egress allowlist, and its decision |
 | `sandbox.permission.requested` | A command or resource access needs a decision |
 | `sandbox.permission.granted` / `.denied` / `.cancelled` | A static rule or an approver allowed / refused it, or nobody decided in time |
 | `sandbox.exec.completed` | Terminal state of a one-shot execution (exit code, duration, output sizes) |
@@ -156,6 +171,7 @@ wrote the bytes: the daemon appends and therefore owns `sandbox.*`, `session.*`,
 | `container`, `jail`, `VM` | The boundary is the platform's own isolation, not a machine. | `Sandbox`, `confinement` |
 | `adapter`, `codec`, `driver` as a synonym for `Bridge` | They lose the symmetry of the two directions, collide with the tokio I/O driver, or sound byte-level only. (A provider adapter is a different thing and keeps its name.) | `Bridge` (`McpBridge`, `AcpBridge`) |
 | `message` meaning Event | Four concepts already need the word. | `Event`, `notice` |
+| `decided` as an event suffix or outcome value | "Decide" is the verb; a decision's outcome is one of the three above. | `granted`, `denied`, `cancelled` |
 | `supervisor` as a type | The type is named after what it does to its unit. | `SessionManager` |
 
 ## Decisions this document records

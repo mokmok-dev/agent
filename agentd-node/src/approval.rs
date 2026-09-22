@@ -31,18 +31,6 @@ const REQUEST_KINDS: [RequestKind; 3] = [
     RequestKind::Egress,
 ];
 
-/// The decision types, which answer a request carrying the same `request_id`.
-const DECISION_TYPES: &[&str] = &[
-    "sandbox.permission.granted",
-    "sandbox.permission.denied",
-    "sandbox.permission.cancelled",
-    "session.permission.granted",
-    "session.permission.denied",
-    "session.permission.cancelled",
-    "session.egress.granted",
-    "session.egress.denied",
-];
-
 /// An approver allows a bridged agent's request, selecting one of the options
 /// the agent offered.
 const SESSION_PERMISSION_GRANTED: &str = "session.permission.granted";
@@ -51,6 +39,29 @@ const SESSION_PERMISSION_GRANTED: &str = "session.permission.granted";
 const SESSION_PERMISSION_DENIED: &str = "session.permission.denied";
 /// Nobody decided a bridged agent's request, so it is withdrawn.
 const SESSION_PERMISSION_CANCELLED: &str = "session.permission.cancelled";
+/// An approver allows a destination outside the session's static allowlist.
+const EGRESS_GRANTED: &str = "session.egress.granted";
+/// An approver refuses that destination.
+const EGRESS_DENIED: &str = "session.egress.denied";
+/// Nobody decided that destination, so it is withdrawn.
+const EGRESS_CANCELLED: &str = "session.egress.cancelled";
+
+/// The decision types, which answer a request carrying the same `request_id`.
+///
+/// The sandbox's types are spelled out here because this crate must not depend
+/// on the daemon binary that produces them; a drift fails
+/// `agentd/tests/approve.rs`, which drives the real daemon.
+const DECISION_TYPES: &[&str] = &[
+    "sandbox.permission.granted",
+    "sandbox.permission.denied",
+    "sandbox.permission.cancelled",
+    SESSION_PERMISSION_GRANTED,
+    SESSION_PERMISSION_DENIED,
+    SESSION_PERMISSION_CANCELLED,
+    EGRESS_GRANTED,
+    EGRESS_DENIED,
+    EGRESS_CANCELLED,
+];
 
 /// The `decision` value on a sandbox request that waits for an approver; an
 /// `auto` one was already decided by a static policy rule.
@@ -214,6 +225,7 @@ impl Pending {
                     SESSION_PERMISSION_GRANTED,
                     json!({
                         "request_id": self.request_id,
+                        "decision": "granted",
                         "option_id": option_id,
                     }),
                 )
@@ -225,6 +237,7 @@ impl Pending {
                         SESSION_PERMISSION_DENIED,
                         json!({
                             "request_id": self.request_id,
+                            "decision": "denied",
                             "option_id": option_id,
                         }),
                     )
@@ -232,16 +245,17 @@ impl Pending {
             ),
             (RequestKind::Session, Decision::Cancelled) => self.cancellation(),
             (RequestKind::Egress, Decision::Granted) => Event::new(
-                "session.egress.granted",
-                self.egress_data("granted by an approver"),
+                EGRESS_GRANTED,
+                self.egress_data("granted", "granted by an approver"),
             ),
-            (RequestKind::Egress, Decision::Denied | Decision::Cancelled) => {
-                let reason = match decision {
-                    Decision::Denied => "denied by an approver",
-                    _ => "cancelled by an approver",
-                };
-                Event::new("session.egress.denied", self.egress_data(reason))
-            },
+            (RequestKind::Egress, Decision::Denied) => Event::new(
+                EGRESS_DENIED,
+                self.egress_data("denied", "denied by an approver"),
+            ),
+            (RequestKind::Egress, Decision::Cancelled) => Event::new(
+                EGRESS_CANCELLED,
+                self.egress_data("cancelled", "cancelled by an approver"),
+            ),
             (RequestKind::Sandbox, decision) => {
                 let (r#type, value) = match decision {
                     Decision::Granted => ("sandbox.permission.granted", "granted"),
@@ -271,7 +285,7 @@ impl Pending {
     fn cancellation(&self) -> Event {
         Self::answer(
             SESSION_PERMISSION_CANCELLED,
-            json!({ "request_id": self.request_id, "cancelled": true }),
+            json!({ "request_id": self.request_id, "decision": "cancelled" }),
         )
     }
 
@@ -309,10 +323,12 @@ impl Pending {
     /// The proxy's decision payload, echoing the destination it asked about.
     fn egress_data(
         &self,
+        decision: &str,
         reason: &str,
     ) -> Value {
         json!({
             "request_id": self.request_id,
+            "decision": decision,
             "host": self.data.get("host").cloned().unwrap_or(Value::Null),
             "port": self.data.get("port").cloned().unwrap_or(Value::Null),
             "reason": reason,
@@ -543,7 +559,7 @@ mod tests {
         // Cancelling needs no option: the agent is told the outcome is cancelled.
         let cancelled = pending.decide(Decision::Cancelled, None).expect("cancel");
         assert_eq!(cancelled.r#type, "session.permission.cancelled");
-        assert_eq!(cancelled.data["cancelled"], true);
+        assert_eq!(cancelled.data["decision"], "cancelled");
         assert_eq!(cancelled.data.get("option_id"), None);
     }
 
@@ -569,7 +585,7 @@ mod tests {
         let asked = pending([&allow_only]);
         let denied = asked[0].decide(Decision::Denied, None).expect("deny");
         assert_eq!(denied.r#type, "session.permission.cancelled");
-        assert_eq!(denied.data["cancelled"], true);
+        assert_eq!(denied.data["decision"], "cancelled");
         assert_eq!(denied.data.get("option_id"), None);
     }
 

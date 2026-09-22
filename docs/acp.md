@@ -198,14 +198,15 @@ Event types this adds:
 | Type | Direction | Payload | Builder |
 | --- | --- | --- | --- |
 | `session.prompt.requested` | downlink | the prompt content blocks to send | `bridge::prompt_requested(blocks)` |
-| `session.protocol.inbound` | uplink | one agent JSON-RPC message (existing type) | `bridge::bridged_inbound` |
+| `session.protocol.inbound` | uplink | one agent JSON-RPC message (existing type) | `bridge::protocol_inbound` |
 | `session.permission.requested` | uplink | `request_id`, `tool_call`, `options` | — |
 | `session.permission.granted` | downlink | `request_id`, `option_id` (an allow option) | `bridge::permission_granted` |
 | `session.permission.denied` | downlink | `request_id`, `option_id` (a reject option) | `bridge::permission_denied` |
 | `session.permission.cancelled` | downlink | `request_id`, `cancelled: true` | `bridge::permission_cancelled` |
 | `session.protocol.ready` | uplink | the handshake completed | `bridge::PROTOCOL_READY` |
-| `session.protocol.failed` | uplink | the handshake or a turn failed | `bridge::PROTOCOL_FAILED` |
+| `session.protocol.failed` | uplink | the handshake failed, so the child cannot be driven | `bridge::PROTOCOL_FAILED` |
 | `session.prompt.completed` | uplink | a prompt turn ended, with its stop reason | `bridge::PROMPT_COMPLETED` |
+| `session.prompt.failed` | uplink | the child answered a prompt with an error | `bridge::PROMPT_FAILED` |
 
 ## The egress problem and its answer
 

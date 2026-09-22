@@ -293,6 +293,30 @@ async fn the_approver_lists_pending_requests_and_answers_them() {
     assert_eq!(sandbox_decision[0]["data"]["decision"], "granted");
     assert_eq!(sandbox_decision[0]["data"]["command"], "rm -rf /tmp/x");
 
+    // A cancellation is its own outcome, not a denial: the operator withdrew
+    // the request, and the log must not claim they refused it.
+    log.publish(agentd_sandbox::permission_requested(
+        "sandbox-1",
+        "11",
+        "urn:test:agent",
+        "ls",
+        agentd_sandbox::DECISION_PENDING,
+    ))
+    .await
+    .expect("publish a request");
+    assert_eq!(fixture.pending(), ["11"]);
+    let cancelled = fixture.decide(
+        &fixture.authority_token,
+        &["--request-id", "11", "--cancelled"],
+    );
+    assert!(
+        cancelled.contains("decided sandbox.permission.cancelled request_id=11 outcome=cancelled"),
+        "{cancelled}"
+    );
+    let recorded = fixture.decisions("11");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0]["data"]["decision"], "cancelled");
+
     // Nothing awaits a decision any more.
     assert!(fixture.pending().is_empty());
 

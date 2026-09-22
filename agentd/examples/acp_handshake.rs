@@ -328,7 +328,8 @@ async fn watch_for_turn(
                             .to_string(),
                     );
                 }
-                if event.r#type == agentd::bridge::PROTOCOL_FAILED
+                if event.r#type == agentd::bridge::PROMPT_FAILED
+                    || event.r#type == agentd::bridge::PROTOCOL_FAILED
                     || event.r#type == "session.exited"
                 {
                     return None;

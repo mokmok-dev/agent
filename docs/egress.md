@@ -304,9 +304,13 @@ request to an approver instead of denying it:
 1. A `CONNECT host:port` not on the allowlist publishes `session.egress.requested`
    with a `request_id`, and the proxy waits.
 2. An approver — any client with the `authority` claim — publishes
-   `session.egress.granted` / `session.egress.denied` with the same `request_id`.
-3. A grant opens the tunnel; a denial, or no decision within
-   `--session-egress-approval-secs`, answers `403`.
+   `session.egress.granted`, `session.egress.denied`, or
+   `session.egress.cancelled` with the same `request_id`.
+3. A grant opens the tunnel; a denial, a withdrawal, or the deadline the proxy
+   records as a `session.egress.cancelled` after
+   `--session-egress-approval-secs`, answers `403`. A request nobody decided is
+   recorded as cancelled, not denied, so the log never claims an operator
+   refused something they never saw.
 
 The `session.*` type is reserved to authority publishers, so an agent cannot
 approve its own egress — the same guarantee the sandbox makes for its permission
@@ -331,7 +335,7 @@ sequenceDiagram
         P-->>A: 200, then the tunnel (ciphertext only)
     else unlisted and an approver is configured
         P->>P: publish session.egress.requested (request_id)
-        V->>P: session.egress.granted / denied (same request_id)
+        V->>P: session.egress.granted / denied / cancelled (same request_id)
         alt granted
             P->>O: open the TCP connection
             P-->>A: 200, then the tunnel
@@ -352,7 +356,8 @@ forwarder** (`agentd-egress-forward`) that bridges loopback to the mounted
 socket; the Landlock helper's `NetPort` rules as the fallback for a loopback-TCP
 proxy; the model-driven backend selection, which fails closed without the
 required binary; the **egress approval flow** (`session.egress.requested` /
-`granted` / `denied`, correlated by `request_id`, timeout denies); and the
+`granted` / `denied` / `cancelled`, correlated by `request_id`, the deadline
+recording a cancellation); and the
 `--session-egress host:port` / `--session-egress-approval-secs SECS` /
 `--session-loopback` flags with the `NO_PROXY` injection.
 

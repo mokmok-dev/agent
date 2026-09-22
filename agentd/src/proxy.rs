@@ -33,6 +33,9 @@ pub const EGRESS_REQUESTED: &str = "session.egress.requested";
 pub const EGRESS_GRANTED: &str = "session.egress.granted";
 /// An approver's denial for an [`EGRESS_REQUESTED`], correlated by `request_id`.
 pub const EGRESS_DENIED: &str = "session.egress.denied";
+/// Nobody decided an [`EGRESS_REQUESTED`] before the deadline, so it was
+/// withdrawn. The tunnel is not opened.
+pub const EGRESS_CANCELLED: &str = "session.egress.cancelled";
 
 /// The largest request head (request line plus headers) the proxy reads before
 /// rejecting a connection. Bounds a pre-authentication client's memory.
@@ -147,7 +150,7 @@ impl Egress {
         self.ask(log, host, port, *timeout, traceparent).await
     }
 
-    /// Publishes a request and waits for a decision, denying on timeout.
+    /// Publishes a request and waits for a decision, cancelling on timeout.
     ///
     /// The child's `traceparent`, when it sent one, is recorded on the approval
     /// event so the request, the approval, and the child's own span share one
@@ -177,22 +180,25 @@ impl Egress {
         if await_egress_decision(&mut decisions, &request_id, timeout).await {
             return true;
         }
-        // Record the denial (a timeout, or the approver's own denial is already
-        // in the log).
-        let mut denied = Event::new(
-            EGRESS_DENIED,
+        // Record the cancellation: nobody decided within the deadline. An
+        // approver's own decision is already in the log, and a refusal is its
+        // own type, so the log never claims an operator refused a request they
+        // never saw.
+        let mut cancelled = Event::new(
+            EGRESS_CANCELLED,
             serde_json::json!({
                 "request_id": request_id,
+                "decision": "cancelled",
                 "host": host,
                 "port": port,
                 "reason": "no approval within the timeout",
             }),
         );
         if let Some(traceparent) = traceparent.and_then(|value| Traceparent::parse(value).ok()) {
-            denied = denied.with_traceparent(&traceparent);
+            cancelled = cancelled.with_traceparent(&traceparent);
         }
-        if let Err(error) = log.publish(denied).await {
-            tracing::error!(%error, "failed to record an egress denial");
+        if let Err(error) = log.publish(cancelled).await {
+            tracing::error!(%error, "failed to record an egress cancellation");
         }
         false
     }
@@ -200,7 +206,7 @@ impl Egress {
 
 /// Waits for a decision on `request_id`: the same shape as the sandbox approval
 /// (`check` for the exact id, ignore unrelated events, a lagged subscriber keeps
-/// waiting, the bus closing or the timeout is a denial).
+/// waiting, the bus closing or the timeout is a refusal).
 async fn await_egress_decision(
     receiver: &mut tokio::sync::broadcast::Receiver<LogEntry>,
     request_id: &str,
@@ -224,7 +230,7 @@ async fn await_egress_decision(
                     }
                     match event.r#type.as_str() {
                         EGRESS_GRANTED => return true,
-                        EGRESS_DENIED => return false,
+                        EGRESS_DENIED | EGRESS_CANCELLED => return false,
                         _ => {},
                     }
                 },
@@ -965,7 +971,8 @@ mod tests {
 
         let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
         let mut events = log.subscribe();
-        // No approver answers: the request is recorded, then the timeout denies.
+        // No approver answers: the request is recorded, then the deadline
+        // cancels it.
         assert!(
             !egress
                 .allows("api.example.com", 443, Some(traceparent))
@@ -981,11 +988,11 @@ mod tests {
             .find(|event| event.r#type == super::EGRESS_REQUESTED)
             .expect("an egress request must be recorded");
         assert_eq!(requested.traceparent.as_deref(), Some(traceparent));
-        let denied = seen
+        let cancelled = seen
             .iter()
-            .find(|event| event.r#type == super::EGRESS_DENIED)
-            .expect("a denial must be recorded");
-        assert_eq!(denied.traceparent.as_deref(), Some(traceparent));
+            .find(|event| event.r#type == super::EGRESS_CANCELLED)
+            .expect("a cancellation must be recorded");
+        assert_eq!(cancelled.traceparent.as_deref(), Some(traceparent));
     }
 
     #[tokio::test]

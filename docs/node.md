@@ -212,6 +212,12 @@ be writable: place the database in one session `write` entry.
   resetting state.
 - **Changing the filter does not reproject.** Events skipped under an earlier
   filter are not revisited; rebuild the projection to apply a new filter.
+- **A log written before a reducer rename does not reproject.** The agent's
+  reducer matches `agent.conversation.started`, so a rebuild over a log whose
+  history records the event's earlier name leaves the conversation table empty,
+  and the projection's checkpoint means an existing database stays empty too.
+  Start a fresh log, or name the conversation with `--conversation <id>`; the
+  events themselves are untouched either way.
 
 ## Testing
 
