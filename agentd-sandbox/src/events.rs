@@ -1,5 +1,5 @@
 //! The sandbox's `CloudEvents`: every permission decision and execution
-//! terminal state is published onto the event bus.
+//! terminal state is appended to the event log.
 
 use agentd_events::Event;
 use serde_json::json;
@@ -10,12 +10,14 @@ pub const PERMISSION_REQUESTED: &str = "sandbox.permission.requested";
 pub const PERMISSION_GRANTED: &str = "sandbox.permission.granted";
 /// A static policy rule refused the access; deny wins.
 pub const PERMISSION_DENIED: &str = "sandbox.permission.denied";
+/// Nobody decided the access in time, so it was withdrawn.
+pub const PERMISSION_CANCELLED: &str = "sandbox.permission.cancelled";
 /// Terminal state of an execution: exit code, duration, output sizes.
 pub const EXEC_COMPLETED: &str = "sandbox.exec.completed";
-/// A long-lived session was spawned.
-pub const SESSION_STARTED: &str = "sandbox.session.started";
-/// Terminal state of a long-lived session: exit code and duration.
-pub const SESSION_EXITED: &str = "sandbox.session.exited";
+/// A long-lived confined process was spawned.
+pub const PROCESS_STARTED: &str = "sandbox.process.started";
+/// Terminal state of a long-lived confined process: exit code and duration.
+pub const PROCESS_EXITED: &str = "sandbox.process.exited";
 
 /// The decision value on `requested` events decided immediately by a static
 /// rule. Human approval arrives in a later iteration; the correlation id is
@@ -90,6 +92,21 @@ pub fn permission_denied(
     )
 }
 
+/// Builds a `sandbox.permission.cancelled` event: nobody decided the request, so
+/// the sandbox withdrew it.
+#[must_use]
+pub fn permission_cancelled(
+    sandbox_id: &str,
+    request_id: &str,
+    agent_id: &str,
+    command: &str,
+) -> Event {
+    Event::new(
+        PERMISSION_CANCELLED,
+        permission_data(sandbox_id, request_id, agent_id, command, "cancelled"),
+    )
+}
+
 /// Builds a `sandbox.exec.completed` event.
 ///
 /// The argument count is the event contract; a struct would not shrink it.
@@ -123,42 +140,42 @@ pub fn exec_completed(
     Event::new(EXEC_COMPLETED, data)
 }
 
-/// Builds a `sandbox.session.started` event.
+/// Builds a `sandbox.process.started` event.
 #[must_use]
-pub fn session_started(
+pub fn process_started(
     sandbox_id: &str,
     request_id: &str,
     agent_id: &str,
     command: &str,
-    session_id: &str,
+    process_id: &str,
 ) -> Event {
     let data = json!({
         "sandbox_id": sandbox_id,
         "request_id": request_id,
-        "session_id": session_id,
+        "process_id": process_id,
         "agent_id": agent_id,
         "resource": RESOURCE_SHELL,
         "action": ACTION_EXEC,
         "command": command,
     });
-    Event::new(SESSION_STARTED, data)
+    Event::new(PROCESS_STARTED, data)
 }
 
-/// Builds a `sandbox.session.exited` event.
+/// Builds a `sandbox.process.exited` event.
 #[must_use]
-pub fn session_exited(
+pub fn process_exited(
     sandbox_id: &str,
     request_id: &str,
     agent_id: &str,
     command: &str,
-    session_id: &str,
+    process_id: &str,
     exit_code: i32,
     duration_ms: u64,
 ) -> Event {
     let data = json!({
         "sandbox_id": sandbox_id,
         "request_id": request_id,
-        "session_id": session_id,
+        "process_id": process_id,
         "agent_id": agent_id,
         "resource": RESOURCE_SHELL,
         "action": ACTION_EXEC,
@@ -166,15 +183,15 @@ pub fn session_exited(
         "exit_code": exit_code,
         "duration_ms": duration_ms,
     });
-    Event::new(SESSION_EXITED, data)
+    Event::new(PROCESS_EXITED, data)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTION_EXEC, DECISION_AUTO, EXEC_COMPLETED, PERMISSION_DENIED, PERMISSION_GRANTED,
-        PERMISSION_REQUESTED, RESOURCE_SHELL, exec_completed, permission_denied,
-        permission_granted, permission_requested,
+        ACTION_EXEC, DECISION_AUTO, EXEC_COMPLETED, PERMISSION_CANCELLED, PERMISSION_DENIED,
+        PERMISSION_GRANTED, PERMISSION_REQUESTED, RESOURCE_SHELL, exec_completed,
+        permission_cancelled, permission_denied, permission_granted, permission_requested,
     };
     use agentd_events::{DAEMON_SOURCE, SPEC_VERSION};
     use serde_json::json;
@@ -204,11 +221,14 @@ mod tests {
     fn decision_events_flip_the_type_and_decision() {
         let granted = permission_granted("sbx-1", "req-1", "coder-1", "ls");
         let denied = permission_denied("sbx-1", "req-1", "coder-1", "ls");
+        let cancelled = permission_cancelled("sbx-1", "req-1", "coder-1", "ls");
 
         assert_eq!(granted.r#type, PERMISSION_GRANTED);
         assert_eq!(granted.data["decision"], json!("granted"));
         assert_eq!(denied.r#type, PERMISSION_DENIED);
         assert_eq!(denied.data["decision"], json!("denied"));
+        assert_eq!(cancelled.r#type, PERMISSION_CANCELLED);
+        assert_eq!(cancelled.data["decision"], json!("cancelled"));
     }
 
     #[test]

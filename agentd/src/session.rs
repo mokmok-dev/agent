@@ -8,7 +8,7 @@
 //! The manager runs the *configured* command, never a command carried in the
 //! event: `session.requested` supplies only session parameters (above all a
 //! `session_id`), so a client cannot turn it into arbitrary execution. The
-//! sandbox confinement lifecycle (`sandbox.session.*`) and the daemon's managed
+//! sandbox confinement lifecycle (`sandbox.process.*`) and the daemon's managed
 //! lifecycle (`session.*`) are separate namespaces.
 //!
 //! Supervision is opt-in: a session may be restarted up to a bounded number of

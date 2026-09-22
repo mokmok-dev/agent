@@ -10,7 +10,10 @@ use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;
 
 use crate::error::SandboxError;
-use crate::events::{self, DECISION_AUTO, DECISION_PENDING, PERMISSION_DENIED, PERMISSION_GRANTED};
+use crate::events::{
+    self, DECISION_AUTO, DECISION_PENDING, PERMISSION_CANCELLED, PERMISSION_DENIED,
+    PERMISSION_GRANTED,
+};
 use crate::executor::{ConfinedProcessExecutor, ExecResult, Executor};
 use crate::policy::Policy;
 use crate::violation;
@@ -162,19 +165,19 @@ impl Sandbox {
         Ok(result)
     }
 
-    /// Spawns `command` as a long-lived session with piped stdio.
+    /// Spawns `command` as a long-lived [`SandboxedProcess`] with piped stdio.
     ///
-    /// The session goes through the same approval as [`Sandbox::exec`] once, at
-    /// spawn: `sandbox.session.started` is appended after the process starts,
-    /// and [`SandboxedProcess::wait`] appends `sandbox.session.exited` with its
+    /// The process goes through the same approval as [`Sandbox::exec`] once, at
+    /// spawn: `sandbox.process.started` is appended after the process starts,
+    /// and [`SandboxedProcess::wait`] appends `sandbox.process.exited` with its
     /// terminal state. Output is not captured, so the caller owns the pipes.
     ///
     /// # Errors
     ///
     /// Returns [`SandboxError::Denied`] when an approver denies the spawn,
     /// [`SandboxError::Spawn`] when the process cannot be started (including an
-    /// executor that cannot run sessions), and [`SandboxError::Publish`] when a
-    /// lifecycle event cannot be durably appended.
+    /// executor that cannot run long-lived processes), and [`SandboxError::Publish`]
+    /// when a lifecycle event cannot be durably appended.
     pub async fn spawn(
         &self,
         command: &str,
@@ -187,18 +190,18 @@ impl Sandbox {
         }
 
         let child = self.executor.spawn(command).await?;
-        let session_id = Uuid::now_v7();
+        let process_id = Uuid::now_v7();
         self.log
-            .publish(events::session_started(
+            .publish(events::process_started(
                 &sandbox_id,
                 &request_id,
                 &self.agent_id,
                 command,
-                &session_id.to_string(),
+                &process_id.to_string(),
             ))
             .await?;
         Ok(SandboxedProcess {
-            id: session_id,
+            id: process_id,
             pid: child.id(),
             child,
             log: self.log.clone(),
@@ -208,13 +211,14 @@ impl Sandbox {
             command: command.to_string(),
             started: Instant::now(),
             // The executor owns the profile and scratch the child runs under;
-            // holding it keeps them alive for the session's lifetime.
+            // holding it keeps them alive for the process's lifetime.
             keepalive: Arc::clone(&self.executor),
         })
     }
 
     /// Runs the approval step, returning whether the command may run. A timeout
-    /// records a denial itself; an approver's decision is already in the log.
+    /// records a cancellation itself; an approver's decision is already in the
+    /// log.
     async fn authorize(
         &self,
         sandbox_id: &str,
@@ -257,10 +261,10 @@ impl Sandbox {
                     .await?;
                 match await_decision(&mut decisions, request_id, timeout).await {
                     Decision::Granted => Ok(true),
-                    Decision::Denied => Ok(false),
+                    Decision::Denied | Decision::Cancelled => Ok(false),
                     Decision::TimedOut => {
                         self.log
-                            .publish(events::permission_denied(
+                            .publish(events::permission_cancelled(
                                 sandbox_id,
                                 request_id,
                                 &self.agent_id,
@@ -297,8 +301,9 @@ pub struct SandboxedProcess {
 }
 
 impl SandboxedProcess {
-    /// The process's id, correlating the `sandbox.session.*` lifecycle events
-    /// emitted for it (`data.session_id`).
+    /// The process's id, correlating the `sandbox.process.*` lifecycle events
+    /// emitted for it (`data.process_id`). It is the `SandboxedProcess`'s own
+    /// id, not the OS pid and not the daemon's `session_id`.
     #[must_use]
     pub const fn id(&self) -> Uuid {
         self.id
@@ -344,8 +349,8 @@ impl SandboxedProcess {
         signalled
     }
 
-    /// Waits for the process to exit, appends `sandbox.session.exited` (the
-    /// sandbox's session-event namespace), and returns its exit code.
+    /// Waits for the process to exit, appends `sandbox.process.exited`, and
+    /// returns its exit code.
     ///
     /// # Errors
     ///
@@ -360,7 +365,7 @@ impl SandboxedProcess {
                 .map_or(crate::process::EXIT_CANNOT_EXECUTE, |signal| 128 + signal)
         });
         self.log
-            .publish(events::session_exited(
+            .publish(events::process_exited(
                 &self.sandbox_id,
                 &self.request_id,
                 &self.agent_id,
@@ -395,13 +400,15 @@ impl Drop for SandboxedProcess {
     }
 }
 
-/// The outcome of waiting for an approver's decision.
+/// The outcome of waiting for a decision on a permission request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Decision {
-    /// An approver granted the request.
+    /// The request was granted.
     Granted,
-    /// An approver denied the request.
+    /// The request was denied.
     Denied,
+    /// An approver withdrew the request, or the log closed.
+    Cancelled,
     /// No decision arrived within the timeout.
     TimedOut,
 }
@@ -409,7 +416,7 @@ enum Decision {
 /// Waits for a decision on `request_id`.
 ///
 /// An unrelated event is ignored; a lagged subscriber keeps waiting; the bus
-/// closing or the timeout is a denial. A decision is trusted only when it
+/// closing is a cancellation. A decision is trusted only when it
 /// carries the exact `request_id`, so a grant for another request cannot
 /// release this one.
 async fn await_decision(
@@ -436,11 +443,12 @@ async fn await_decision(
                     match event.r#type.as_str() {
                         PERMISSION_GRANTED => return Decision::Granted,
                         PERMISSION_DENIED => return Decision::Denied,
+                        PERMISSION_CANCELLED => return Decision::Cancelled,
                         _ => {},
                     }
                 },
                 Err(RecvError::Lagged(_)) => {},
-                Err(RecvError::Closed) => return Decision::Denied,
+                Err(RecvError::Closed) => return Decision::Cancelled,
             },
         }
     }
@@ -496,7 +504,7 @@ mod tests {
     }
 
     /// An executor that runs commands unconfined through `/bin/sh`, so the
-    /// session API and its event flow can be tested without Seatbelt.
+    /// long-lived process API and its event flow can be tested without Seatbelt.
     struct PlainExecutor;
 
     #[async_trait]
@@ -635,10 +643,16 @@ mod tests {
                     let sandbox_id = event.data["sandbox_id"].as_str().unwrap_or_default();
                     let agent_id = event.data["agent_id"].as_str().unwrap_or_default();
                     let command = event.data["command"].as_str().unwrap_or_default();
-                    let reply = if decision == "grant" {
-                        crate::events::permission_granted(sandbox_id, request_id, agent_id, command)
-                    } else {
-                        crate::events::permission_denied(sandbox_id, request_id, agent_id, command)
+                    let reply = match decision {
+                        "grant" => crate::events::permission_granted(
+                            sandbox_id, request_id, agent_id, command,
+                        ),
+                        "cancel" => crate::events::permission_cancelled(
+                            sandbox_id, request_id, agent_id, command,
+                        ),
+                        _ => crate::events::permission_denied(
+                            sandbox_id, request_id, agent_id, command,
+                        ),
                     };
                     let _ = publisher.publish(reply).await;
                     return;
@@ -708,7 +722,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn required_approval_times_out_and_denies() {
+    async fn required_approval_times_out_and_cancels() {
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let executor = RecordingExecutor::new();
         let sandbox =
@@ -717,22 +731,65 @@ mod tests {
                 .with_approval(Approval::Required {
                     timeout: Duration::from_millis(50),
                 });
+        let mut subscriber = sandbox.log().subscribe();
 
         let result = sandbox.exec("ls").await.expect("exec should succeed");
 
         assert!(result.is_denied());
         assert_eq!(executor.count(), 0);
+        // Nobody decided, so the record says cancelled, not denied.
+        let events = drain(&mut subscriber);
+        let types: Vec<&str> = events.iter().map(|event| event.r#type.as_str()).collect();
+        assert_eq!(
+            types,
+            [
+                crate::events::PERMISSION_REQUESTED,
+                crate::events::PERMISSION_CANCELLED,
+            ]
+        );
+        assert_eq!(events[1].data["decision"], serde_json::json!("cancelled"));
     }
 
     #[tokio::test]
-    async fn spawn_publishes_session_started_and_exited() {
+    async fn an_approver_can_cancel_a_request() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let log = open_log(dir.path());
+        let executor = RecordingExecutor::new();
+        let sandbox = Sandbox::with_executor(&policy(), log.clone(), "coder-1", executor.clone())
+            .expect("valid policy")
+            .with_approval(Approval::Required {
+                timeout: Duration::from_secs(5),
+            });
+        let mut subscriber = sandbox.log().subscribe();
+        let approver = spawn_approver(&log, "cancel");
+
+        let result = sandbox.exec("ls").await.expect("exec should succeed");
+
+        assert!(result.is_denied());
+        assert_eq!(executor.count(), 0);
+        // The approver's cancellation is the record; the sandbox adds no second
+        // decision of its own.
+        let events = drain(&mut subscriber);
+        let types: Vec<&str> = events.iter().map(|event| event.r#type.as_str()).collect();
+        assert_eq!(
+            types,
+            [
+                crate::events::PERMISSION_REQUESTED,
+                crate::events::PERMISSION_CANCELLED,
+            ]
+        );
+        approver.await.expect("approver should finish");
+    }
+
+    #[tokio::test]
+    async fn spawn_appends_process_started_and_exited() {
         let (sandbox, _dir) = plain_sandbox();
         let mut subscriber = sandbox.log().subscribe();
 
-        let mut session: SandboxedProcess =
+        let mut process: SandboxedProcess =
             sandbox.spawn("exit 3").await.expect("spawn should succeed");
-        let session_id = session.id().to_string();
-        let exit_code = session.wait().await.expect("wait should succeed");
+        let process_id = process.id().to_string();
+        let exit_code = process.wait().await.expect("wait should succeed");
 
         assert_eq!(exit_code, 3);
         let events = drain(&mut subscriber);
@@ -742,22 +799,22 @@ mod tests {
             [
                 crate::events::PERMISSION_REQUESTED,
                 crate::events::PERMISSION_GRANTED,
-                crate::events::SESSION_STARTED,
-                crate::events::SESSION_EXITED,
+                crate::events::PROCESS_STARTED,
+                crate::events::PROCESS_EXITED,
             ]
         );
-        assert_eq!(events[2].data["session_id"], session_id);
+        assert_eq!(events[2].data["process_id"], process_id);
         assert_eq!(events[3].data["exit_code"], 3);
-        assert_eq!(events[3].data["session_id"], session_id);
+        assert_eq!(events[3].data["process_id"], process_id);
     }
 
     #[tokio::test]
-    async fn a_session_streams_stdin_to_stdout() {
+    async fn a_process_streams_stdin_to_stdout() {
         let (sandbox, _dir) = plain_sandbox();
 
-        let mut session = sandbox.spawn("cat").await.expect("spawn should succeed");
-        let mut stdin = session.take_stdin().expect("stdin");
-        let mut stdout = session.take_stdout().expect("stdout");
+        let mut process = sandbox.spawn("cat").await.expect("spawn should succeed");
+        let mut stdin = process.take_stdin().expect("stdin");
+        let mut stdout = process.take_stdout().expect("stdout");
 
         stdin.write_all(b"hello\n").await.expect("write stdin");
         drop(stdin);
@@ -766,7 +823,7 @@ mod tests {
         stdout.read_to_string(&mut line).await.expect("read stdout");
         assert_eq!(line, "hello\n");
 
-        let exit_code = session.wait().await.expect("wait should succeed");
+        let exit_code = process.wait().await.expect("wait should succeed");
         assert_eq!(exit_code, 0);
     }
 
@@ -802,13 +859,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_executor_without_sessions_fails_to_spawn() {
+    async fn an_executor_without_spawn_fails_to_spawn() {
         let (sandbox, _executor, _dir) = sandbox(&policy());
 
         let error = sandbox
             .spawn("cat")
             .await
-            .expect_err("a one-shot executor must refuse a session");
+            .expect_err("a one-shot executor must refuse a spawn");
 
         assert!(matches!(error, SandboxError::Spawn(_)));
     }

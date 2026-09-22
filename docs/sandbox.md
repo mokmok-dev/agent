@@ -295,8 +295,8 @@ commands cannot back a session; the layer-1 executor overrides it.
 
 `Sandbox::spawn(command)` runs a long-lived process with piped stdio for the
 node model in `docs/node.md`. It goes through the same approval as `exec` once,
-at spawn, and appends `sandbox.session.started`; `SandboxedProcess::wait`
-appends `sandbox.session.exited` with the exit code and duration. The caller
+at spawn, and appends `sandbox.process.started`; `SandboxedProcess::wait`
+appends `sandbox.process.exited` with the exit code and duration. The caller
 takes the pipes (`take_stdin`/`take_stdout`/`take_stderr`) and owns the I/O; the
 output is not captured, so a session is not bounded by the one-shot output cap.
 The `SandboxedProcess` holds the executor alive, so the profile and scratch it
@@ -387,8 +387,8 @@ existing dotted-type convention and `source: urn:mokmokd`:
 | `sandbox.violation.filesystem` | The OS refused a filesystem operation: reason, denied path, output snippet |
 | `sandbox.violation.network`   | The OS refused a network operation                                 |
 | `sandbox.exec.completed`      | Terminal state of an execution: exit code, duration, output sizes |
-| `sandbox.session.started`     | A long-lived session was spawned                                  |
-| `sandbox.session.exited`      | Terminal state of a session: exit code and duration               |
+| `sandbox.process.started`     | A long-lived session was spawned                                  |
+| `sandbox.process.exited`      | Terminal state of a session: exit code and duration               |
 | `session.requested`           | A client asks the daemon to start a managed session               |
 | `session.started`             | The managed session's sandboxed process started                   |
 | `session.restarted`           | The managed session's process restarted after a non-zero exit     |
@@ -493,7 +493,7 @@ Modeled on Sheena's methodology and codex's, adapted to Rust:
   timing out over the log with `request_id` correlation.
 - **Violation flow tests**: a structured `sandbox.violation.*` for a recognised
   OS denial, and no violation for an unrelated failure.
-- **Session tests**: `sandbox.session.started`/`exited` over the log, piped
+- **Session tests**: `sandbox.process.started`/`exited` over the log, piped
   stdin/stdout streaming, approval denial, a real confined session that streams
   I/O under the Seatbelt profile, and a real sandboxed process that reaches a
   granted Unix socket but not an ungranted one.

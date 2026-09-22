@@ -9,14 +9,14 @@
 use async_trait::async_trait;
 use thiserror::Error as ThisError;
 
-/// Errors returned while spawning a long-lived session.
+/// Errors returned while spawning a long-lived process.
 #[derive(Debug, ThisError)]
 pub enum SpawnError {
     /// The process could not be started.
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    /// The executor cannot run a long-lived session.
-    #[error("the executor does not support long-lived sessions: {0}")]
+    /// The executor cannot run a long-lived process.
+    #[error("the executor does not support long-lived processes: {0}")]
     Unsupported(&'static str),
 }
 
@@ -70,7 +70,7 @@ pub trait Executor: Send + Sync {
     /// waiting for it to exit.
     ///
     /// The default fails: an executor that only supports one-shot commands
-    /// cannot back a session. The layer-1 confined-process executor overrides
+    /// cannot back a long-lived process. The layer-1 confined-process executor overrides
     /// it.
     ///
     /// # Errors

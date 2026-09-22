@@ -67,10 +67,10 @@ mod violation;
 
 pub use error::SandboxError;
 pub use events::{
-    ACTION_EXEC, DECISION_AUTO, DECISION_PENDING, EXEC_COMPLETED, PERMISSION_DENIED,
-    PERMISSION_GRANTED, PERMISSION_REQUESTED, RESOURCE_SHELL, SESSION_EXITED, SESSION_STARTED,
-    exec_completed, permission_denied, permission_granted, permission_requested, session_exited,
-    session_started,
+    ACTION_EXEC, DECISION_AUTO, DECISION_PENDING, EXEC_COMPLETED, PERMISSION_CANCELLED,
+    PERMISSION_DENIED, PERMISSION_GRANTED, PERMISSION_REQUESTED, PROCESS_EXITED, PROCESS_STARTED,
+    RESOURCE_SHELL, exec_completed, permission_cancelled, permission_denied, permission_granted,
+    permission_requested, process_exited, process_started,
 };
 pub use executor::{
     ConfinedProcessExecutor, ExecResult, Executor, SpawnError, bubblewrap_available,
