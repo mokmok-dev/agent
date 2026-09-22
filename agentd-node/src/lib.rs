@@ -48,6 +48,7 @@ mod conversation;
 mod error;
 mod filter;
 mod node;
+pub mod patch;
 mod projection;
 
 pub use agent::{Agent, ShellLimits};
@@ -55,8 +56,8 @@ pub use agentd_events::{Event, LogEntry, Projection, Seq, WireMessage};
 pub use agentd_inference::{Delta, Message, Role, ToolCall, ToolSpec};
 pub use client::{ClientError, PublishError, WsClient};
 pub use conversation::{
-    AGENT_INBOX, AGENT_MESSAGE, AGENT_SESSION_STARTED, AGENT_TOOL_RESULT, AGENT_TURN_COMPLETED,
-    AGENT_TURN_FAILED, AGENT_TURN_STARTED, Conversation, session_key,
+    AGENT_INBOX, AGENT_MESSAGE, AGENT_PATCH_APPLIED, AGENT_SESSION_STARTED, AGENT_TOOL_RESULT,
+    AGENT_TURN_COMPLETED, AGENT_TURN_FAILED, AGENT_TURN_STARTED, Conversation, session_key,
 };
 pub use error::AgentError;
 pub use filter::{Interest, TypePrefixes};

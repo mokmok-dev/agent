@@ -12,6 +12,7 @@
 //! is held across an `await`; a turn borrows only the connection-free
 //! [`Turn`] configuration.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -30,10 +31,11 @@ use tokio::time::timeout;
 
 use crate::client::WsClient;
 use crate::conversation::{
-    AGENT_INBOX, AGENT_MESSAGE, AGENT_SESSION_STARTED, AGENT_TOOL_RESULT, AGENT_TURN_COMPLETED,
-    AGENT_TURN_FAILED, AGENT_TURN_STARTED, Conversation, session_key,
+    AGENT_INBOX, AGENT_MESSAGE, AGENT_PATCH_APPLIED, AGENT_SESSION_STARTED, AGENT_TOOL_RESULT,
+    AGENT_TURN_COMPLETED, AGENT_TURN_FAILED, AGENT_TURN_STARTED, Conversation, session_key,
 };
 use crate::error::AgentError;
+use crate::patch::{Patch, PatchError};
 use crate::projection::SqliteProjection;
 
 /// The delay before the first reconnect attempt; doubled on each failure.
@@ -59,10 +61,11 @@ const AGENT_PREFIX: &str = "agent.";
 const SYSTEM_PROMPT: &str = "\
 You are a coding agent running inside a sandbox. You help with software \
 engineering tasks in the workspace directory. Use the `shell` tool to inspect \
-and change files and to run commands. Run one command at a time, read the \
-output, and adapt. The sandbox has no network access and only the workspace is \
-writable. When the task is complete, reply with a short summary and call no \
-more tools.";
+files and to run commands, and the `apply_patch` tool to change files: it takes \
+a unified diff, applies it in one step, and records the patch that undoes it. \
+Run one command at a time, read the output, and adapt. The sandbox has no \
+network access and only the workspace is writable. When the task is complete, \
+reply with a short summary and call no more tools.";
 
 /// The budget a single tool command may use.
 #[derive(Debug, Clone, Copy)]
@@ -414,7 +417,7 @@ impl Turn<'_> {
         client: &mut WsClient,
         history: &mut Vec<Message>,
     ) -> Result<(), AgentError> {
-        let tools = vec![shell_tool()];
+        let tools = tools();
         let mut inference =
             InferenceClient::connect(self.socket, self.token.expose_secret()).await?;
         let mut rounds = 0;
@@ -460,15 +463,22 @@ impl Turn<'_> {
             let mut results = Vec::with_capacity(message.tool_calls.len());
             for call in &message.tool_calls {
                 tracing::debug!(tool = %call.name, "running a tool");
-                let outcome = run_tool(call, self.workdir, self.limits).await;
-                tracing::debug!(tool = %call.name, timed_out = outcome.timed_out, "the tool finished");
+                let run = run_tool(call, self.workdir, self.limits).await;
+                tracing::debug!(
+                    tool = %call.name,
+                    timed_out = run.outcome.timed_out,
+                    "the tool finished"
+                );
+                if let Some(event) = run.event {
+                    emit(client, event).await?;
+                }
                 publish(
                     client,
                     AGENT_TOOL_RESULT,
-                    tool_result_data(self.conversation_id, call, &outcome),
+                    tool_result_data(self.conversation_id, call, &run.outcome),
                 )
                 .await?;
-                results.push(Message::tool(call.id.clone(), outcome.content));
+                results.push(Message::tool(call.id.clone(), run.outcome.content));
             }
             history.push(message);
             history.extend(results);
@@ -486,12 +496,45 @@ struct ShellArguments {
     command: String,
 }
 
+/// The arguments of the `apply_patch` tool.
+#[derive(Debug, Deserialize)]
+struct PatchArguments {
+    patch: String,
+}
+
 /// The result of one tool command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ToolOutcome {
     content: String,
     exit_code: Option<i32>,
     timed_out: bool,
+}
+
+/// The result of one tool call, with the event the tool records for the log.
+struct ToolRun {
+    outcome: ToolOutcome,
+    /// The event the tool published, which the driver commits before the tool
+    /// result, so the log holds the change before it holds the report of it.
+    event: Option<Event>,
+}
+
+impl ToolRun {
+    /// A run that records no event of its own.
+    const fn silent(outcome: ToolOutcome) -> Self {
+        Self {
+            outcome,
+            event: None,
+        }
+    }
+
+    /// A run that failed, which the model sees as text and no exit code.
+    fn failed(message: impl Into<String>) -> Self {
+        Self::silent(ToolOutcome {
+            content: message.into(),
+            exit_code: None,
+            timed_out: false,
+        })
+    }
 }
 
 /// The model's tool description for the shell.
@@ -513,6 +556,35 @@ fn shell_tool() -> ToolSpec {
             "required": ["command"],
         }),
     }
+}
+
+/// The model's tool description for the patcher.
+fn patch_tool() -> ToolSpec {
+    ToolSpec {
+        name: String::from("apply_patch"),
+        description: String::from(
+            "Apply a unified diff to the files it names, all of them or none. \
+             Prefer this over `shell` for changing files: the diff is recorded, \
+             so the change can be undone from the log.",
+        ),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "patch": {
+                    "type": "string",
+                    "description":
+                        "A unified diff with `---`/`+++` file headers and `@@` hunks. \
+                         Files are edited in place; deletions and renames are not supported.",
+                },
+            },
+            "required": ["patch"],
+        }),
+    }
+}
+
+/// The tools the model is offered.
+fn tools() -> Vec<ToolSpec> {
+    vec![shell_tool(), patch_tool()]
 }
 
 /// Builds the request messages: the system instruction followed by `history`.
@@ -578,41 +650,179 @@ fn tool_result_data(
 }
 
 /// Publishes a `CloudEvents` message to the daemon.
-///
-/// The event carries the current span's trace context, when tracing is active,
-/// so its downstream consumers can correlate with the turn it belongs to.
 async fn publish(
     client: &mut WsClient,
     r#type: &str,
     data: serde_json::Value,
 ) -> Result<(), AgentError> {
-    tracing::debug!(r#type, "publishing an event");
-    let mut event = Event::new(r#type, data);
+    emit(client, Event::new(r#type, data)).await
+}
+
+/// Sends an event to the daemon.
+///
+/// The event carries the current span's trace context, when tracing is active,
+/// so its downstream consumers can correlate with the turn it belongs to.
+async fn emit(
+    client: &mut WsClient,
+    mut event: Event,
+) -> Result<(), AgentError> {
+    tracing::debug!(r#type = %event.r#type, "publishing an event");
     if let Some(traceparent) = agentd_telemetry::semconv::current_traceparent() {
         event = event.with_traceparent(&traceparent);
     }
     client.send(&event).await?;
-    tracing::debug!(r#type, "the event was sent");
+    tracing::debug!(r#type = %event.r#type, "the event was sent");
     Ok(())
 }
 
-/// Runs one tool call.
+/// Runs one tool call: the shell, or the patcher.
 async fn run_tool(
     call: &ToolCall,
     workdir: &Path,
     limits: ShellLimits,
-) -> ToolOutcome {
-    let arguments = match serde_json::from_str::<ShellArguments>(&call.arguments) {
-        Ok(arguments) => arguments,
-        Err(error) => {
-            return ToolOutcome {
-                content: format!("invalid tool arguments: {error}"),
-                exit_code: None,
-                timed_out: false,
+) -> ToolRun {
+    match call.name.as_str() {
+        "shell" => {
+            let arguments = match serde_json::from_str::<ShellArguments>(&call.arguments) {
+                Ok(arguments) => arguments,
+                Err(error) => {
+                    return ToolRun::failed(format!("invalid tool arguments: {error}"));
+                },
             };
+            ToolRun::silent(run_shell(&arguments.command, workdir, limits).await)
         },
+        "apply_patch" => {
+            let arguments = match serde_json::from_str::<PatchArguments>(&call.arguments) {
+                Ok(arguments) => arguments,
+                Err(error) => {
+                    return ToolRun::failed(format!("invalid tool arguments: {error}"));
+                },
+            };
+            run_patch(&arguments.patch, workdir)
+        },
+        other => ToolRun::failed(format!("there is no {other} tool")),
+    }
+}
+
+/// Applies a unified diff to the workspace and reports the change.
+///
+/// Nothing is written unless every hunk of every file in the patch matches, and
+/// each file is replaced atomically, so a rejected patch leaves the workspace as
+/// it was. The `agent.patch.applied` event carries the inverse patch, which is
+/// how the change is undone: read it from the log and apply it.
+fn run_patch(
+    diff: &str,
+    workdir: &Path,
+) -> ToolRun {
+    let patch = match Patch::parse(diff) {
+        Ok(patch) => patch,
+        Err(error) => return ToolRun::failed(rejection(&error)),
     };
-    run_shell(&arguments.command, workdir, limits).await
+    let targets: BTreeMap<String, PathBuf> = match patch
+        .paths()
+        .map(|path| resolve(workdir, path).map(|target| (path.to_string(), target)))
+        .collect()
+    {
+        Ok(targets) => targets,
+        Err(error) => return ToolRun::failed(rejection(&error)),
+    };
+    // Apply in memory first: a mismatch in any file aborts before any write.
+    let applied = match patch.apply(|path| {
+        let target = targets
+            .get(path)
+            .ok_or_else(|| std::io::Error::other(format!("{path} is not in the workspace")))?;
+        std::fs::read_to_string(target)
+    }) {
+        Ok(applied) => applied,
+        Err(error) => return ToolRun::failed(rejection(&error)),
+    };
+    for file in &applied {
+        let Some(target) = targets.get(&file.path) else {
+            return ToolRun::failed(format!("{} is not in the workspace", file.path));
+        };
+        if let Err(error) = write_atomically(target, &file.content) {
+            return ToolRun::failed(format!("{} could not be written: {error}", file.path));
+        }
+    }
+    let files: Vec<serde_json::Value> = applied
+        .iter()
+        .map(|file| {
+            json!({
+                "path": file.path,
+                "added": file.added,
+                "removed": file.removed,
+            })
+        })
+        .collect();
+    let summary = applied
+        .iter()
+        .map(|file| format!("{} (+{}/-{})", file.path, file.added, file.removed))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ToolRun {
+        outcome: ToolOutcome {
+            content: format!("applied {summary}"),
+            exit_code: None,
+            timed_out: false,
+        },
+        event: Some(Event::new(
+            AGENT_PATCH_APPLIED,
+            json!({ "files": files, "inverse": patch.inverse().to_string() }),
+        )),
+    }
+}
+
+/// Turns a rejected patch into the text the model reads.
+fn rejection(error: &PatchError) -> String {
+    format!("the patch was not applied: {error}")
+}
+
+/// The absolute path `path` names inside `workdir`, refusing one that leaves it.
+///
+/// The parent is resolved before the name is joined, so a symlink inside the
+/// workspace cannot redirect a write outside it. The parent must exist: a patch
+/// edits files where they are rather than creating directories.
+fn resolve(
+    workdir: &Path,
+    path: &str,
+) -> Result<PathBuf, PatchError> {
+    let outside = |error: std::io::Error| PatchError::Read {
+        path: path.to_string(),
+        error,
+    };
+    let candidate = workdir.join(path);
+    let name = candidate
+        .file_name()
+        .ok_or_else(|| outside(std::io::Error::other("the path names no file")))?;
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| outside(std::io::Error::other("the path names no directory")))?
+        .canonicalize()
+        .map_err(&outside)?;
+    let root = workdir.canonicalize().map_err(&outside)?;
+    if !parent.starts_with(&root) {
+        return Err(outside(std::io::Error::other(
+            "the path is outside the workspace",
+        )));
+    }
+    Ok(parent.join(name))
+}
+
+/// Replaces `target` with `content` in one step.
+///
+/// The new content is written beside the file and renamed onto it, which is
+/// atomic within a filesystem, so a reader never sees a half-written file.
+fn write_atomically(
+    target: &Path,
+    content: &str,
+) -> std::io::Result<()> {
+    let temporary = target.with_extension(format!("agentd-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&temporary, content)?;
+    if let Err(error) = std::fs::rename(&temporary, target) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Runs `command` with `bash -c` in `workdir`, enforcing the limits.
@@ -714,9 +924,10 @@ async fn read_capped(
 
 #[cfg(test)]
 mod tests {
-    use super::{Agent, ShellLimits, fold_deltas, request_messages, run_shell};
-    use crate::conversation::Conversation;
+    use super::{Agent, ShellLimits, fold_deltas, request_messages, run_shell, run_tool};
+    use crate::conversation::{AGENT_PATCH_APPLIED, Conversation};
     use crate::error::AgentError;
+    use crate::patch::Patch;
     use crate::projection::SqliteProjection;
     use agentd_events::{DAEMON_CAUGHT_UP, Event};
     use agentd_inference::{Delta, Message, ToolCall};
@@ -936,5 +1147,230 @@ mod tests {
         let tool = super::shell_tool();
         assert_eq!(tool.name, "shell");
         assert_eq!(tool.parameters["required"], json!(["command"]));
+    }
+
+    #[test]
+    fn a_generated_patch_tool_is_well_formed() {
+        let tool = super::patch_tool();
+        assert_eq!(tool.name, "apply_patch");
+        assert_eq!(tool.parameters["required"], json!(["patch"]));
+        assert!(
+            tool.description.contains("undone from the log"),
+            "the description should say why the patcher is preferable: {}",
+            tool.description
+        );
+
+        let offered = super::tools();
+        assert_eq!(offered.len(), 2);
+        assert_eq!(offered[0].name, "shell");
+        assert_eq!(offered[1].name, "apply_patch");
+    }
+
+    /// A tool call for the patcher carrying `diff`.
+    fn patch_call(diff: &str) -> ToolCall {
+        ToolCall {
+            id: String::from("call-1"),
+            name: String::from("apply_patch"),
+            arguments: json!({ "patch": diff }).to_string(),
+        }
+    }
+
+    /// A one-file diff against `path` whose single hunk replaces `from` with
+    /// `to`, so a test says what it changes without writing a header by hand.
+    fn diff(path: &str, from: &str, to: &str) -> String {
+        format!("--- a/{path}\n+++ b/{path}\n@@ -1,1 +1,1 @@\n-{from}\n+{to}\n")
+    }
+
+    #[tokio::test]
+    async fn apply_patch_changes_the_file_and_records_the_inverse_that_undoes_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "one\ntwo\nthree\n").expect("the original");
+        let patch = "\
+--- a/notes.txt
++++ b/notes.txt
+@@ -1,3 +1,4 @@
+ one
++one and a half
+ two
+ three
+";
+
+        let run = run_tool(&patch_call(patch), dir.path(), ShellLimits::default()).await;
+        assert_eq!(run.outcome.content, "applied notes.txt (+1/-0)");
+        assert_eq!(run.outcome.exit_code, None);
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the file should be readable"),
+            "one\none and a half\ntwo\nthree\n"
+        );
+
+        let event = run.event.expect("an applied patch is recorded");
+        assert_eq!(event.r#type, AGENT_PATCH_APPLIED);
+        assert_eq!(
+            event.data["files"],
+            json!([{ "path": "notes.txt", "added": 1, "removed": 0 }])
+        );
+
+        // The recorded inverse is the undo: applying it and writing the result
+        // restores the bytes the file had before the patch.
+        let inverse = Patch::parse(event.data["inverse"].as_str().expect("an inverse patch"))
+            .expect("the inverse should parse");
+        let applied = inverse
+            .apply(|path| {
+                assert_eq!(path, "notes.txt");
+                std::fs::read_to_string(&file)
+            })
+            .expect("the inverse should apply");
+        std::fs::write(&file, &applied[0].content).expect("the undo should write");
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the file should be readable"),
+            "one\ntwo\nthree\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_refuses_a_hunk_that_does_not_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "alpha\nbeta\n").expect("the original");
+
+        let run = run_tool(
+            &patch_call(&diff("notes.txt", "gamma", "GAMMA")),
+            dir.path(),
+            ShellLimits::default(),
+        )
+        .await;
+
+        assert!(run.event.is_none(), "a rejected patch records nothing");
+        assert!(
+            run.outcome.content.starts_with("the patch was not applied:"),
+            "{}",
+            run.outcome.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the file should be readable"),
+            "alpha\nbeta\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_file_is_written_when_a_later_one_in_the_patch_does_not_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        std::fs::write(&first, "alpha\n").expect("the first file");
+        std::fs::write(&second, "beta\n").expect("the second file");
+        let patch = format!(
+            "{}{}",
+            diff("first.txt", "alpha", "ALPHA"),
+            diff("second.txt", "gamma", "GAMMA")
+        );
+
+        let run = run_tool(&patch_call(&patch), dir.path(), ShellLimits::default()).await;
+
+        assert!(run.event.is_none());
+        assert_eq!(
+            std::fs::read_to_string(&first).expect("the first file should be readable"),
+            "alpha\n",
+            "a patch that fails on one file must leave the others alone"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&second).expect("the second file should be readable"),
+            "beta\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_refuses_a_path_that_leaves_the_workspace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("the workspace");
+        let outside = dir.path().join("outside.txt");
+        std::fs::write(&outside, "secret\n").expect("the file outside");
+
+        let run = run_tool(
+            &patch_call(&diff("../outside.txt", "secret", "leaked")),
+            &workspace,
+            ShellLimits::default(),
+        )
+        .await;
+
+        assert!(run.event.is_none());
+        assert!(
+            run.outcome.content.contains("outside the workspace"),
+            "{}",
+            run.outcome.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside).expect("the file outside should be readable"),
+            "secret\n"
+        );
+    }
+
+    /// A workspace symlink must not become a way out of it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_patch_refuses_a_path_that_reaches_out_through_a_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&workspace).expect("the workspace");
+        std::fs::create_dir(&elsewhere).expect("the directory outside");
+        std::fs::write(elsewhere.join("target.txt"), "secret\n").expect("the file outside");
+        std::os::unix::fs::symlink(&elsewhere, workspace.join("link")).expect("the symlink");
+
+        let run = run_tool(
+            &patch_call(&diff("link/target.txt", "secret", "leaked")),
+            &workspace,
+            ShellLimits::default(),
+        )
+        .await;
+
+        assert!(run.event.is_none());
+        assert!(
+            run.outcome.content.contains("outside the workspace"),
+            "{}",
+            run.outcome.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(elsewhere.join("target.txt")).expect("the file outside"),
+            "secret\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_creates_a_file_the_workspace_does_not_have() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let patch = "\
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1,2 @@
++hello
++world
+";
+
+        let run = run_tool(&patch_call(patch), dir.path(), ShellLimits::default()).await;
+
+        assert_eq!(run.outcome.content, "applied new.txt (+2/-0)");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("new.txt")).expect("the new file"),
+            "hello\nworld\n"
+        );
+        assert!(run.event.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_tool_is_reported_to_the_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let call = ToolCall {
+            id: String::from("call-1"),
+            name: String::from("edit"),
+            arguments: String::from("{}"),
+        };
+
+        let run = run_tool(&call, dir.path(), ShellLimits::default()).await;
+
+        assert_eq!(run.outcome.content, "there is no edit tool");
+        assert!(run.event.is_none());
     }
 }

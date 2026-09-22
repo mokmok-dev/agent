@@ -14,6 +14,8 @@ pub const AGENT_INBOX: &str = "agent.inbox";
 pub const AGENT_MESSAGE: &str = "agent.message";
 /// The result of a tool the assistant called.
 pub const AGENT_TOOL_RESULT: &str = "agent.tool_result";
+/// A unified diff the assistant applied, with the inverse that undoes it.
+pub const AGENT_PATCH_APPLIED: &str = "agent.patch.applied";
 /// A turn began.
 pub const AGENT_TURN_STARTED: &str = "agent.turn.started";
 /// A turn completed without a provider error.
