@@ -50,10 +50,11 @@ pub const DAEMON_SOURCE: &str = "urn:mokmokd";
 ///
 /// These carry decisions or daemon lifecycle that a client must not be able to
 /// fabricate — above all `sandbox.permission.granted`/`denied`, which drive the
-/// approval flow, and `error.*`, which is a daemon notice. An external
+/// approval flow, `error.*`, which is a daemon notice, and `daemon.*`, whose
+/// caught-up marker tells a resuming client its replay is complete. An external
 /// extension is expected to use its own prefix; see `docs/architecture.md` and
 /// `docs/sandbox.md`.
-pub const RESERVED_TYPE_PREFIXES: &[&str] = &["error.", "sandbox.", "session."];
+pub const RESERVED_TYPE_PREFIXES: &[&str] = &["daemon.", "error.", "sandbox.", "session."];
 
 /// Whether an event `type` is reserved to daemon-authority publishers.
 #[must_use]
@@ -399,7 +400,8 @@ impl Default for EventBus {
 #[cfg(test)]
 mod tests {
     use super::{
-        DAEMON_SOURCE, Event, EventBus, InvalidEvent, LogEntry, SPEC_VERSION, is_reserved_type,
+        DAEMON_CAUGHT_UP, DAEMON_SOURCE, Event, EventBus, InvalidEvent, LogEntry, SPEC_VERSION,
+        is_reserved_type,
     };
     use crate::trace::Traceparent;
     use serde_json::json;
@@ -542,6 +544,7 @@ mod tests {
         assert!(is_reserved_type("sandbox.exec.completed"));
         assert!(is_reserved_type("error.invalid_event"));
         assert!(is_reserved_type("session.started"));
+        assert!(is_reserved_type(DAEMON_CAUGHT_UP));
         assert!(!is_reserved_type("task.submitted"));
         assert!(!is_reserved_type("error"));
     }

@@ -187,7 +187,7 @@ async fn a_patch_tool_call_changes_the_workspace_and_is_reversible_from_the_log(
     let applied = applied_patch(&log_path);
     assert_eq!(
         applied["data"]["files"],
-        json!([{ "path": FILE, "added": 1, "removed": 0 }]),
+        json!([{ "path": FILE, "status": "edited", "added": 1, "removed": 0 }]),
         "{applied:#?}"
     );
     let inverse = applied["data"]["inverse"]

@@ -97,6 +97,9 @@ enum RunError {
     /// The daemon did not commit or reject the decision in time.
     #[error(transparent)]
     Publish(#[from] PublishError),
+    /// The daemon did not finish replaying its log in time.
+    #[error("the daemon did not finish replaying its log within {0:?}")]
+    Replay(Duration),
     /// No request with that id is awaiting a decision.
     #[error("no request with id {0} is awaiting a decision; run `agentd-approve pending`")]
     UnknownRequest(String),
@@ -130,9 +133,9 @@ async fn read_log(connection: &Connection) -> Result<Vec<Event>, RunError> {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let Some(wire) = tokio::time::timeout(remaining, client.next())
             .await
-            .map_err(|_| RunError::Publish(PublishError::Timeout(TIMEOUT)))??
+            .map_err(|_| RunError::Replay(TIMEOUT))??
         else {
-            return Err(RunError::Publish(PublishError::Timeout(TIMEOUT)));
+            return Err(RunError::Replay(TIMEOUT));
         };
         if wire.event.r#type == agentd_events::DAEMON_CAUGHT_UP {
             return Ok(events);

@@ -141,6 +141,10 @@ impl WsClient {
     /// reports a token that lacks the claim its event's type requires instead of
     /// leaving the caller to read the log to find out.
     ///
+    /// Only frames that arrive before the verdict are read, and they are
+    /// discarded: publish on a connection opened to publish, or the live events
+    /// this consumes are lost to the caller.
+    ///
     /// # Errors
     ///
     /// Returns [`PublishError::Rejected`] when the daemon refused the append,

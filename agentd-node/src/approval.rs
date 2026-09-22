@@ -93,8 +93,8 @@ impl Decision {
 pub enum ApprovalError {
     /// A bridged agent picks among the options it offered, so a grant without
     /// one has no meaning to send.
-    #[error("pass --option-id: a bridged agent's grant names the option it selects")]
-    MissingOption,
+    #[error("a grant for a bridged agent must name one of the options it offered: {0}")]
+    MissingOption(String),
     /// The named option is not one the agent offered.
     #[error("{0} is not one of the options the agent offered: {1}")]
     UnknownOption(String, String),
@@ -155,6 +155,14 @@ impl Pending {
         self.subject.as_deref()
     }
 
+    /// The request's own payload, as the producer published it: the command a
+    /// sandbox asked about, the tool call and options a bridged agent offered,
+    /// or the destination a session wants to reach.
+    #[must_use]
+    pub const fn data(&self) -> &Value {
+        &self.data
+    }
+
     /// The event that answers this request, addressed to the same session.
     ///
     /// A grant for a bridged agent must name one of the options that agent
@@ -176,7 +184,7 @@ impl Pending {
             (RequestKind::Session, Decision::Granted) => {
                 let offered = self.option_ids();
                 let Some(option_id) = option_id else {
-                    return Err(ApprovalError::MissingOption);
+                    return Err(ApprovalError::MissingOption(offered.join(", ")));
                 };
                 if !offered.contains(&option_id) {
                     return Err(ApprovalError::UnknownOption(
@@ -485,7 +493,9 @@ mod tests {
         assert_eq!(granted.subject.as_deref(), Some("session:agent"));
 
         let missing = pending.decide(Decision::Granted, None);
-        assert!(matches!(missing, Err(ApprovalError::MissingOption)));
+        assert!(
+            matches!(missing, Err(ApprovalError::MissingOption(ref offered)) if offered == "allow-once, reject-once")
+        );
 
         let unknown = pending.decide(Decision::Granted, Some("allow-always"));
         assert!(matches!(unknown, Err(ApprovalError::UnknownOption(_, _))));

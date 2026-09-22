@@ -59,6 +59,13 @@ pub enum PatchError {
     /// its sections.
     #[error("the patch names {0} twice; a file is named by one section")]
     Duplicate(String),
+    /// The patch creates a file that is already there with content, which would
+    /// put those bytes beyond the reach of the undo the log records.
+    #[error("{0} already exists; the patch creates it")]
+    Exists(String),
+    /// A file patch carries no hunk, so it would change nothing.
+    #[error("the patch names {0} but carries no hunk")]
+    Hunkless(String),
     /// The patch renames a file, which this patcher does not do.
     #[error("the patch renames {old} to {new}; this patcher edits files in place")]
     RenameUnsupported {
@@ -181,11 +188,41 @@ struct Line {
     newline: bool,
 }
 
+/// What a patch did to a file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Change {
+    /// The patch created the file.
+    Created,
+    /// The patch edited the file in place.
+    Edited,
+    /// The patch deleted the file.
+    Deleted,
+}
+
+impl Change {
+    /// The change's name, as an event carries it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Edited => "edited",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
 /// One file a patch applied to.
+///
+/// Replacing the file is the caller's job, and doing it one `content` at a time
+/// is not all-or-nothing: a caller that writes should stage every file first and
+/// replace them only once all of them are staged, keeping the target's
+/// permissions as the `apply_patch` tool does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Applied {
     /// The path the patch edited, as the patch names it.
     pub path: String,
+    /// What the patch did to it.
+    pub change: Change,
     /// The file's new content, or `None` when the patch deletes the file.
     pub content: Option<String>,
     /// The lines the patch added to it.
@@ -239,6 +276,10 @@ impl Patch {
                 new_path,
                 hunks,
             };
+            // A section with no hunk asks for nothing this patcher can do.
+            if file.hunks.is_empty() {
+                return Err(PatchError::Hunkless(file.path().to_string()));
+            }
             // Two sections for one path would each be computed against the same
             // original and then written in turn, so only the last would survive
             // while the patch claimed both.
@@ -257,7 +298,7 @@ impl Patch {
     }
 
     /// Applies every file patch, reading each file's current content through
-    /// `read` unless the patch creates it.
+    /// `read`.
     ///
     /// The results are returned only once every file applied, so a caller that
     /// writes them afterwards writes nothing when any hunk does not match. A
@@ -267,8 +308,10 @@ impl Patch {
     /// # Errors
     ///
     /// Returns [`PatchError::Read`] when a file cannot be read,
-    /// [`PatchError::Mismatch`] when a hunk does not match the file it names, and
-    /// [`PatchError::DeleteIncomplete`] when a deletion leaves lines behind.
+    /// [`PatchError::Mismatch`] when a hunk does not match the file it names,
+    /// [`PatchError::Exists`] when a creation would replace a file that is
+    /// already there, and [`PatchError::DeleteIncomplete`] when a deletion
+    /// leaves lines behind.
     pub fn apply<F>(
         &self,
         mut read: F,
@@ -280,7 +323,20 @@ impl Patch {
         for file in &self.files {
             let path = file.path();
             let original = if file.creates() {
-                String::new()
+                // A creation must not replace a file that already has content:
+                // its inverse is a deletion, so the bytes it replaced would be
+                // beyond the reach of the undo the log records.
+                match read(path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                    Ok(content) if content.is_empty() => String::new(),
+                    Ok(_) => return Err(PatchError::Exists(path.to_string())),
+                    Err(error) => {
+                        return Err(PatchError::Read {
+                            path: path.to_string(),
+                            error,
+                        });
+                    },
+                }
             } else {
                 read(path).map_err(|error| PatchError::Read {
                     path: path.to_string(),
@@ -349,6 +405,13 @@ impl Patch {
             }
             applied.push(Applied {
                 path: path.to_string(),
+                change: if file.creates() {
+                    Change::Created
+                } else if file.deletes() {
+                    Change::Deleted
+                } else {
+                    Change::Edited
+                },
                 content: (!file.deletes()).then(|| render_lines(&result)),
                 added: file.count(Side::New),
                 removed: file.count(Side::Old),
@@ -678,14 +741,16 @@ const PREVIEW_BYTES: usize = 160;
 ///
 /// It is bounded: the text reaches the model's context and the durable log, so
 /// quoting a whole file's tail on every rejected patch is both expensive and a
-/// disclosure the tool has no reason to make.
+/// disclosure the tool has no reason to make. Each line is escaped, because a
+/// carriage return or a tab is invisible in a terminal and would make two
+/// different lines look identical in the message.
 fn preview<'a>(lines: impl Iterator<Item = &'a str>) -> String {
     let mut text = String::new();
     for line in lines.take(PREVIEW_LINES) {
         if !text.is_empty() {
             text.push_str("\\n");
         }
-        let _ = write!(text, "{line}");
+        let _ = write!(text, "{}", line.escape_debug());
     }
     if text.is_empty() {
         return String::from("nothing");
@@ -696,13 +761,14 @@ fn preview<'a>(lines: impl Iterator<Item = &'a str>) -> String {
             end -= 1;
         }
         text.truncate(end);
+        text.push('…');
     }
     text
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Applied, NO_NEWLINE, Patch, PatchError};
+    use super::{Applied, Change, NO_NEWLINE, Patch, PatchError};
     use std::collections::BTreeMap;
 
     /// Reads `files` as a patch's reader does, failing on an unknown path.
@@ -715,6 +781,14 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| std::io::Error::other(format!("no such file: {path}")))
         }
+    }
+
+    /// A reader for a file a patch creates: there is nothing there.
+    fn absent(path: &str) -> std::io::Result<String> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no {path}"),
+        ))
     }
 
     /// Applies `patch` to `content` and returns the whole result.
@@ -912,11 +986,10 @@ mod tests {
 +world
 ";
         let patch = Patch::parse(diff).expect("the diff should parse");
-        // The reader is never called: there is no original to read.
-        let applied = patch
-            .apply(|path| Err(std::io::Error::other(format!("unexpected read of {path}"))))
-            .expect("a creation needs no original");
+        // The reader runs: the file must not be there, and is not.
+        let applied = patch.apply(absent).expect("a creation needs no original");
         assert_eq!(applied[0].path, "new.txt");
+        assert_eq!(applied[0].change, Change::Created);
         assert_eq!(applied[0].content.as_deref(), Some("hello\nworld\n"));
         assert_eq!(applied[0].added, 2);
         assert_eq!(applied[0].removed, 0);
@@ -932,7 +1005,42 @@ mod tests {
             )])))
             .expect("the inverse should apply");
         assert_eq!(undo[0].path, "new.txt");
+        assert_eq!(undo[0].change, Change::Deleted);
         assert_eq!(undo[0].content, None);
+    }
+
+    #[test]
+    fn a_creation_that_would_replace_a_file_is_rejected() {
+        // A creation's inverse is a deletion, so replacing content that is
+        // already there would put those bytes beyond the undo.
+        let diff = "\
+--- /dev/null
++++ b/there.txt
+@@ -0,0 +1,1 @@
++new
+";
+        let error = Patch::parse(diff)
+            .expect("the diff should parse")
+            .apply(reader(&BTreeMap::from([(
+                String::from("there.txt"),
+                String::from("already here\n"),
+            )])));
+        assert!(matches!(
+            error,
+            Err(PatchError::Exists(path)) if path == "there.txt"
+        ));
+    }
+
+    #[test]
+    fn a_file_section_with_no_hunk_is_rejected() {
+        let diff = "\
+--- a/file.txt
++++ b/file.txt
+";
+        assert!(matches!(
+            Patch::parse(diff),
+            Err(PatchError::Hunkless(path)) if path == "file.txt"
+        ));
     }
 
     #[test]
@@ -946,14 +1054,14 @@ mod tests {
 ";
         let patch = Patch::parse(diff).expect("the diff should parse");
         let applied = apply_to_patch(&patch, "gone.txt", "goodbye\nworld\n");
+        assert_eq!(applied[0].change, Change::Deleted);
         assert_eq!(applied[0].content, None);
         assert_eq!(applied[0].removed, 2);
 
         let inverse = patch.inverse();
         assert!(inverse.to_string().contains("--- /dev/null"));
-        let restored = inverse
-            .apply(|path| Err(std::io::Error::other(format!("unexpected read of {path}"))))
-            .expect("a creation needs no original");
+        let restored = inverse.apply(absent).expect("a creation needs no original");
+        assert_eq!(restored[0].change, Change::Created);
         assert_eq!(restored[0].content.as_deref(), Some("goodbye\nworld\n"));
     }
 

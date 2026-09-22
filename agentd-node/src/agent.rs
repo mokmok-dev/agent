@@ -575,7 +575,8 @@ fn patch_tool() -> ToolSpec {
                     "type": "string",
                     "description":
                         "A unified diff with `---`/`+++` file headers and `@@` hunks. \
-                         Files are edited in place; deletions and renames are not supported.",
+                         Files are edited in place, created (`--- /dev/null`), or deleted \
+                         (`+++ /dev/null`); renames are not supported.",
                 },
             },
             "required": ["patch"],
@@ -791,6 +792,7 @@ fn run_patch(
         .map(|file| {
             json!({
                 "path": file.path,
+                "status": file.change.as_str(),
                 "added": file.added,
                 "removed": file.removed,
             })
@@ -1288,6 +1290,16 @@ mod tests {
             "the description should say why the patcher is preferable: {}",
             tool.description
         );
+        // The schema the model reads must not contradict what the patcher does.
+        let described = tool.parameters["properties"]["patch"]["description"]
+            .as_str()
+            .expect("a description");
+        for supported in ["created", "deleted"] {
+            assert!(
+                described.contains(supported),
+                "the schema should say a patch may be {supported}: {described}"
+            );
+        }
 
         let offered = super::tools();
         assert_eq!(offered.len(), 2);
@@ -1347,7 +1359,7 @@ mod tests {
         assert_eq!(event.r#type, AGENT_PATCH_APPLIED);
         assert_eq!(
             event.data["files"],
-            json!([{ "path": "notes.txt", "added": 1, "removed": 0 }])
+            json!([{ "path": "notes.txt", "status": "edited", "added": 1, "removed": 0 }])
         );
 
         // The recorded inverse is the undo: applying it and writing the result
@@ -1563,7 +1575,7 @@ mod tests {
         assert_eq!(event.data["conversation_id"], CONVERSATION);
         assert_eq!(
             event.data["files"],
-            json!([{ "path": "gone.txt", "added": 0, "removed": 2 }])
+            json!([{ "path": "gone.txt", "status": "deleted", "added": 0, "removed": 2 }])
         );
 
         // The inverse creates the file again, which is what makes the deletion
@@ -1572,9 +1584,48 @@ mod tests {
             .expect("the inverse should parse");
         assert!(inverse.to_string().contains("--- /dev/null"));
         let restored = inverse
-            .apply(|path| Err(std::io::Error::other(format!("unexpected read of {path}"))))
+            .apply(|path| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("no {path}"),
+                ))
+            })
             .expect("a creation needs no original");
         assert_eq!(restored[0].content.as_deref(), Some("goodbye\nworld\n"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_refuses_to_create_a_file_that_already_has_content() {
+        // The inverse of a creation is a deletion, so replacing content that is
+        // already there would lose bytes the log could not restore.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "already here\n").expect("the original");
+        let patch = "\
+--- /dev/null
++++ b/notes.txt
+@@ -0,0 +1,1 @@
++new
+";
+
+        let run = run_tool(
+            &patch_call(patch),
+            dir.path(),
+            ShellLimits::default(),
+            CONVERSATION,
+        )
+        .await;
+
+        assert!(run.event.is_none());
+        assert!(
+            run.outcome.content.contains("already exists"),
+            "{}",
+            run.outcome.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the file should be readable"),
+            "already here\n"
+        );
     }
 
     #[tokio::test]

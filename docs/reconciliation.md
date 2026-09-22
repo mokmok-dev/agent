@@ -27,7 +27,9 @@ ones are not resurrected.
 
 **Written against `c8ca532`.** The citations below are line numbers in that
 tree, so they go stale as the code moves; §[Re-verification](#re-verification)
-lists the commands that re-establish every claim.
+lists the commands that re-establish every claim. Phases 2, 3, and 4 were built
+after it and carry their closing commits in §[Adopted
+backlog](#adopted-backlog), which is where a row's status is current.
 
 ## Method
 
@@ -75,11 +77,11 @@ this repository's own design docs, and those decisions are cited as evidence.
 
 | Specification | Implementation | Status |
 | --- | --- | --- |
-| Unified diff parser and `apply` | Absent. The agent's only editing mechanism is the `shell` tool (`agentd-node/src/agent.rs:502-520`, `604-620`); the workspace manifest carries no diff/patch crate | Missing |
-| `apply_reverse` (invert `-`/`+` and hunk headers) | Absent; there is no undo mechanism of any kind | Missing |
-| Fuzzy and recount match (hunk-header repair) | Absent | Missing |
-| Atomic dry-run, all-or-nothing | Absent | Missing |
-| `CodePatchAppliedEvent` | Absent (follows from the missing patcher) | Missing |
+| Unified diff parser and `apply` | `agentd-node/src/patch.rs`: `Patch::parse` and `Patch::apply`, exposed to the model as the `apply_patch` tool (`agentd-node/src/agent.rs`) | Aligned |
+| `apply_reverse` (invert `-`/`+` and hunk headers) | `Patch::inverse` swaps the file headers and the hunk sides and inverts each line's prefix; applying it restores the bytes the patch was applied to, and the inverse of a creation is the deletion that undoes it | Aligned |
+| Fuzzy and recount match (hunk-header repair) | Deterministic recount: a hunk header's counts are recomputed from its body, so a header that disagrees is repaired. Offset/fuzzy body search is not implemented | Aligned (recount only) |
+| Atomic dry-run, all-or-nothing | `Patch::apply` is a dry run over in-memory content, and the tool stages every file before the first rename, so a patch that does not match or cannot be written changes nothing | Aligned |
+| `CodePatchAppliedEvent` | `agent.patch.applied`, carrying the applied files, their line counts, and the inverse patch (`agentd-events/src/agent.rs`, `agentd-node/src/agent.rs`) | Cosmetic (different name) |
 | OverlayFS integration | Absent, for the same reason as the workspace row | Deviation (intentional) |
 
 ### C. Event sourcing and observability layer
@@ -91,8 +93,8 @@ this repository's own design docs, and those decisions are cited as evidence.
 | `traceparent` (W3C Trace Context) in extensions | Implemented: parse/validate (`agentd-events/src/trace.rs`), envelope extension and ingress validation (`agentd-events/src/lib.rs:176`, `agentd-events/src/lib.rs:248`), normalisation on append (`agentd/src/server.rs:583-586`), the proxy links the child's `CONNECT` context and stamps the approval events (`agentd/src/proxy.rs:155-198`, `594-600`), and the agent stamps its own publishes (`agentd-node/src/agent.rs:595-596`) | Aligned |
 | OTel / Jaeger span export | OTLP/HTTP export with link-don't-adopt semantics (`agentd-telemetry/src/lib.rs`, `agentd-telemetry/src/semconv.rs`); the dev shell ships `opentelemetry-collector` with `nix/otelcol.yaml` because Jaeger is not in nixpkgs (`docs/telemetry.md:93-98`) | Cosmetic (any OTLP endpoint) |
 | `PROCESS_PAUSED` freeze while awaiting approval | No `SIGSTOP`/`SIGCONT`/pause of any kind | Reframe (see Rejected) |
-| A bound on the approval wait | Egress waits under a timeout and then denies (`agentd/src/proxy.rs:155-198`); `session.permission.requested` has **no timeout at all**, so a pending ACP permission is answered never (`agentd/src/bridge.rs:428-439`) | Missing |
-| A surface for the human to answer with | Any `authority` client may decide (`docs/egress.md:294-312`), but no approver binary ships: only `agentd-agent`, `agentd-node`, and `agentd-publish`, and the last needs a hand-written `--type`/`--data` | Missing |
+| A bound on the approval wait | Both waits end on their own: egress denies under a timeout (`agentd/src/proxy.rs:155-198`), and `--session-permission-approval-secs` makes the manager cancel an unanswered `session.permission.requested` under the request's own id, addressed to the session that asked (`agentd/src/session.rs`) | Aligned |
+| A surface for the human to answer with | `agentd-approve` lists the requests no decision answers and publishes one, reading with a read token and deciding with the authority token (`agentd-node/src/bin/agentd-approve.rs`); any `authority` client may still decide by hand (`docs/egress.md:294-312`) | Aligned |
 
 ### D. stdio plugin interface
 
@@ -106,7 +108,7 @@ this repository's own design docs, and those decisions are cited as evidence.
 
 | Specification | Implementation | Status |
 | --- | --- | --- |
-| `flake.nix` makes the dependencies portable | The dev shell ships `skills`, the Rust toolchain, `sccache`, and `opentelemetry-collector` (`flake.nix:100-115`). **`bubblewrap` is absent**, and a policy that needs a private network namespace fails closed without it on Linux (`agentd-sandbox/src/linux.rs:85`, `agentd-sandbox/src/linux.rs:458-492`) | Missing (bubblewrap) |
+| `flake.nix` makes the dependencies portable | The dev shell ships `skills`, the Rust toolchain, `sccache`, `opentelemetry-collector`, and `bubblewrap` and `mold` on Linux (`flake.nix:100-127`), which is the backend a policy that needs a private network namespace requires on Linux (`agentd-sandbox/src/linux.rs:85`, `agentd-sandbox/src/linux.rs:458-492`) | Aligned |
 | `process-compose.yaml` and `nix run .#dev` | No `process-compose` reference anywhere in the repository, and no `apps` output in `flake.nix` | Reframe (see Rejected) |
 | Jaeger started as a process | `opentelemetry-collector` is started by hand; see the export row above | Cosmetic |
 | One-command launch | `agentd up --workdir` (`agentd/src/up.rs`), reachable as `nix run .` through `meta.mainProgram = "agentd"` (`flake.nix:95`) | Aligned (different shape) |
@@ -142,10 +144,10 @@ These are not simple gaps; each conflicts with a deliberate decision.
 
 | Specification objective | Decision | Rationale |
 | --- | --- | --- |
-| Zero Trust Security | **Already met** by native isolation | bubblewrap, Seatbelt, Landlock, and seccomp already enforce the boundary (`docs/sandbox.md:19-25`), with `deny > write > read` precedence (`agentd-sandbox/src/policy.rs:6`). Only the reproducibility of `bubblewrap` is missing. |
-| ACID and reversible state | **Reject OverlayFS, adopt a patcher** | OverlayFS contradicts `docs/sandbox.md:218-226`; a unified-diff patcher with inverse application is a real gap and is kept as backlog. |
+| Zero Trust Security | **Already met** by native isolation | bubblewrap, Seatbelt, Landlock, and seccomp already enforce the boundary (`docs/sandbox.md:19-25`), with `deny > write > read` precedence (`agentd-sandbox/src/policy.rs:6`). Its reproducibility is now met too: `bubblewrap` ships in the Linux dev shell (`flake.nix`). |
+| ACID and reversible state | **Reject OverlayFS, adopt a patcher** | OverlayFS contradicts `docs/sandbox.md:218-226`; the unified-diff patcher with inverse application was built instead (Phase 4, `agentd-node/src/patch.rs`). |
 | Zero-dependency plugin DX | **Reject the engine as specified** | Extensions are out-of-process by design (`docs/architecture.md:307-314`) and `Bridge` already covers stdio JSON-RPC tools. |
-| Observability and HitL | **Adopt; mechanism done, usability missing** | `traceparent` propagation and OTLP export are implemented. The approval wait needs a bound and the operator needs a client. |
+| Observability and HitL | **Adopted and built** | `traceparent` propagation and OTLP export are implemented. The approval wait is bounded (`--session-permission-approval-secs`) and the operator has a client (`agentd-approve`), so both halves of the gap are closed. |
 | One-command dev experience | **Already met; reframe** | `agentd up` is the one command. `process-compose` is deferred until a second resident component exists. |
 | `PROCESS_PAUSED` | **Reframe** | A child awaiting approval is blocked on a socket or stdio read and consumes no CPU, so a freeze buys nothing; what is missing is that the wait always ends. |
 
@@ -171,9 +173,9 @@ These are recorded so they are not re-proposed as gaps.
 | --- | --- | --- | --- |
 | 0 | This document: the adopt/reject record | — | Done |
 | 1 | Observability: `traceparent` propagation and OTLP export | High | Done (`71dd695`, `f6b4c10`, `b969086`, `c8ca532`) |
-| 2 | Isolation reproducibility: ship `bubblewrap` in the dev shell | High | Open |
-| 3 | Approval usability: bound the wait, ship an approver client | High | Open |
-| 4 | Unified-diff patcher: parse, `apply`, `apply_reverse`, recount, dry-run | Medium | Open |
+| 2 | Isolation reproducibility: ship `bubblewrap` in the dev shell | High | Done (`b6414a1`; the package was already in the Linux dev shell when this row was still marked Open — the document was written against `c8ca532`) |
+| 3 | Approval usability: bound the wait, ship an approver client | High | Done (`352e67d`, `d15d14a`, `f9eb1a2`) |
+| 4 | Unified-diff patcher: parse, `apply`, `inverse`, recount, dry-run | Medium | Done (`dfbd778`, `8c84328`, `f512342`) |
 | 5 | Deferred: `process-compose`, a plugin registry, remote child restart | Low | Not started |
 
 No phase starts until its predecessor is agreed.
@@ -202,6 +204,11 @@ No phase starts until its predecessor is agreed.
   print the pending `sandbox.permission.requested`, `session.permission.requested`,
   and `session.egress.requested` events, and publish the decision (granted /
   denied / cancelled) under the same `request_id` with the `authority` token.
+- Built as specified, with one refinement the implementation forced: a bridged
+  child numbers its own requests, so a `request_id` is unique only within that
+  child. Both the manager and the approver therefore key a request by
+  `(subject, request_id)`, and the approver refuses an id that matches more than
+  one waiting request unless `--subject` says which.
 - Validate by driving a confined real agent through a permission round trip and
   answering it from the CLI, and by holding an egress `CONNECT` open while
   answering it.
@@ -216,6 +223,10 @@ No phase starts until its predecessor is agreed.
   **inverse patch**, so undo is "read the inverse from the log and apply it" and
   no daemon-side patch store is needed.
 - Apply against the existing read-write bind; no overlayfs.
+- Built as specified, with two consequences worked out in the implementation: a
+  deletion is a first-class outcome, so the inverse of a creation really undoes
+  it (and a deletion whose hunks leave lines behind is refused), and a file named
+  by two sections is rejected rather than applied in part.
 
 ## Re-verification
 
@@ -223,20 +234,25 @@ Re-establishing the ledger from a clean tree:
 
 | Claim | Command |
 | --- | --- |
-| OverlayFS, patcher, pause, `process-compose` are absent | `rg -i 'overlay\|lowerdir\|apply_reverse\|sigstop\|process-compose' --glob '!target'` |
-| `bubblewrap` is absent from the flake | `rg -n bubblewrap flake.nix`, `nix develop -c bwrap --version` |
-| The permission wait has no timeout | `rg -n 'timeout\|Timeout' agentd/src/bridge.rs` (no match) |
-| No approver binary ships | `ls agentd-node/src/bin` |
+| OverlayFS, pause, `process-compose` are absent | `rg -i 'overlay\|lowerdir\|sigstop\|process-compose' --glob '!target'` |
+| The patcher parses, applies, and inverts | `cargo test -p agentd-node --lib -- patch::` |
+| `bubblewrap` ships in the dev shell | `rg -n bubblewrap flake.nix`, `nix develop -c bwrap --version` |
+| The permission wait is bounded | `rg -n 'permission-approval-secs' agentd/src/main.rs`, `cargo test -p agentd --lib -- session::tests` |
+| An approver binary ships | `ls agentd-node/src/bin`, `cargo test -p agentd --test approve` |
 | The tree is green | `cargo test --workspace --all-features --no-fail-fast` |
 
 ## Open questions
 
-- Phase 3: should `up` give `--session-permission-approval-secs` a default, or
-  keep an unbounded wait the operator must opt out of? An unbounded default is
-  what lets an agent hang forever today.
-- Phase 4: is one `apply_patch` tool enough beside `shell`, or is the intent to
-  narrow `shell` later? Today the patcher is additive, not a boundary.
-- Phase 4: confirm the inverse patch belongs in the event payload (undo from the
-  log alone) rather than in a side store.
+- Phase 3: **resolved** — the deadline is `serve`-side
+  (`--session-permission-approval-secs`), because only a bridged session
+  (`--session-bridge`) can ask for a permission and `up` starts no bridge; the
+  wait stays opt-in, so an operator who wants a bound sets one rather than
+  inheriting it.
+- Phase 4: **resolved** — one `apply_patch` tool beside `shell` is enough. The
+  patcher is additive and `shell` is unchanged, so an edit that the patcher
+  refuses (a rename, CRLF content) is still reachable.
+- Phase 4: **resolved** — the inverse patch belongs in the event payload, and it
+  is there. An undo is "read the inverse from the log and apply it", and no
+  daemon-side patch store exists.
 - Phase 5: what concrete trigger ends the deferral — a second resident
   component, a second plugin, or a second host platform?
