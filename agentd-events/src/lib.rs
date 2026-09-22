@@ -15,7 +15,7 @@
 //!
 //! Everything that leaves the log — the live fanout and the WebSocket API —
 //! carries the event's [`Seq`] alongside it: as a [`LogEntry`] in-process, and
-//! as a [`WireMessage`] on the wire, so a consumer can record how far it has
+//! as a [`WireEnvelope`] on the wire, so a consumer can record how far it has
 //! processed and resume from there.
 //!
 //! [CloudEvents]: https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md
@@ -290,7 +290,7 @@ impl Event {
 /// from there with [`EventLog::read_from`].
 ///
 /// The position is in-process metadata; the shape sent over the WebSocket API
-/// is [`WireMessage`], whose `seq` is optional to admit transient daemon
+/// is [`WireEnvelope`], whose `seq` is optional to admit transient daemon
 /// notices that are not part of the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogEntry {
@@ -311,8 +311,12 @@ impl LogEntry {
     }
 }
 
-/// The JSON envelope exchanged with WebSocket clients: an [`Event`] and its log
+/// The envelope exchanged with WebSocket clients: an [`Event`] and its log
 /// position.
+///
+/// The name says envelope rather than message because the [`Event`] inside is
+/// the event: this type only carries it together with the position the log gave
+/// it (see `docs/vocabulary.md`).
 ///
 /// `seq` is the one-based log position, or `None` for a transient daemon notice
 /// that is not part of the log (for example `error.lagged`). Inbound frames are
@@ -320,9 +324,9 @@ impl LogEntry {
 /// produced by the daemon and never by a client.
 ///
 /// [`Event`] serializes as its verbatim `CloudEvents` envelope, so a
-/// `WireMessage` is `{ "seq": <n|null>, "event": <cloud event> }`.
+/// `WireEnvelope` is `{ "seq": <n|null>, "event": <cloud event> }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireMessage {
+pub struct WireEnvelope {
     /// The one-based log position, or `None` for a transient notice.
     #[serde(default)]
     pub seq: Option<Seq>,
@@ -330,7 +334,7 @@ pub struct WireMessage {
     pub event: Event,
 }
 
-impl WireMessage {
+impl WireEnvelope {
     /// Wraps a transient daemon notice that has no log position.
     #[must_use]
     pub const fn notice(event: Event) -> Self {
@@ -338,7 +342,7 @@ impl WireMessage {
     }
 }
 
-impl From<LogEntry> for WireMessage {
+impl From<LogEntry> for WireEnvelope {
     /// Wraps a committed log entry with its position.
     fn from(entry: LogEntry) -> Self {
         Self {

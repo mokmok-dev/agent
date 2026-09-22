@@ -8,7 +8,7 @@
 use crate::client::WsClient;
 use crate::filter::Interest;
 use crate::projection::{SqliteProjection, SqliteReducer};
-use agentd_events::{LogEntry, Seq, WireMessage};
+use agentd_events::{LogEntry, Seq, WireEnvelope};
 use secrecy::{ExposeSecret as _, SecretString};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -192,7 +192,7 @@ where
     /// Applies or skips one message, advancing the checkpoint either way.
     fn handle(
         &mut self,
-        wire: WireMessage,
+        wire: WireEnvelope,
     ) -> Result<(), NodeError<R::Error>> {
         let Some(seq) = wire.seq else {
             return Self::handle_notice(&wire);
@@ -214,7 +214,7 @@ where
     ///
     /// A rejected resume position is fatal: the projection is ahead of the log,
     /// so reconnecting would repeat the rejection forever.
-    fn handle_notice(wire: &WireMessage) -> Result<(), NodeError<R::Error>> {
+    fn handle_notice(wire: &WireEnvelope) -> Result<(), NodeError<R::Error>> {
         if wire.event.r#type == RESUME_OUT_OF_RANGE {
             return Err(NodeError::ResumeOutOfRange {
                 position: json_position(&wire.event.data, "position"),
@@ -320,17 +320,17 @@ mod tests {
             .expect("open should succeed");
         let mut node = node(projection);
 
-        node.handle(agentd_events::WireMessage {
+        node.handle(agentd_events::WireEnvelope {
             seq: Some(1),
             event: Event::new("test.keep", json!({})),
         })
         .expect("apply should succeed");
-        node.handle(agentd_events::WireMessage {
+        node.handle(agentd_events::WireEnvelope {
             seq: Some(2),
             event: Event::new("other.drop", json!({})),
         })
         .expect("skip should succeed");
-        node.handle(agentd_events::WireMessage {
+        node.handle(agentd_events::WireEnvelope {
             seq: None,
             event: Event::new("error.lagged", json!({})),
         })
@@ -349,7 +349,7 @@ mod tests {
         let mut node = node(projection);
 
         let error = node
-            .handle(agentd_events::WireMessage {
+            .handle(agentd_events::WireEnvelope {
                 seq: None,
                 event: Event::new(
                     "error.resume_out_of_range",

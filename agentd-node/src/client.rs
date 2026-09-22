@@ -1,11 +1,11 @@
 //! A WebSocket client for the daemon's event API over a Unix domain socket.
 //!
-//! The client is bidirectional: it receives [`WireMessage`]s (an [`Event`]
+//! The client is bidirectional: it receives [`WireEnvelope`]s (an [`Event`]
 //! paired with its log position) and can publish [`Event`]s. Connecting with a
 //! resume position makes the daemon replay history from that position before
 //! the live stream continues, so a node can rejoin without gaps or duplicates.
 
-use agentd_events::{Event, Seq, WireMessage};
+use agentd_events::{Event, Seq, WireEnvelope};
 use futures_util::{SinkExt, StreamExt};
 use secrecy::zeroize::Zeroizing;
 use std::path::Path;
@@ -28,7 +28,7 @@ pub enum ClientError {
     /// The bearer token could not be encoded as a header value.
     #[error("the bearer token is not a valid header value")]
     Token,
-    /// A received frame was not a valid [`WireMessage`].
+    /// A received frame was not a valid [`WireEnvelope`].
     #[error("the daemon sent an invalid wire message: {0}")]
     Decode(#[source] serde_json::Error),
     /// An [`Event`] to publish could not be serialized.
@@ -99,8 +99,8 @@ impl WsClient {
     /// # Errors
     ///
     /// Returns [`ClientError::Decode`] if a text frame is not a valid
-    /// [`WireMessage`] and [`ClientError::WebSocket`] on a transport failure.
-    pub async fn next(&mut self) -> Result<Option<WireMessage>, ClientError> {
+    /// [`WireEnvelope`] and [`ClientError::WebSocket`] on a transport failure.
+    pub async fn next(&mut self) -> Result<Option<WireEnvelope>, ClientError> {
         loop {
             match self.stream.next().await {
                 None | Some(Ok(Message::Close(_))) => return Ok(None),
@@ -154,7 +154,7 @@ impl WsClient {
         &mut self,
         event: &Event,
         timeout: Duration,
-    ) -> Result<WireMessage, PublishError> {
+    ) -> Result<WireEnvelope, PublishError> {
         self.send(event).await?;
         let deadline = tokio::time::Instant::now() + timeout;
         loop {

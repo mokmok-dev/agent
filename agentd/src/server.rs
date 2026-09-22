@@ -1,4 +1,4 @@
-use agentd_events::{DAEMON_CAUGHT_UP, Event, EventLog, LogEntry, LogError, Seq, WireMessage};
+use agentd_events::{DAEMON_CAUGHT_UP, Event, EventLog, LogEntry, LogError, Seq, WireEnvelope};
 use agentd_inference::{Delta, InferenceRequest, Provider};
 use axum::Router;
 use axum::extract::Query;
@@ -406,7 +406,7 @@ where
 /// frame is answered with an `error.invalid_event` notice, a missing
 /// [`Claim::Authority`] for a reserved type with `error.unauthorized`, and a
 /// failed durable append with `error.publish_failed` instead of closing the
-/// connection. Outbound messages are [`WireMessage`]s, pairing each event with
+/// connection. Outbound messages are [`WireEnvelope`]s, pairing each event with
 /// its log position (or `null` for a transient notice).
 ///
 /// When `from` is `Some` and the connection can read, history is replayed from
@@ -664,7 +664,7 @@ async fn send_notice(
     sink: &mut SplitSink<WebSocket, Message>,
     event: Event,
 ) -> Result<(), axum::Error> {
-    send_message(sink, WireMessage::notice(event)).await
+    send_message(sink, WireEnvelope::notice(event)).await
 }
 
 /// Sends `message` as a JSON text message.
@@ -672,7 +672,7 @@ async fn send_notice(
 /// Messages that cannot be serialized are logged and skipped.
 async fn send_message(
     sink: &mut SplitSink<WebSocket, Message>,
-    message: WireMessage,
+    message: WireEnvelope,
 ) -> Result<(), axum::Error> {
     send_json(sink, &message, &message.event.r#type).await
 }
@@ -681,7 +681,7 @@ async fn send_message(
 mod tests {
     use super::{ServerError, bind, router, run};
     use crate::auth::{Claim, Principal, Token, TokenStore};
-    use agentd_events::{Event, EventLog, Seq, WireMessage};
+    use agentd_events::{Event, EventLog, Seq, WireEnvelope};
     use agentd_inference::{Delta, FakeProvider, InferenceRequest, Provider};
     use futures_util::SinkExt;
     use futures_util::StreamExt;
@@ -829,7 +829,8 @@ mod tests {
         let Message::Text(text) = message else {
             panic!("expected a text message, got {message:?}");
         };
-        let wire: WireMessage = serde_json::from_str(&text).expect("expected a valid wire message");
+        let wire: WireEnvelope =
+            serde_json::from_str(&text).expect("expected a valid wire message");
         (wire.seq, wire.event)
     }
 

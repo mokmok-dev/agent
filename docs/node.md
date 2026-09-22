@@ -54,7 +54,7 @@ truncated or compacted in this design.
 ```mermaid
 flowchart LR
     D[("events.jsonl<br/>the log (truth)")] -- "replay + live" --> S["agentd<br/>WebSocket /events"]
-    S -- "WireMessage { seq, event }" --> C["WsClient"]
+    S -- "WireEnvelope { seq, event }" --> C["WsClient"]
     C --> N["Node"]
     N -- "interested?" --> I["Interest"]
     N -- "reduce + checkpoint (one tx)" --> P[("SQLite projection<br/>rebuildable read model")]

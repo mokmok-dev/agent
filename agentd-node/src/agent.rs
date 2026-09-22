@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use agentd_events::{DAEMON_CAUGHT_UP, Event, LogEntry, Seq, WireMessage};
+use agentd_events::{DAEMON_CAUGHT_UP, Event, LogEntry, Seq, WireEnvelope};
 use agentd_inference::{
     Delta, InferenceClient, InferenceRequest, Message, Role, ToolCall, ToolSpec,
 };
@@ -284,7 +284,7 @@ impl Agent {
     /// it arrives. An inbox for another conversation is applied but not answered.
     fn handle(
         &mut self,
-        wire: WireMessage,
+        wire: WireEnvelope,
     ) -> Result<Option<Seq>, AgentError> {
         let Some(seq) = wire.seq else {
             if wire.event.r#type == DAEMON_CAUGHT_UP {
@@ -1243,7 +1243,7 @@ mod tests {
     #[test]
     fn an_inbox_for_another_conversation_does_not_trigger() {
         let (_dir, mut agent) = agent();
-        let wire = agentd_events::WireMessage {
+        let wire = agentd_events::WireEnvelope {
             seq: Some(1),
             event: Event::new(
                 crate::conversation::AGENT_INBOX,
@@ -1261,7 +1261,7 @@ mod tests {
     #[test]
     fn an_inbox_for_this_conversation_triggers() {
         let (_dir, mut agent) = agent();
-        let wire = agentd_events::WireMessage {
+        let wire = agentd_events::WireEnvelope {
             seq: Some(1),
             event: Event::new(
                 crate::conversation::AGENT_INBOX,
@@ -1276,7 +1276,7 @@ mod tests {
     #[test]
     fn a_non_agent_event_advances_the_checkpoint_without_triggering() {
         let (_dir, mut agent) = agent();
-        let wire = agentd_events::WireMessage {
+        let wire = agentd_events::WireEnvelope {
             seq: Some(7),
             event: Event::new("task.submitted", json!({})),
         };
@@ -1296,7 +1296,7 @@ mod tests {
             let mut first =
                 Agent::new("/tmp/a.sock", projection, "c1", dir.path(), "urn:test", "t");
             let _ = first
-                .handle(agentd_events::WireMessage {
+                .handle(agentd_events::WireEnvelope {
                     seq: Some(1),
                     event: Event::new(
                         crate::conversation::AGENT_INBOX,
@@ -1310,7 +1310,7 @@ mod tests {
             SqliteProjection::<Conversation>::open(&db).expect("projection should reopen");
         let mut agent = Agent::new("/tmp/a.sock", projection, "c1", dir.path(), "urn:test", "t");
         let trigger = agent
-            .handle(agentd_events::WireMessage {
+            .handle(agentd_events::WireEnvelope {
                 seq: None,
                 event: Event::new(DAEMON_CAUGHT_UP, json!({})),
             })
@@ -1323,7 +1323,7 @@ mod tests {
     fn an_already_run_tail_is_not_triggered_again() {
         let (_dir, mut agent) = agent();
         let _ = agent
-            .handle(agentd_events::WireMessage {
+            .handle(agentd_events::WireEnvelope {
                 seq: Some(1),
                 event: Event::new(
                     crate::conversation::AGENT_INBOX,
@@ -1333,7 +1333,7 @@ mod tests {
             .expect("handle should succeed");
 
         let trigger = agent
-            .handle(agentd_events::WireMessage {
+            .handle(agentd_events::WireEnvelope {
                 seq: None,
                 event: Event::new(DAEMON_CAUGHT_UP, json!({})),
             })

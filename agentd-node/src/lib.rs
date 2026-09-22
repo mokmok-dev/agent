@@ -52,7 +52,7 @@ pub mod patch;
 mod projection;
 
 pub use agent::{Agent, ShellLimits};
-pub use agentd_events::{DAEMON_CAUGHT_UP, Event, LogEntry, Projection, Seq, WireMessage};
+pub use agentd_events::{DAEMON_CAUGHT_UP, Event, LogEntry, Projection, Seq, WireEnvelope};
 pub use agentd_inference::{Delta, Message, Role, ToolCall, ToolSpec};
 pub use client::{ClientError, PublishError, WsClient};
 pub use conversation::{
