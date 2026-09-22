@@ -405,7 +405,7 @@ untouched — while `up` is the opinionated launcher built on top:
   daemon. It also claims the socket (via `server::bind`, split from `serve`)
   before the manager starts, so a second instance fails with `AlreadyRunning`
   without its reconciliation disturbing the live instance's session.
-- It waits (bounded) for the `agent.session.started` event naming its own
+- It waits (bounded) for the `agent.conversation.started` event naming its own
   workdir, then prints the `agentd-publish` invocation that reaches that
   session: the session database and the user token, which the operator cannot
   otherwise guess, plus the conversation id it observed. When the announcement

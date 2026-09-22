@@ -289,21 +289,22 @@ pub struct ExecResult {
 ```
 
 `spawn` defaults to an error, so an executor that only supports one-shot
-commands cannot back a session; the layer-1 executor overrides it.
+commands cannot back a long-lived process; the layer-1 executor overrides it.
 
-### Sessions
+### Long-lived processes
 
-`Sandbox::spawn(command)` runs a long-lived process with piped stdio for the
-node model in `docs/node.md`. It goes through the same approval as `exec` once,
-at spawn, and appends `sandbox.process.started`; `SandboxedProcess::wait`
+`Sandbox::spawn(command)` runs a long-lived `SandboxedProcess` with piped stdio
+for the node model in `docs/node.md`. It goes through the same approval as `exec`
+once, at spawn, and appends `sandbox.process.started`; `SandboxedProcess::wait`
 appends `sandbox.process.exited` with the exit code and duration. The caller
 takes the pipes (`take_stdin`/`take_stdout`/`take_stderr`) and owns the I/O; the
-output is not captured, so a session is not bounded by the one-shot output cap.
+output is not captured, so a long-lived process is not bounded by the one-shot
+output cap.
 The `SandboxedProcess` holds the executor alive, so the profile and scratch it
 was spawned under outlive the `Sandbox` handle, and it is killed on drop if it
 is still running. Because the whole process is confined by one profile and its children
 inherit it, per-command `sandbox.permission.*` events are not emitted for a
-session — its lifecycle events are the audit trail.
+spawned process — its lifecycle events are the audit trail.
 
 The daemon's session manager (`agentd::session`, behind the `sandbox` feature)
 drives this from the log; its unit and the protocol-conversion layer on top of
@@ -384,11 +385,12 @@ existing dotted-type convention and `source: urn:mokmokd`:
 | `sandbox.permission.requested` | A command or resource access needs a decision                     |
 | `sandbox.permission.granted`  | A static policy rule or an approver allowed it                    |
 | `sandbox.permission.denied`   | A static policy rule or an approver refused it (deny wins)        |
+| `sandbox.permission.cancelled` | Nobody decided it before the deadline, so it was withdrawn        |
 | `sandbox.violation.filesystem` | The OS refused a filesystem operation: reason, denied path, output snippet |
 | `sandbox.violation.network`   | The OS refused a network operation                                 |
-| `sandbox.exec.completed`      | Terminal state of an execution: exit code, duration, output sizes |
-| `sandbox.process.started`     | A long-lived session was spawned                                  |
-| `sandbox.process.exited`      | Terminal state of a session: exit code and duration               |
+| `sandbox.exec.completed`      | Terminal state of a one-shot execution: exit code, duration, output sizes |
+| `sandbox.process.started`     | A long-lived confined process was spawned                         |
+| `sandbox.process.exited`      | Terminal state of that process: exit code and duration            |
 | `session.requested`           | A client asks the daemon to start a managed session               |
 | `session.started`             | The managed session's sandboxed process started                   |
 | `session.restarted`           | The managed session's process restarted after a non-zero exit     |
@@ -405,7 +407,8 @@ Every permission event carries a `request_id` (a UUID) alongside `sandbox_id`, s
 a decision is correlated to one request even when execs run concurrently.
 `decision` in `requested` is `auto` when a static rule granted immediately and
 `pending` when human approval is configured. An approver is a WS client that
-reacts to `requested` by publishing a `granted`/`denied` event carrying the same
+reacts to `requested` by publishing one of `granted`, `denied`, or `cancelled`
+carrying the same
 `request_id`; it authenticates with a token holding the `authority` claim, so a
 client without it cannot publish a `sandbox.permission.*` event (see
 [architecture](architecture.md#access-control)).
@@ -414,7 +417,7 @@ With `Approval::Auto` the sandbox publishes `requested`(`auto`) and then
 `granted` itself. With `Approval::Required { timeout }` it publishes
 `requested`(`pending`) and awaits a matching decision: a grant proceeds (the
 approver's `granted` is the durable record, so it is not republished), a denial
-returns a denied `ExecResult`, and a timeout records a `denied` itself and
+returns a denied `ExecResult`, and a timeout records a `cancelled` itself and
 returns a denied result. A decision that does not carry the request's id is
 ignored, so one request cannot release another.
 
@@ -490,11 +493,12 @@ Modeled on Sheena's methodology and codex's, adapted to Rust:
   cannot be created or modified; canonicalisation collapses `/tmp`.
 - **Permission flow tests**: end-to-end through the log — `requested` →
   `granted` → `exec.completed`, and `Approval::Required` granting, denying, and
-  timing out over the log with `request_id` correlation.
+  timing out over the log with `request_id` correlation (a timeout is a
+  `cancelled`, and an approver's cancellation is recorded as one too).
 - **Violation flow tests**: a structured `sandbox.violation.*` for a recognised
   OS denial, and no violation for an unrelated failure.
-- **Session tests**: `sandbox.process.started`/`exited` over the log, piped
-  stdin/stdout streaming, approval denial, a real confined session that streams
+- **Process tests**: `sandbox.process.started`/`exited` over the log, piped
+  stdin/stdout streaming, approval denial, a real confined process that streams
   I/O under the Seatbelt profile, and a real sandboxed process that reaches a
   granted Unix socket but not an ungranted one.
 - **Session manager tests**: `session.*` lifecycle, restart within the budget, a
@@ -503,9 +507,9 @@ Modeled on Sheena's methodology and codex's, adapted to Rust:
   one is left alone).
 - **Linux tests**: the bubblewrap argument renderer, and, where a namespace can
   be built, real writes reaching a write entry, a denial masking a path, an
-  outside write failing, environment scrubbing, session streaming, and a
-  timeout killing the process group; the Landlock spec, and a real Landlock
-  session that confines the filesystem, refuses a denied read, denies TCP, and
+  outside write failing, environment scrubbing, long-lived process streaming, and
+  a timeout killing the process group; the Landlock spec, and a real Landlock
+  process that confines the filesystem, refuses a denied read, denies TCP, and
   reports seccomp active through `/proc/self/status`; and that a nested `deny`
   rejects the Landlock fallback. The Nix build sandbox
   cannot nest bubblewrap, so those spawn tests skip there as on macOS.
@@ -534,7 +538,8 @@ command (read-only host root, read-write write entries, masked denials, network
 unshared) or, without bubblewrap, into a Landlock allowlist plus a seccomp
 deny-list applied by the `agentd-sandbox-helper` binary, a denial is classified
 into a `sandbox.violation.*` event, the human-in-the-loop approval flow runs over
-the log with `request_id` correlation, the long-lived session spawn API is in
+the log with `request_id` correlation and three outcomes (granted, denied,
+cancelled), the long-lived process spawn API is in
 place, and the deleted concepts (VFS, allowlist, caps) are gone from the code.
 The daemon-side `agentd::session` manager is started by the binary
 (`--session-command` with `--sandbox-policy`), grants the daemon's own socket to

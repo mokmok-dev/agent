@@ -184,15 +184,16 @@ sandbox. The token file rule (mode `0600`) applies as for any other capability.
 The agent publishes these non-reserved `agent.*` types; they are ordinary
 publishable events, not daemon-authority ones, because the agent is the author:
 
-| Type                    | When                                              |
-| ----------------------- | ------------------------------------------------- |
-| `agent.session.started` | A session began (conversation, workdir, model)     |
-| `agent.inbox`           | A user prompt that starts a turn                  |
-| `agent.message`         | A finalized assistant message (with any tool calls) |
-| `agent.tool_result`    | The result of a tool the assistant called         |
-| `agent.turn.started`   | A turn began                                      |
-| `agent.turn.completed` | A turn completed without a provider error         |
-| `agent.turn.failed`    | A turn failed (for example a provider error)      |
+| Type                          | When                                              |
+| ----------------------------- | ------------------------------------------------- |
+| `agent.conversation.started`  | A conversation began (its id, workdir, model)     |
+| `agent.inbox`                 | A user prompt that starts a turn                  |
+| `agent.message`               | A finalized assistant message (with any tool calls) |
+| `agent.tool_result`           | The result of a tool the assistant called         |
+| `agent.patch.applied`         | A unified diff the assistant applied, with its inverse |
+| `agent.turn.started`          | A turn began                                      |
+| `agent.turn.completed`        | A turn completed without a provider error         |
+| `agent.turn.failed`           | A turn failed (for example a provider error)      |
 
 `agent.inbox` starts a turn, but a turn is driven by the conversation's tail,
 not by the event alone: after applying an event the agent runs a turn when the

@@ -265,7 +265,7 @@ Implemented: the `SandboxedProcess` rename; the `subject` attribute on `Event`
 with `with_subject`; the `data.subject` -> `data.command` rename in the sandbox
 events; the `Bridge` trait and `McpBridge` (`agentd/src/bridge.rs`); the
 manager's `Option<Arc<dyn Bridge>>`, handshake, line-framed uplink, single-writer
-downlink, subject routing, and frame cap; and the `--session-bridge mcp` daemon
+downlink, subject routing, and frame cap; and the `--session-protocol mcp` daemon
 flag. All of it is behind the `sandbox` feature.
 
 Not built: `LspBridge` or any second protocol, a `StdioBridge` for protocol-less

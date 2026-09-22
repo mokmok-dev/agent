@@ -384,7 +384,7 @@ Verified:
   and receives the origin's body, so bytes cross loopback, the forwarder, the
   socket, and the proxy (`agentd-sandbox/tests/egress_flow.rs`).
 - A real agent: `agentd/examples/acp_handshake.rs` drives `opencode2 acp` to
-  `session.acp.ready` in all three modes — unconfined, `--sandbox` (private
+  `session.protocol.ready` in all three modes — unconfined, `--sandbox` (private
   namespace, no egress), and `--sandbox --egress openrouter.ai:443` inside the
   same no-egress namespace, reaching the proxy only through the socket.
 

@@ -62,7 +62,7 @@ flowchart LR
     B["AcpBridge<br/>per-session state machine"] -- "initialize, session/new,<br/>session/prompt, id N" --> A["ACP agent<br/>confined child"]
     A -- "session/request_permission, id N" --> B
     B -- "events under subject session:id" --> L["EventBus / event log"]
-    L -- "session.permission.decided, id N" --> B
+    L -- "the permission decision, id N" --> B
     A -. "runs its own fs and shell work<br/>inside the sandbox" .-> W["workspace, workdir = cwd"]
 ```
 
@@ -129,7 +129,7 @@ Started -initialize->  Initialized -session/new->  Ready -session/prompt->  Prom
 - On the `initialize` response it emits `session/new` with the session's `cwd`
   and an empty `mcpServers` list, and remembers the ACP `sessionId` when it
   arrives.
-- Once `Ready`, a downlink event `session.bridge.prompt` emits `session/prompt`.
+- Once `Ready`, a downlink event `session.prompt.requested` emits `session/prompt`.
 
 Client capabilities advertised: `fs.readTextFile: false`,
 `fs.writeTextFile: false`, `terminal: false`, no elicitation. The agent is
@@ -162,12 +162,12 @@ sequenceDiagram
     A-->>B: the response for id 0
     B->>A: session/new (cwd, empty mcpServers)
     A-->>B: sessionId
-    B->>L: session.acp.ready
-    M->>B: on_event(session.bridge.prompt)
+    B->>L: session.protocol.ready
+    M->>B: on_event(session.prompt.requested)
     B->>A: session/prompt
     A->>B: session/request_permission (id N)
     B->>L: session.permission.requested (request_id N)
-    U->>L: session.permission.decided (request_id N)
+    U->>L: session.permission.granted (request_id N)
     L-->>B: the decision routed to this session
     B->>A: request_permission response under id N
 ```
@@ -183,12 +183,13 @@ same durable-decision model as the sandbox approval flow (see
    `session.permission.requested` carrying the tool call and the offered
    options, and keeps id `N` pending.
 2. An approver — any WS client with the `authority` claim — publishes
-   `session.permission.decided` with the same correlation id and the chosen
-   `optionId` (or `cancelled`).
+   `session.permission.granted` with the same correlation id and the chosen
+   `optionId`, `session.permission.denied` with a rejecting `optionId`, or
+   `session.permission.cancelled` when the request is withdrawn.
 3. The manager routes that decision to the bridge, which emits the
    `request_permission` response under id `N`.
 
-Because both types carry the reserved `session.*` prefix, only an authority
+Because all three types carry the reserved `session.*` prefix, only an authority
 client can decide, so an agent cannot approve its own tool call — the same
 guarantee the sandbox makes for its own permission events.
 
@@ -196,13 +197,15 @@ Event types this adds:
 
 | Type | Direction | Payload | Builder |
 | --- | --- | --- | --- |
-| `session.bridge.prompt` | downlink | the prompt content blocks to send | `bridge::prompt(blocks)` |
-| `session.bridge.inbound` | uplink | one agent JSON-RPC message (existing type) | `bridge::bridged_inbound` |
+| `session.prompt.requested` | downlink | the prompt content blocks to send | `bridge::prompt_requested(blocks)` |
+| `session.protocol.inbound` | uplink | one agent JSON-RPC message (existing type) | `bridge::bridged_inbound` |
 | `session.permission.requested` | uplink | `request_id`, `tool_call`, `options` | — |
-| `session.permission.decided` | downlink | `request_id`, `option_id` or `cancelled` | `bridge::permission_decided` / `permission_cancelled` |
-| `session.acp.ready` | uplink | the handshake completed | `bridge::ACP_READY` |
-| `session.acp.failed` | uplink | the handshake or a turn failed | `bridge::ACP_FAILED` |
-| `session.acp.turn.completed` | uplink | a prompt turn ended, with its stop reason | `bridge::ACP_TURN_COMPLETED` |
+| `session.permission.granted` | downlink | `request_id`, `option_id` (an allow option) | `bridge::permission_granted` |
+| `session.permission.denied` | downlink | `request_id`, `option_id` (a reject option) | `bridge::permission_denied` |
+| `session.permission.cancelled` | downlink | `request_id`, `cancelled: true` | `bridge::permission_cancelled` |
+| `session.protocol.ready` | uplink | the handshake completed | `bridge::PROTOCOL_READY` |
+| `session.protocol.failed` | uplink | the handshake or a turn failed | `bridge::PROTOCOL_FAILED` |
+| `session.prompt.completed` | uplink | a prompt turn ended, with its stop reason | `bridge::PROMPT_COMPLETED` |
 
 ## The egress problem and its answer
 
@@ -258,7 +261,7 @@ An ACP agent starts and completes its handshake confined, in two ways:
   provider through the proxy *and* keeps its own server. The daemon injects
   `NO_PROXY` so the agent's own loopback stays off the tunnel.
   `agentd/examples/acp_handshake.rs` drives a real `opencode2 acp` to
-  `session.acp.ready` and through a prompt turn this way; the proxy observes the
+  `session.protocol.ready` and through a prompt turn this way; the proxy observes the
   agent's `CONNECT openrouter.ai:443`.
 
 The agent must honour the injected proxy env (see the egress doc's gap);
@@ -272,8 +275,9 @@ concern.
   are monotonic; a response is matched to its `Pending` and not re-emitted as a
   request; foreign/blank/non-JSON lines are ignored.
 - **Id-correlation tests**: `session/request_permission` publishes
-  `session.permission.requested`; a `session.permission.decided` produces the
-  `request_permission` response under the original id.
+  `session.permission.requested`; one of `session.permission.granted`, `.denied`,
+  or `.cancelled` produces the `request_permission` response under the original
+  id.
 - **Capability tests**: the advertised `initialize` carries the documented
   client capabilities and protocol version.
 - **End-to-end tests**: a scripted child on `/bin/sh` runs the handshake and one
@@ -287,9 +291,9 @@ concern.
 Implemented: the stateful `Protocol`/`Bridge`/`Action` traits; the
 `McpProtocol`/`McpBridge` refactor onto them; `AcpProtocol`/`AcpBridge` (phase
 machine, id correlation, permission round trip, unknown-method error replies);
-the `PROMPT`/`session.permission.*`/`session.acp.*` event types with typed
-builders; `SessionManager::with_protocol` and `with_workdir`; and the
-`--session-bridge acp` flag. All behind the `sandbox` feature.
+the `session.prompt.*`, `session.permission.*`, and `session.protocol.*` event
+types with typed builders; `SessionManager::with_protocol` and `with_workdir`;
+and the `--session-protocol acp` flag. All behind the `sandbox` feature.
 
 Not built: `fs/*` and `terminal/*` client methods (capabilities are advertised
 false, so the agent does its own work; an unsupported request is answered
@@ -299,7 +303,7 @@ out (see [egress](egress.md)).
 
 Verified against a real agent: `agentd/examples/acp_handshake.rs` drives
 `opencode acp` through `AcpProtocol` and completes the handshake
-(`initialize` -> `session/update` -> `session/new`, then `session.acp.ready`).
+(`initialize` -> `session/update` -> `session/new`, then `session.protocol.ready`).
 
 It runs both ways: unconfined by default, and `--sandbox` confined. The confined
 run works because the agent's internal HTTP server needs free loopback, which is
