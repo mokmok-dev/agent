@@ -63,6 +63,14 @@ pub fn is_reserved_type(r#type: &str) -> bool {
         .any(|prefix| r#type.starts_with(prefix))
 }
 
+/// The transient notice the daemon sends over the event API once a resume
+/// replay has caught up.
+///
+/// It is a wire-protocol marker, not a recorded event: a client that resumes
+/// uses it to know the replayed history has been delivered and the live stream
+/// begins.
+pub const DAEMON_CAUGHT_UP: &str = "daemon.caught_up";
+
 /// Why an event is not acceptable on ingress.
 ///
 /// A client-supplied event is validated before it is appended, so a malformed

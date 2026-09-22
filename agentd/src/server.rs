@@ -1,4 +1,6 @@
-use agentd_events::{Event, EventLog, LogEntry, LogError, Seq, WireMessage};
+use agentd_events::{
+    DAEMON_CAUGHT_UP, Event, EventLog, LogEntry, LogError, Seq, WireMessage,
+};
 use agentd_inference::{Delta, InferenceRequest, Provider};
 use axum::Router;
 use axum::extract::Query;
@@ -22,10 +24,6 @@ use crate::auth::{Claim, TokenStore};
 /// The largest number of historical events read from the log at once while
 /// replaying to a client. Bounds the memory one replay step can hold.
 const REPLAY_CHUNK: usize = 256;
-
-/// The transient notice sent once a resume replay has caught up, so a client
-/// can finish an interrupted turn from the replayed state.
-const DAEMON_CAUGHT_UP: &str = "daemon.caught_up";
 
 /// Errors returned by [`run`].
 #[derive(Debug, Error)]

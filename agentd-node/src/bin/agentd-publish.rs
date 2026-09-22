@@ -79,18 +79,15 @@ enum RunError {
     /// The WebSocket connection failed.
     #[error(transparent)]
     Client(#[from] agentd_node::ClientError),
+    /// The daemon did not commit or reject the event in time.
+    #[error(transparent)]
+    Publish(#[from] agentd_node::PublishError),
     /// `--inbox` was given but no session exists for the workdir.
     #[error("no session found for this workdir; start agentd-agent first")]
     NoSession,
     /// Neither `--inbox` nor `--type`/`--data` was given.
     #[error("pass --inbox <text>, or both --type and --data")]
     MissingEvent,
-    /// The daemon did not commit or reject the event in time.
-    #[error("timed out waiting for the daemon")]
-    Timeout,
-    /// The daemon answered with an error instead of committing the event.
-    #[error("the daemon rejected the event: {0}")]
-    Rejected(String),
 }
 
 /// Resolves the event to publish: an inbox shorthand or a raw event.
@@ -125,38 +122,12 @@ async fn run() -> Result<(), RunError> {
     let token = Zeroizing::new(std::fs::read_to_string(&args.token_file)?);
     let event = Event::new(r#type, data);
     let mut client = WsClient::connect(&args.socket, None, token.trim()).await?;
-    client.send(&event).await?;
-
-    let deadline = tokio::time::Instant::now() + TIMEOUT;
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(RunError::Timeout);
-        }
-        let Some(wire) = tokio::time::timeout(remaining, client.next())
-            .await
-            .map_err(|_| RunError::Timeout)??
-        else {
-            return Err(RunError::Timeout);
-        };
-        if wire.event.r#type.starts_with("error.") {
-            let detail = wire
-                .event
-                .data
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or(&wire.event.r#type)
-                .to_owned();
-            return Err(RunError::Rejected(detail));
-        }
-        if wire.event.id == event.id {
-            let position = wire
-                .seq
-                .map_or_else(|| String::from("?"), |seq| seq.to_string());
-            println!("committed {} at position {position}", wire.event.r#type);
-            return Ok(());
-        }
-    }
+    let committed = client.publish(&event, TIMEOUT).await?;
+    let position = committed
+        .seq
+        .map_or_else(|| String::from("?"), |seq| seq.to_string());
+    println!("committed {} at position {position}", committed.event.r#type);
+    Ok(())
 }
 
 #[tokio::main]

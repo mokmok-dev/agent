@@ -9,6 +9,7 @@ use agentd_events::{Event, Seq, WireMessage};
 use futures_util::{SinkExt, StreamExt};
 use secrecy::zeroize::Zeroizing;
 use std::path::Path;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::net::UnixStream;
 use tokio_tungstenite::WebSocketStream;
@@ -33,6 +34,21 @@ pub enum ClientError {
     /// An [`Event`] to publish could not be serialized.
     #[error("the event could not be serialized: {0}")]
     Encode(#[source] serde_json::Error),
+}
+
+/// Errors returned by [`WsClient::publish`].
+#[derive(Debug, Error)]
+pub enum PublishError {
+    /// The connection, encoding, or decoding failed.
+    #[error(transparent)]
+    Client(#[from] ClientError),
+    /// The daemon reported no verdict within the deadline.
+    #[error("the daemon did not commit or reject the event within {0:?}")]
+    Timeout(Duration),
+    /// The daemon refused the append, so the token lacks a claim the event's
+    /// type requires.
+    #[error("the daemon rejected the event: {0}")]
+    Rejected(String),
 }
 
 /// A bidirectional WebSocket connection to the daemon.
@@ -116,5 +132,51 @@ impl WsClient {
         let text = serde_json::to_string(event).map_err(ClientError::Encode)?;
         self.stream.send(Message::text(text)).await?;
         Ok(())
+    }
+
+    /// Publishes `event` and returns the wire message the daemon committed it
+    /// as, whose position is the log position the event was assigned.
+    ///
+    /// The daemon answers a refused append with an `error.*` notice, so this
+    /// reports a token that lacks the claim its event's type requires instead of
+    /// leaving the caller to read the log to find out.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PublishError::Rejected`] when the daemon refused the append,
+    /// [`PublishError::Timeout`] when no verdict arrives within `timeout`, and
+    /// [`PublishError::Client`] for a transport or encoding failure.
+    pub async fn publish(
+        &mut self,
+        event: &Event,
+        timeout: Duration,
+    ) -> Result<WireMessage, PublishError> {
+        self.send(event).await?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(PublishError::Timeout(timeout));
+            }
+            let Some(wire) = tokio::time::timeout(remaining, self.next())
+                .await
+                .map_err(|_| PublishError::Timeout(timeout))??
+            else {
+                return Err(PublishError::Timeout(timeout));
+            };
+            if wire.event.r#type.starts_with("error.") {
+                let detail = wire
+                    .event
+                    .data
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(&wire.event.r#type)
+                    .to_owned();
+                return Err(PublishError::Rejected(detail));
+            }
+            if wire.event.id == event.id {
+                return Ok(wire);
+            }
+        }
     }
 }

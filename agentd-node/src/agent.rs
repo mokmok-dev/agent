@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use agentd_events::{Event, LogEntry, Seq, WireMessage};
+use agentd_events::{DAEMON_CAUGHT_UP, Event, LogEntry, Seq, WireMessage};
 use agentd_inference::{
     Delta, InferenceClient, InferenceRequest, Message, Role, ToolCall, ToolSpec,
 };
@@ -54,10 +54,6 @@ const MAX_TOOL_ROUNDS: u32 = 64;
 
 /// The only `CloudEvents` `type` prefix the agent applies to its projection.
 const AGENT_PREFIX: &str = "agent.";
-
-/// The transient notice the daemon sends once a resume replay has caught up, so
-/// the agent can finish an interrupted turn.
-const DAEMON_CAUGHT_UP: &str = "daemon.caught_up";
 
 /// The instructions the model sees before the conversation.
 const SYSTEM_PROMPT: &str = "\
@@ -722,7 +718,7 @@ mod tests {
     use crate::conversation::Conversation;
     use crate::error::AgentError;
     use crate::projection::SqliteProjection;
-    use agentd_events::Event;
+    use agentd_events::{DAEMON_CAUGHT_UP, Event};
     use agentd_inference::{Delta, Message, ToolCall};
     use serde_json::json;
     use std::time::Duration;
@@ -905,7 +901,7 @@ mod tests {
         let trigger = agent
             .handle(agentd_events::WireMessage {
                 seq: None,
-                event: Event::new(super::DAEMON_CAUGHT_UP, json!({})),
+                event: Event::new(DAEMON_CAUGHT_UP, json!({})),
             })
             .expect("handle should succeed");
 
@@ -928,7 +924,7 @@ mod tests {
         let trigger = agent
             .handle(agentd_events::WireMessage {
                 seq: None,
-                event: Event::new(super::DAEMON_CAUGHT_UP, json!({})),
+                event: Event::new(DAEMON_CAUGHT_UP, json!({})),
             })
             .expect("handle should succeed");
 
