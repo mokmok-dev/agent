@@ -82,7 +82,8 @@ Non-goals (stated honestly, per the Sheena precedent):
    `Executor` trait. Layer 1 maps the policy onto the OS. The policy is the
    interface: a new OS backend (Linux) renders the same entries differently.
 5. **Every decision is an event.** Each permission check produces a CloudEvent
-   (`requested` → `granted`/`denied`) and each policy violation produces a
+   (`requested` → exactly one of `granted`, `denied`, `cancelled`) and each
+   policy violation produces a
    `sandbox.violation.*` event, durably appended to the log, so the audit log is
    the log itself.
 6. **Kernel-enforced over convention-enforced.** Where the OS offers a stronger
@@ -284,7 +285,7 @@ pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
-    pub denied: bool, // set when an approver denied the command
+    pub denied: bool, // set when the command was denied or cancelled
 }
 ```
 

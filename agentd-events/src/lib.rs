@@ -49,7 +49,8 @@ pub const DAEMON_SOURCE: &str = "urn:mokmokd";
 /// `type` prefixes that only a daemon-authority publisher may emit.
 ///
 /// These carry decisions or daemon lifecycle that a client must not be able to
-/// fabricate — above all `sandbox.permission.granted`/`denied`, which drive the
+/// fabricate — above all `sandbox.permission.granted`/`denied`/`cancelled`,
+/// which drive the
 /// approval flow, `error.*`, which is a daemon notice, and `daemon.*`, whose
 /// caught-up marker tells a resuming client its replay is complete. An external
 /// extension is expected to use its own prefix; see `docs/architecture.md` and

@@ -122,7 +122,8 @@ The daemon is not an open bus. Every connection presents an
 
 A read-only connection cannot append; a publish attempt is answered with an
 `error.unauthorized` notice. A token without `authority` cannot publish a
-reserved type, so a client cannot forge `sandbox.permission.granted`/`denied`
+reserved type, so a client cannot forge
+`sandbox.permission.granted`/`denied`/`cancelled`
 and hijack the approval flow, nor forge `session.*` lifecycle. A token without
 `infer` cannot reach `/inference`. The daemon overwrites the client-supplied
 `source` (with the authenticated principal's) and `time` (with its own), and

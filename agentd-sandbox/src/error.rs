@@ -29,10 +29,13 @@ pub enum SandboxError {
     /// for the command would have a hole.
     #[error(transparent)]
     Publish(#[from] LogError),
-    /// An approver denied the request, so no process was started.
-    #[error("the command was denied by the approver")]
+    /// The command was not allowed to run: a policy rule refused it, an approver
+    /// denied it, or nobody decided before the deadline. The log distinguishes
+    /// the three (`sandbox.permission.denied` and `.cancelled`), so a caller
+    /// that must tell them apart reads the decision rather than this error.
+    #[error("the command was denied: the policy or an approver refused it, or no decision arrived")]
     Denied,
-    /// A long-lived session could not be spawned.
+    /// A long-lived process could not be spawned.
     #[error(transparent)]
     Spawn(#[from] crate::executor::SpawnError),
     /// An underlying I/O error.

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agentd_events::{EventLog, LogEntry};
+use agentd_events::{Event, EventLog, LogEntry};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;
@@ -23,11 +23,11 @@ use crate::violation;
 pub enum Approval {
     /// A static rule grants immediately; no approver is awaited.
     Auto,
-    /// The request is held `pending` until an approver publishes a matching
-    /// `sandbox.permission.granted`/`denied` (correlated by `request_id`), or
-    /// `timeout` expires, which denies.
+    /// The request is held `pending` until a matching
+    /// `sandbox.permission.granted`/`denied`/`cancelled` arrives (correlated by
+    /// `request_id`), or `timeout` expires, which cancels the request.
     Required {
-        /// How long to wait for a decision before denying.
+        /// How long to wait for a decision before the request is cancelled.
         timeout: Duration,
     },
 }
@@ -35,7 +35,8 @@ pub enum Approval {
 /// A running sandbox: an agent's confinement layer for shell commands.
 ///
 /// Every [`Sandbox::exec`] durably appends the decision trail to the log —
-/// `requested`, then `granted` or `denied`, then `exec.completed` — so audit
+/// `requested`, then exactly one of `granted`/`denied`/`cancelled`, then
+/// `exec.completed` — so audit
 /// trails and approval UIs are ordinary subscribers, and no decision can be
 /// lost. The confinement itself is the OS profile the executor was built with.
 pub struct Sandbox {
@@ -174,7 +175,8 @@ impl Sandbox {
     ///
     /// # Errors
     ///
-    /// Returns [`SandboxError::Denied`] when an approver denies the spawn,
+    /// Returns [`SandboxError::Denied`] when the spawn is not approved (denied
+    /// by an approver, or cancelled),
     /// [`SandboxError::Spawn`] when the process cannot be started (including an
     /// executor that cannot run long-lived processes), and [`SandboxError::Publish`]
     /// when a lifecycle event cannot be durably appended.
@@ -407,7 +409,9 @@ enum Decision {
     Granted,
     /// The request was denied.
     Denied,
-    /// An approver withdrew the request, or the log closed.
+    /// An approver withdrew the request. A log that closes mid-wait also lands
+    /// here: the request then stays undecided in the log, because appending the
+    /// record would need the log that just closed.
     Cancelled,
     /// No decision arrived within the timeout.
     TimedOut,
@@ -419,6 +423,10 @@ enum Decision {
 /// closing is a cancellation. A decision is trusted only when it
 /// carries the exact `request_id`, so a grant for another request cannot
 /// release this one.
+///
+/// When the deadline fires, decisions already queued are read first: a decision
+/// appended before the deadline must win, or the log would hold both a grant and
+/// a cancellation for one request.
 async fn await_decision(
     receiver: &mut tokio::sync::broadcast::Receiver<LogEntry>,
     request_id: &str,
@@ -428,29 +436,56 @@ async fn await_decision(
     tokio::pin!(deadline);
     loop {
         tokio::select! {
-            () = &mut deadline => return Decision::TimedOut,
+            () = &mut deadline => {
+                if let Some(decision) = queued_decision(receiver, request_id) {
+                    return decision;
+                }
+                return Decision::TimedOut;
+            },
             incoming = receiver.recv() => match incoming {
                 Ok(recorded) => {
-                    let event = recorded.event;
-                    let matches = event
-                        .data
-                        .get("request_id")
-                        .and_then(serde_json::Value::as_str)
-                        == Some(request_id);
-                    if !matches {
-                        continue;
-                    }
-                    match event.r#type.as_str() {
-                        PERMISSION_GRANTED => return Decision::Granted,
-                        PERMISSION_DENIED => return Decision::Denied,
-                        PERMISSION_CANCELLED => return Decision::Cancelled,
-                        _ => {},
+                    if let Some(decision) = decision_of(&recorded.event, request_id) {
+                        return decision;
                     }
                 },
                 Err(RecvError::Lagged(_)) => {},
                 Err(RecvError::Closed) => return Decision::Cancelled,
             },
         }
+    }
+}
+
+/// Reads decisions already queued for `request_id`, if any.
+fn queued_decision(
+    receiver: &mut tokio::sync::broadcast::Receiver<LogEntry>,
+    request_id: &str,
+) -> Option<Decision> {
+    while let Ok(recorded) = receiver.try_recv() {
+        if let Some(decision) = decision_of(&recorded.event, request_id) {
+            return Some(decision);
+        }
+    }
+    None
+}
+
+/// The decision `event` carries for `request_id`, if it is one at all.
+fn decision_of(
+    event: &Event,
+    request_id: &str,
+) -> Option<Decision> {
+    let matches = event
+        .data
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        == Some(request_id);
+    if !matches {
+        return None;
+    }
+    match event.r#type.as_str() {
+        PERMISSION_GRANTED => Some(Decision::Granted),
+        PERMISSION_DENIED => Some(Decision::Denied),
+        PERMISSION_CANCELLED => Some(Decision::Cancelled),
+        _ => None,
     }
 }
 
@@ -585,6 +620,47 @@ mod tests {
             collected.push(recorded.event);
         }
         collected
+    }
+
+    #[test]
+    fn a_queued_decision_is_read_before_the_deadline_cancels_the_request() {
+        let (sender, mut receiver) = tokio::sync::broadcast::channel(4);
+        let granted = LogEntry::new(
+            1,
+            crate::events::permission_granted("sbx-1", "req-1", "coder-1", "ls"),
+        );
+        let unrelated = LogEntry::new(
+            2,
+            crate::events::permission_granted("sbx-1", "req-2", "coder-1", "ls"),
+        );
+        sender.send(unrelated).expect("send");
+        sender.send(granted).expect("send");
+
+        // The queue holds a grant for this request, so the deadline must read it
+        // rather than record a second decision.
+        assert_eq!(
+            super::queued_decision(&mut receiver, "req-1"),
+            Some(super::Decision::Granted)
+        );
+    }
+
+    #[test]
+    fn a_queue_without_a_decision_leaves_the_deadline_to_cancel() {
+        let (sender, mut receiver) = tokio::sync::broadcast::channel(4);
+        sender
+            .send(LogEntry::new(
+                1,
+                crate::events::permission_requested(
+                    "sbx-1",
+                    "req-1",
+                    "coder-1",
+                    "ls",
+                    crate::events::DECISION_PENDING,
+                ),
+            ))
+            .expect("send");
+
+        assert_eq!(super::queued_decision(&mut receiver, "req-1"), None);
     }
 
     #[tokio::test]
