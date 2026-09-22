@@ -191,6 +191,14 @@ No phase starts until its predecessor is agreed.
 - Validate with `nix develop -c bwrap --version`, the bubblewrap-detecting tests
   (`agentd-sandbox/tests/egress_flow.rs`), and a `nix run . -- up` launch whose
   backend selection is bubblewrap rather than the helper fallback.
+- Validated: `bwrap --version` reports 0.11.2 from the dev shell; the
+  bubblewrap-detecting tests run their bodies with `bwrap` on `PATH` outside the
+  dev shell (which sets `NIX_BUILD_TOP`, so running them from it skips them);
+  and `nix run . -- up` starts the daemon and the confined agent with
+  `bwrap --unshare-all` as the backend — the process tree holds `bwrap` and no
+  `agentd-sandbox-helper`, the policy's deny list is bound over the daemon's own
+  token files, and a prompt published through `agentd-publish` is answered by the
+  agent inside that sandbox.
 
 ### Phase 3 detail: approval usability
 
@@ -237,6 +245,7 @@ Re-establishing the ledger from a clean tree:
 | OverlayFS, pause, `process-compose` are absent | `rg -i 'overlay\|lowerdir\|sigstop\|process-compose' --glob '!target'` |
 | The patcher parses, applies, and inverts | `cargo test -p agentd-node --lib -- patch::` |
 | `bubblewrap` ships in the dev shell | `rg -n bubblewrap flake.nix`, `nix develop -c bwrap --version` |
+| The one-command launch starts, under bubblewrap | `nix run . -- up --workdir <dir> …` with `bwrap` on `PATH`: the process tree holds `bwrap --unshare-all … agentd-agent …` and no `agentd-sandbox-helper`, and the log runs `session.started` → `sandbox.session.started` → `agent.session.started` |
 | The tests that need `bubblewrap` run, rather than skip | `cargo test -p agentd-sandbox --test egress_flow` with `bwrap` on `PATH` **outside** the dev shell: `nix develop` sets `NIX_BUILD_TOP`, which the test's own probe reads as "cannot nest a user namespace" |
 | The permission wait is bounded | `rg -n 'permission-approval-secs' agentd/src/main.rs`, `cargo test -p agentd --lib -- session::tests` |
 | An approver binary ships | `ls agentd-node/src/bin`, `cargo test -p agentd --test approve` |
