@@ -226,7 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // is where a model call happens (through the proxy, if one is configured).
     let turn = if ready && let Some(prompt) = prompt {
         log.publish(
-            agentd::bridge::prompt(&json!([{ "type": "text", "text": prompt }]))
+            agentd::bridge::prompt_requested(&json!([{ "type": "text", "text": prompt }]))
                 .with_subject("session:opencode-demo"),
         )
         .await?;
@@ -293,10 +293,12 @@ async fn watch_until_ready(
                 if event.r#type.starts_with("session.") || event.r#type.starts_with("sandbox.") {
                     println!("[{}] {}", event.r#type, summarize(&event));
                 }
-                if event.r#type == "session.acp.ready" {
+                if event.r#type == agentd::bridge::PROTOCOL_READY {
                     return true;
                 }
-                if event.r#type == "session.acp.failed" || event.r#type == "session.exited" {
+                if event.r#type == agentd::bridge::PROTOCOL_FAILED
+                    || event.r#type == "session.exited"
+                {
                     return false;
                 }
             },
@@ -318,7 +320,7 @@ async fn watch_for_turn(
                 if event.r#type.starts_with("session.") || event.r#type.starts_with("sandbox.") {
                     println!("[{}] {}", event.r#type, summarize(&event));
                 }
-                if event.r#type == agentd::bridge::ACP_TURN_COMPLETED {
+                if event.r#type == agentd::bridge::PROMPT_COMPLETED {
                     return Some(
                         event.data["stop_reason"]
                             .as_str()
@@ -326,7 +328,9 @@ async fn watch_for_turn(
                             .to_string(),
                     );
                 }
-                if event.r#type == agentd::bridge::ACP_FAILED || event.r#type == "session.exited" {
+                if event.r#type == agentd::bridge::PROTOCOL_FAILED
+                    || event.r#type == "session.exited"
+                {
                     return None;
                 }
             },
@@ -349,8 +353,8 @@ fn parse_host_port(value: &str) -> Result<HostPort, Box<dyn std::error::Error>> 
 fn summarize(event: &Event) -> String {
     let data: &Value = &event.data;
     match event.r#type.as_str() {
-        "session.acp.ready" => String::from("session is ready"),
-        "session.bridge.inbound" => {
+        agentd::bridge::PROTOCOL_READY => String::from("session is ready"),
+        agentd::bridge::PROTOCOL_INBOUND => {
             let message = &data["message"];
             if let Some(update) = message
                 .get("params")

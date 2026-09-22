@@ -36,8 +36,9 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::bridge::{
-    Action, Bridge, Protocol, SESSION_PERMISSION_DECIDED, SESSION_PERMISSION_REQUESTED,
-    permission_cancelled, session_subject,
+    Action, Bridge, Protocol, SESSION_PERMISSION_CANCELLED, SESSION_PERMISSION_DENIED,
+    SESSION_PERMISSION_GRANTED, SESSION_PERMISSION_REQUESTED, permission_cancelled,
+    session_subject,
 };
 
 /// The largest protocol frame accepted from a bridged child before the frame is
@@ -324,7 +325,9 @@ impl SessionManager {
             SESSION_REQUESTED => self.launch(event),
             SESSION_STATUS_REQUESTED => self.report_status().await,
             SESSION_PERMISSION_REQUESTED => self.await_approval(event, pending),
-            SESSION_PERMISSION_DECIDED => {
+            SESSION_PERMISSION_GRANTED
+            | SESSION_PERMISSION_DENIED
+            | SESSION_PERMISSION_CANCELLED => {
                 if let Some(key) = RequestKey::of(event) {
                     pending.remove(&key);
                 }
@@ -1132,8 +1135,8 @@ mod tests {
         SESSION_STATUS_REQUESTED, SessionManager, Supervision,
     };
     use crate::bridge::{
-        BRIDGED_INBOUND, McpProtocol, SESSION_PERMISSION_DECIDED, SESSION_PERMISSION_REQUESTED,
-        permission_decided,
+        McpProtocol, PROTOCOL_INBOUND, SESSION_PERMISSION_CANCELLED, SESSION_PERMISSION_DENIED,
+        SESSION_PERMISSION_GRANTED, SESSION_PERMISSION_REQUESTED, permission_granted,
     };
     use agentd_events::{Event, EventLog, LogEntry};
     use agentd_sandbox::{
@@ -1456,11 +1459,11 @@ mod tests {
 
         manager.launch(&request("mcp-1"));
 
-        let message = wait_for(&mut subscriber, BRIDGED_INBOUND).await;
+        let message = wait_for(&mut subscriber, PROTOCOL_INBOUND).await;
         assert_eq!(message.data["protocol"], "mcp");
         assert!(message.data["message"]["result"].is_object());
 
-        let notification = wait_for(&mut subscriber, BRIDGED_INBOUND).await;
+        let notification = wait_for(&mut subscriber, PROTOCOL_INBOUND).await;
         assert_eq!(
             notification.data["message"]["method"],
             "notifications/tools/list_changed"
@@ -1494,11 +1497,11 @@ mod tests {
 
         manager.launch(&request("mcp-2"));
         wait_for(&mut subscriber, SESSION_STARTED).await;
-        let ready = wait_for(&mut subscriber, BRIDGED_INBOUND).await;
+        let ready = wait_for(&mut subscriber, PROTOCOL_INBOUND).await;
         assert_eq!(ready.data["message"]["method"], "notifications/ready");
 
         let outbound = Event::new(
-            crate::bridge::BRIDGED_OUTBOUND,
+            crate::bridge::PROTOCOL_OUTBOUND,
             json!({
                 "protocol": "mcp",
                 "message": { "jsonrpc": "2.0", "id": 1, "method": "ping" },
@@ -1507,7 +1510,7 @@ mod tests {
         .with_subject("session:mcp-2");
         log.publish(outbound).await.expect("publish");
 
-        let inbound = wait_for(&mut subscriber, BRIDGED_INBOUND).await;
+        let inbound = wait_for(&mut subscriber, PROTOCOL_INBOUND).await;
         assert_eq!(inbound.data["message"]["method"], "ping");
         assert_eq!(inbound.subject.as_deref(), Some("session:mcp-2"));
         wait_for(&mut subscriber, super::SESSION_EXITED).await;
@@ -1528,11 +1531,11 @@ mod tests {
 
         manager.launch(&request("acp-1"));
 
-        let initialize = wait_for(&mut subscriber, BRIDGED_INBOUND).await;
+        let initialize = wait_for(&mut subscriber, PROTOCOL_INBOUND).await;
         assert_eq!(initialize.data["protocol"], "acp");
         assert_eq!(initialize.data["message"]["result"]["protocolVersion"], 1);
 
-        let ready = wait_for(&mut subscriber, crate::bridge::ACP_READY).await;
+        let ready = wait_for(&mut subscriber, crate::bridge::PROTOCOL_READY).await;
         assert_eq!(ready.subject.as_deref(), Some("session:acp-1"));
 
         wait_for(&mut subscriber, super::SESSION_EXITED).await;
@@ -1625,7 +1628,8 @@ mod tests {
             .collect()
     }
 
-    /// The `session.permission.decided` events for `request_id`.
+    /// The permission decisions — granted, denied, or cancelled — for
+    /// `request_id`.
     fn decisions_for(
         events: &[Event],
         request_id: &str,
@@ -1633,12 +1637,16 @@ mod tests {
         events
             .iter()
             .filter(|event| {
-                event.r#type == SESSION_PERMISSION_DECIDED
-                    && event
-                        .data
-                        .get("request_id")
-                        .and_then(serde_json::Value::as_str)
-                        == Some(request_id)
+                matches!(
+                    event.r#type.as_str(),
+                    SESSION_PERMISSION_GRANTED
+                        | SESSION_PERMISSION_DENIED
+                        | SESSION_PERMISSION_CANCELLED
+                ) && event
+                    .data
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(request_id)
             })
             .cloned()
             .collect()
@@ -1663,7 +1671,7 @@ mod tests {
         assert_eq!(asked.subject.as_deref(), Some("session:perm-1"));
 
         // No approver answers, so the manager cancels the request itself.
-        let decided = wait_for(&mut subscriber, SESSION_PERMISSION_DECIDED).await;
+        let decided = wait_for(&mut subscriber, SESSION_PERMISSION_CANCELLED).await;
         assert_eq!(decided.data["request_id"], "7");
         assert_eq!(decided.data["cancelled"], true);
         assert_eq!(
@@ -1700,7 +1708,7 @@ mod tests {
 
         let asked = wait_for(&mut subscriber, SESSION_PERMISSION_REQUESTED).await;
         assert_eq!(asked.data["request_id"], "7");
-        log.publish(permission_decided("7", "allow-once").with_subject("session:perm-2"))
+        log.publish(permission_granted("7", "allow-once").with_subject("session:perm-2"))
             .await
             .expect("publish a decision");
 
@@ -1760,7 +1768,7 @@ mod tests {
         // each cancellation is addressed to the session that asked.
         let mut cancelled = Vec::new();
         for _ in 0..2 {
-            let decided = wait_for(&mut subscriber, SESSION_PERMISSION_DECIDED).await;
+            let decided = wait_for(&mut subscriber, SESSION_PERMISSION_CANCELLED).await;
             assert_eq!(decided.data["request_id"], "7");
             assert_eq!(decided.data["cancelled"], true);
             cancelled.push(decided.subject.clone().expect("a subject"));
@@ -1799,13 +1807,13 @@ mod tests {
 
         let asked = wait_for(&mut subscriber, SESSION_PERMISSION_REQUESTED).await;
         assert_eq!(asked.data["request_id"], "7");
-        let cancelled = wait_for(&mut subscriber, SESSION_PERMISSION_DECIDED).await;
+        let cancelled = wait_for(&mut subscriber, SESSION_PERMISSION_CANCELLED).await;
         assert_eq!(cancelled.data["cancelled"], true);
         assert_eq!(wait_for_reply(&replies).await.lines().count(), 1);
 
         // The late decision is recorded, but the bridge no longer holds the
         // request, so the child is not answered a second time.
-        log.publish(permission_decided("7", "allow-once").with_subject("session:perm-3"))
+        log.publish(permission_granted("7", "allow-once").with_subject("session:perm-3"))
             .await
             .expect("publish a decision");
         tokio::time::sleep(Duration::from_millis(400)).await;

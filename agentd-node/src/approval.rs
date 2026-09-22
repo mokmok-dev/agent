@@ -35,10 +35,22 @@ const REQUEST_KINDS: [RequestKind; 3] = [
 const DECISION_TYPES: &[&str] = &[
     "sandbox.permission.granted",
     "sandbox.permission.denied",
-    "session.permission.decided",
+    "sandbox.permission.cancelled",
+    "session.permission.granted",
+    "session.permission.denied",
+    "session.permission.cancelled",
     "session.egress.granted",
     "session.egress.denied",
 ];
+
+/// An approver allows a bridged agent's request, selecting one of the options
+/// the agent offered.
+const SESSION_PERMISSION_GRANTED: &str = "session.permission.granted";
+/// An approver refuses a bridged agent's request, selecting a rejecting option
+/// when the agent offered one.
+const SESSION_PERMISSION_DENIED: &str = "session.permission.denied";
+/// Nobody decided a bridged agent's request, so it is withdrawn.
+const SESSION_PERMISSION_CANCELLED: &str = "session.permission.cancelled";
 
 /// The `decision` value on a sandbox request that waits for an approver; an
 /// `auto` one was already decided by a static policy rule.
@@ -198,18 +210,24 @@ impl Pending {
                         offered.join(", "),
                     ));
                 }
-                Self::answer(json!({
-                    "request_id": self.request_id,
-                    "option_id": option_id,
-                }))
+                Self::answer(
+                    SESSION_PERMISSION_GRANTED,
+                    json!({
+                        "request_id": self.request_id,
+                        "option_id": option_id,
+                    }),
+                )
             },
             (RequestKind::Session, Decision::Denied) => self.reject_option().map_or_else(
                 || self.cancellation(),
                 |option_id| {
-                    Self::answer(json!({
-                        "request_id": self.request_id,
-                        "option_id": option_id,
-                    }))
+                    Self::answer(
+                        SESSION_PERMISSION_DENIED,
+                        json!({
+                            "request_id": self.request_id,
+                            "option_id": option_id,
+                        }),
+                    )
                 },
             ),
             (RequestKind::Session, Decision::Cancelled) => self.cancellation(),
@@ -227,12 +245,8 @@ impl Pending {
             (RequestKind::Sandbox, decision) => {
                 let (r#type, value) = match decision {
                     Decision::Granted => ("sandbox.permission.granted", "granted"),
-                    // The sandbox's own contract has no `cancelled` decision
-                    // value, and its waiter reads the type, so a withdrawal is
-                    // recorded as a denial.
-                    Decision::Denied | Decision::Cancelled => {
-                        ("sandbox.permission.denied", "denied")
-                    },
+                    Decision::Denied => ("sandbox.permission.denied", "denied"),
+                    Decision::Cancelled => ("sandbox.permission.cancelled", "cancelled"),
                 };
                 let mut data = self.data.clone();
                 data["decision"] = json!(value);
@@ -245,14 +259,20 @@ impl Pending {
         })
     }
 
-    /// The `session.permission.decided` that answers a bridged agent.
-    fn answer(data: Value) -> Event {
-        Event::new("session.permission.decided", data)
+    /// The event that answers a bridged agent's request.
+    fn answer(
+        r#type: &str,
+        data: Value,
+    ) -> Event {
+        Event::new(r#type, data)
     }
 
-    /// The `session.permission.decided` that withdraws a request.
+    /// The `session.permission.cancelled` that withdraws a request.
     fn cancellation(&self) -> Event {
-        Self::answer(json!({ "request_id": self.request_id, "cancelled": true }))
+        Self::answer(
+            SESSION_PERMISSION_CANCELLED,
+            json!({ "request_id": self.request_id, "cancelled": true }),
+        )
     }
 
     /// The options a bridged agent offered for the request.
@@ -401,7 +421,7 @@ pub fn pending<'a>(events: impl IntoIterator<Item = &'a Event>) -> Vec<Pending> 
 
 #[cfg(test)]
 mod tests {
-    use super::{ApprovalError, Decision, RequestKind, pending};
+    use super::{ApprovalError, Decision, RequestKind, SESSION_PERMISSION_CANCELLED, pending};
     use agentd_events::Event;
     use serde_json::json;
 
@@ -426,7 +446,7 @@ mod tests {
     fn a_request_with_no_decision_is_pending_and_a_decided_one_is_not() {
         let asked = session_request("5");
         let answered = Event::new(
-            "session.permission.decided",
+            SESSION_PERMISSION_CANCELLED,
             json!({ "request_id": "5", "cancelled": true }),
         )
         .with_subject("session:agent");
@@ -445,7 +465,7 @@ mod tests {
         let first = session_request("7");
         let second = session_request("7").with_subject("session:other");
         let answer = Event::new(
-            "session.permission.decided",
+            SESSION_PERMISSION_CANCELLED,
             json!({ "request_id": "7", "cancelled": true }),
         )
         .with_subject("session:agent");
@@ -507,7 +527,7 @@ mod tests {
         let granted = pending
             .decide(Decision::Granted, Some("allow-once"))
             .expect("an offered option");
-        assert_eq!(granted.r#type, "session.permission.decided");
+        assert_eq!(granted.r#type, "session.permission.granted");
         assert_eq!(granted.data["request_id"], "5");
         assert_eq!(granted.data["option_id"], "allow-once");
         assert_eq!(granted.subject.as_deref(), Some("session:agent"));
@@ -522,6 +542,7 @@ mod tests {
 
         // Cancelling needs no option: the agent is told the outcome is cancelled.
         let cancelled = pending.decide(Decision::Cancelled, None).expect("cancel");
+        assert_eq!(cancelled.r#type, "session.permission.cancelled");
         assert_eq!(cancelled.data["cancelled"], true);
         assert_eq!(cancelled.data.get("option_id"), None);
     }
@@ -532,6 +553,7 @@ mod tests {
         // agent hears which outcome the operator chose.
         let asked = pending([&session_request("5")]);
         let denied = asked[0].decide(Decision::Denied, None).expect("deny");
+        assert_eq!(denied.r#type, "session.permission.denied");
         assert_eq!(denied.data["option_id"], "reject-once");
         assert_eq!(denied.data.get("cancelled"), None);
 
@@ -546,6 +568,7 @@ mod tests {
         .with_subject("session:agent");
         let asked = pending([&allow_only]);
         let denied = asked[0].decide(Decision::Denied, None).expect("deny");
+        assert_eq!(denied.r#type, "session.permission.cancelled");
         assert_eq!(denied.data["cancelled"], true);
         assert_eq!(denied.data.get("option_id"), None);
     }
@@ -557,7 +580,7 @@ mod tests {
         // first answer must not hide it.
         let first = session_request("1");
         let answered = Event::new(
-            "session.permission.decided",
+            SESSION_PERMISSION_CANCELLED,
             json!({ "request_id": "1", "cancelled": true }),
         )
         .with_subject("session:agent");
@@ -570,9 +593,10 @@ mod tests {
     }
 
     #[test]
-    fn a_withdrawn_sandbox_request_is_recorded_as_the_sandbox_understands_it() {
-        // The sandbox's decision values are auto/pending/granted/denied, so a
-        // withdrawal has to be a denial rather than a value it never emits.
+    fn a_withdrawn_sandbox_request_is_recorded_as_cancelled() {
+        // The sandbox understands granted, denied, and cancelled, so a
+        // withdrawal is its own outcome rather than a denial the operator never
+        // made.
         let asked = Event::new(
             "sandbox.permission.requested",
             json!({ "request_id": "4", "command": "rm -rf /tmp/x", "decision": "pending" }),
@@ -580,8 +604,8 @@ mod tests {
         let asked = pending([&asked]);
         let withdrawn = asked[0].decide(Decision::Cancelled, None).expect("cancel");
 
-        assert_eq!(withdrawn.r#type, "sandbox.permission.denied");
-        assert_eq!(withdrawn.data["decision"], "denied");
+        assert_eq!(withdrawn.r#type, "sandbox.permission.cancelled");
+        assert_eq!(withdrawn.data["decision"], "cancelled");
         assert_eq!(withdrawn.data["command"], "rm -rf /tmp/x");
     }
 

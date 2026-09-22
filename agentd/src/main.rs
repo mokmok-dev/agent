@@ -47,12 +47,12 @@ enum Command {
     },
 }
 
-/// The protocol bridges a supervised session can speak.
+/// The protocols a supervised session's child can speak.
 ///
 /// Defined without the `sandbox` feature too, so the CLI parses identically on
 /// a build that cannot act on it; the value is ignored when the feature is off.
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
-enum BridgeKind {
+enum ProtocolKind {
     /// The Model Context Protocol over stdio (newline-delimited JSON-RPC 2.0).
     Mcp,
     /// The Agent Client Protocol over stdio; the daemon is the client.
@@ -83,11 +83,11 @@ struct ServeArgs {
     /// The agent id recorded on session events.
     #[arg(long, default_value = "urn:mokmokd:session")]
     session_agent_id: String,
-    /// The protocol bridge for `--session-command`, so a third-party tool
+    /// The protocol a `--session-command` child speaks, so a third-party tool
     /// that does not speak `CloudEvents` participates over its own stdio
-    /// protocol.
+    /// protocol through a Bridge.
     #[arg(long, value_enum)]
-    session_bridge: Option<BridgeKind>,
+    session_protocol: Option<ProtocolKind>,
     /// A destination the session's CONNECT proxy may tunnel to, `host:port`.
     /// Repeatable; empty leaves egress denied. The proxy is started and the
     /// session policy is pointed at it automatically; it can be combined with
@@ -242,7 +242,7 @@ struct SessionOptions {
     policy_path: PathBuf,
     agent_id: String,
     supervision: agentd::session::Supervision,
-    bridge: Option<BridgeKind>,
+    protocol: Option<ProtocolKind>,
     /// The `host:port` destinations the session's proxy may tunnel to. Empty
     /// leaves egress denied (unless approval is enabled).
     egress: Vec<agentd_sandbox::HostPort>,
@@ -272,7 +272,7 @@ async fn start_session_manager(
         command,
         agent_id,
         supervision,
-        bridge,
+        protocol,
         egress,
         egress_approval,
         permission_approval,
@@ -312,12 +312,12 @@ async fn start_session_manager(
         Some(deadline) => manager.with_permission_approval(deadline),
         None => manager,
     };
-    let manager = match bridge {
+    let manager = match protocol {
         None => manager,
-        Some(BridgeKind::Mcp) => {
+        Some(ProtocolKind::Mcp) => {
             manager.with_protocol(Arc::new(agentd::bridge::McpProtocol::default()))
         },
-        Some(BridgeKind::Acp) => {
+        Some(ProtocolKind::Acp) => {
             manager.with_protocol(Arc::new(agentd::bridge::AcpProtocol::default()))
         },
     };
@@ -365,7 +365,7 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
         session_permission_approval_secs,
         session_max_restarts,
         session_lifetime_secs,
-        session_bridge,
+        session_protocol,
         providers_config,
     } = args;
     let socket = socket.unwrap_or_else(agentd_events::paths::default_socket);
@@ -394,7 +394,7 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
                 policy_path,
                 agent_id: session_agent_id,
                 supervision,
-                bridge: session_bridge,
+                protocol: session_protocol,
                 egress,
                 egress_approval: session_egress_approval_secs.map(Duration::from_secs),
                 permission_approval: session_permission_approval_secs.map(Duration::from_secs),
@@ -406,10 +406,10 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
     }
     #[cfg(feature = "sandbox")]
     if session_command.is_none()
-        && (session_bridge.is_some() || !session_egress.is_empty() || session_loopback)
+        && (session_protocol.is_some() || !session_egress.is_empty() || session_loopback)
     {
         tracing::warn!(
-            "--session-bridge/--session-egress/--session-loopback ignored: they require \
+            "--session-protocol/--session-egress/--session-loopback ignored: they require \
              --session-command"
         );
     }
@@ -423,7 +423,7 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
             session_agent_id,
             session_max_restarts,
             session_lifetime_secs,
-            session_bridge,
+            session_protocol,
             session_egress,
             session_loopback,
             session_egress_approval_secs,

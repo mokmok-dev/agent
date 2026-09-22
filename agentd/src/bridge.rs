@@ -20,51 +20,73 @@ use serde_json::{Value, json};
 
 /// The event type carrying one inbound protocol message, from a bridged child
 /// to the log.
-pub const BRIDGED_INBOUND: &str = "session.bridge.inbound";
+pub const PROTOCOL_INBOUND: &str = "session.protocol.inbound";
 /// The event type carrying one outbound protocol message.
 ///
-/// It is the log-to-child direction, and is distinct from [`BRIDGED_INBOUND`]
+/// It is the log-to-child direction, and is distinct from [`PROTOCOL_INBOUND`]
 /// so an inbound message is never routed straight back to the child that
 /// produced it.
-pub const BRIDGED_OUTBOUND: &str = "session.bridge.outbound";
-/// A client asks a bridged ACP child to start a prompt turn.
-pub const PROMPT: &str = "session.bridge.prompt";
-/// A bridged ACP child asks for permission to run a tool call.
+pub const PROTOCOL_OUTBOUND: &str = "session.protocol.outbound";
+/// A client asks a bridged child to start a prompt turn.
+pub const PROMPT_REQUESTED: &str = "session.prompt.requested";
+/// The protocol handshake completed; the child accepts prompts.
+pub const PROTOCOL_READY: &str = "session.protocol.ready";
+/// The protocol handshake or a turn failed.
+pub const PROTOCOL_FAILED: &str = "session.protocol.failed";
+/// A prompt turn ended, carrying its stop reason.
+pub const PROMPT_COMPLETED: &str = "session.prompt.completed";
+/// A bridged child asks for permission to run a tool call.
 pub const SESSION_PERMISSION_REQUESTED: &str = "session.permission.requested";
-/// An approver's answer to [`SESSION_PERMISSION_REQUESTED`].
-pub const SESSION_PERMISSION_DECIDED: &str = "session.permission.decided";
-/// The ACP handshake completed; the agent accepts prompts.
-pub const ACP_READY: &str = "session.acp.ready";
-/// The ACP handshake or a turn failed.
-pub const ACP_FAILED: &str = "session.acp.failed";
-/// An ACP prompt turn ended, carrying its stop reason.
-pub const ACP_TURN_COMPLETED: &str = "session.acp.turn.completed";
+/// An approver allows the request, selecting one of the options the child
+/// offered.
+pub const SESSION_PERMISSION_GRANTED: &str = "session.permission.granted";
+/// An approver refuses the request, selecting a rejecting option when the child
+/// offered one.
+pub const SESSION_PERMISSION_DENIED: &str = "session.permission.denied";
+/// Nobody decided the request in time, so it was withdrawn.
+pub const SESSION_PERMISSION_CANCELLED: &str = "session.permission.cancelled";
 
-/// A client asks an ACP agent to start a prompt turn with `blocks` (ACP
+/// A client asks a bridged agent to start a prompt turn with `blocks` (ACP
 /// content blocks, e.g. `[{"type":"text","text":"hi"}]`).
 #[must_use]
-pub fn prompt(blocks: &Value) -> Event {
-    Event::new(PROMPT, json!({ "protocol": "acp", "prompt": blocks }))
+pub fn prompt_requested(blocks: &Value) -> Event {
+    Event::new(
+        PROMPT_REQUESTED,
+        json!({ "protocol": "acp", "prompt": blocks }),
+    )
 }
 
 /// An approver allows the tool call `request_id` with `option_id`, the id of
-/// one of the options the agent offered.
+/// one of the options the child offered.
 #[must_use]
-pub fn permission_decided(
+pub fn permission_granted(
     request_id: &str,
     option_id: &str,
 ) -> Event {
     Event::new(
-        SESSION_PERMISSION_DECIDED,
+        SESSION_PERMISSION_GRANTED,
         json!({ "request_id": request_id, "option_id": option_id }),
     )
 }
 
-/// An approver rejects the tool call `request_id` (or the turn was cancelled).
+/// An approver refuses the tool call `request_id`, selecting the rejecting
+/// `option_id` the child offered.
+#[must_use]
+pub fn permission_denied(
+    request_id: &str,
+    option_id: &str,
+) -> Event {
+    Event::new(
+        SESSION_PERMISSION_DENIED,
+        json!({ "request_id": request_id, "option_id": option_id }),
+    )
+}
+
+/// Nobody decided the tool call `request_id`, so the request is withdrawn.
 #[must_use]
 pub fn permission_cancelled(request_id: &str) -> Event {
     Event::new(
-        SESSION_PERMISSION_DECIDED,
+        SESSION_PERMISSION_CANCELLED,
         json!({ "request_id": request_id, "cancelled": true }),
     )
 }
@@ -143,7 +165,7 @@ pub fn bridged_inbound(
     message: &Value,
 ) -> Event {
     Event::new(
-        BRIDGED_INBOUND,
+        PROTOCOL_INBOUND,
         json!({ "protocol": protocol, "message": message }),
     )
 }
@@ -247,7 +269,7 @@ impl Bridge for McpBridge {
         &mut self,
         event: &Event,
     ) -> Vec<Action> {
-        if event.r#type != BRIDGED_OUTBOUND
+        if event.r#type != PROTOCOL_OUTBOUND
             || event.data.get("protocol").and_then(Value::as_str) != Some("mcp")
         {
             return Vec::new();
@@ -464,7 +486,7 @@ impl AcpBridge {
                 if message.get("error").is_some() {
                     self.phase = Phase::Failed;
                     actions.push(Action::Publish(Event::new(
-                        ACP_FAILED,
+                        PROTOCOL_FAILED,
                         json!({
                             "protocol": "acp",
                             "session_id": self.session_id,
@@ -485,7 +507,7 @@ impl AcpBridge {
                 if message.get("error").is_some() {
                     self.phase = Phase::Failed;
                     actions.push(Action::Publish(Event::new(
-                        ACP_FAILED,
+                        PROTOCOL_FAILED,
                         json!({
                             "protocol": "acp",
                             "session_id": self.session_id,
@@ -501,7 +523,7 @@ impl AcpBridge {
                     if self.acp_session_id.is_some() {
                         self.phase = Phase::Ready;
                         actions.push(Action::Publish(Event::new(
-                            ACP_READY,
+                            PROTOCOL_READY,
                             json!({ "protocol": "acp", "session_id": self.session_id }),
                         )));
                     }
@@ -510,7 +532,7 @@ impl AcpBridge {
             Some(Pending::Prompt) => {
                 self.phase = Phase::Ready;
                 actions.push(Action::Publish(Event::new(
-                    ACP_TURN_COMPLETED,
+                    PROMPT_COMPLETED,
                     json!({
                         "protocol": "acp",
                         "session_id": self.session_id,
@@ -527,8 +549,10 @@ impl AcpBridge {
         actions
     }
 
-    /// Answers a pending permission request under its original id.
-    fn on_permission_decided(
+    /// Answers a pending permission request under its original id: with the
+    /// selected option when the decision carries one, and with a cancellation
+    /// when nobody decided.
+    fn on_permission_decision(
         &mut self,
         event: &Event,
     ) -> Vec<Action> {
@@ -555,7 +579,7 @@ impl AcpBridge {
         )]
     }
 
-    /// Starts a prompt turn from a routed [`PROMPT`] event.
+    /// Starts a prompt turn from a routed [`PROMPT_REQUESTED`] event.
     fn on_prompt(
         &mut self,
         event: &Event,
@@ -597,9 +621,11 @@ impl Bridge for AcpBridge {
         event: &Event,
     ) -> Vec<Action> {
         match event.r#type.as_str() {
-            PROMPT => self.on_prompt(event),
-            SESSION_PERMISSION_DECIDED => self.on_permission_decided(event),
-            BRIDGED_OUTBOUND => {
+            PROMPT_REQUESTED => self.on_prompt(event),
+            SESSION_PERMISSION_GRANTED
+            | SESSION_PERMISSION_DENIED
+            | SESSION_PERMISSION_CANCELLED => self.on_permission_decision(event),
+            PROTOCOL_OUTBOUND => {
                 if event.data.get("protocol").and_then(Value::as_str) != Some("acp") {
                     return Vec::new();
                 }
@@ -650,8 +676,9 @@ fn id_to_string(id: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACP_READY, AcpProtocol, BRIDGED_INBOUND, BRIDGED_OUTBOUND, Bridge, McpProtocol, Protocol,
-        SESSION_PERMISSION_REQUESTED, permission_decided, prompt, session_subject,
+        AcpProtocol, Bridge, McpProtocol, PROTOCOL_INBOUND, PROTOCOL_OUTBOUND, PROTOCOL_READY,
+        Protocol, SESSION_PERMISSION_REQUESTED, permission_granted, prompt_requested,
+        session_subject,
     };
     use agentd_events::Event;
     use serde_json::{Value, json};
@@ -705,7 +732,7 @@ mod tests {
             bridge.on_line(r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#);
 
         let published = events(&actions);
-        assert_eq!(published[0].r#type, BRIDGED_INBOUND);
+        assert_eq!(published[0].r#type, PROTOCOL_INBOUND);
         assert_eq!(published[0].data["protocol"], "mcp");
         assert_eq!(
             published[0].data["message"]["method"],
@@ -737,14 +764,14 @@ mod tests {
     fn mcp_downlink_renders_only_this_protocols_messages() {
         let mut bridge = connect(&McpProtocol::default());
         let ours = Event::new(
-            BRIDGED_OUTBOUND,
+            PROTOCOL_OUTBOUND,
             json!({
                 "protocol": "mcp",
                 "message": { "jsonrpc": "2.0", "id": 1, "method": "ping" },
             }),
         );
         let foreign = Event::new(
-            BRIDGED_OUTBOUND,
+            PROTOCOL_OUTBOUND,
             json!({
                 "protocol": "acp",
                 "message": { "jsonrpc": "2.0", "id": 1, "method": "ping" },
@@ -801,10 +828,10 @@ mod tests {
         assert!(
             events(&actions)
                 .iter()
-                .any(|event| event.r#type == ACP_READY)
+                .any(|event| event.r#type == PROTOCOL_READY)
         );
 
-        let prompt = prompt(&json!([{ "type": "text", "text": "hi" }]));
+        let prompt = prompt_requested(&json!([{ "type": "text", "text": "hi" }]));
         let turn = parse(&lines(&bridge.on_event(&prompt))[0]);
         assert_eq!(turn["method"], "session/prompt");
         assert_eq!(turn["params"]["sessionId"], "sess_1");
@@ -814,7 +841,7 @@ mod tests {
     #[test]
     fn acp_does_not_prompt_before_a_session_exists() {
         let mut bridge = connect(&AcpProtocol::default());
-        let request = prompt(&json!([]));
+        let request = prompt_requested(&json!([]));
 
         assert!(bridge.on_event(&request).is_empty());
     }
@@ -843,7 +870,7 @@ mod tests {
         assert_eq!(requested.data["request_id"], "5");
         assert_eq!(requested.data["tool_call"]["toolCallId"], "call_1");
 
-        let decision = permission_decided("5", "allow-once").with_subject(session_subject("s1"));
+        let decision = permission_granted("5", "allow-once").with_subject(session_subject("s1"));
         let response = parse(&lines(&bridge.on_event(&decision))[0]);
         assert_eq!(response["id"], 5);
         assert_eq!(response["result"]["outcome"]["outcome"], "selected");

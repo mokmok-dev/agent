@@ -186,7 +186,7 @@ impl Fixture {
                     && value["type"].as_str().is_some_and(|r#type| {
                         r#type.ends_with(".granted")
                             || r#type.ends_with(".denied")
-                            || r#type.ends_with(".decided")
+                            || r#type.ends_with(".cancelled")
                     })
             })
             .collect()
@@ -211,7 +211,10 @@ fn session_request(
             "session_id": session,
             "request_id": request_id,
             "tool_call": { "toolCallId": "call_1" },
-            "options": [{ "optionId": "allow-once", "name": "Allow", "kind": "allow_once" }],
+            "options": [
+                { "optionId": "allow-once", "name": "Allow", "kind": "allow_once" },
+                { "optionId": "reject-once", "name": "Reject", "kind": "reject_once" },
+            ],
         }),
     )
     .with_subject(format!("session:{session}"))
@@ -258,7 +261,7 @@ async fn the_approver_lists_pending_requests_and_answers_them() {
         ],
     );
     assert!(
-        decided.contains("decided session.permission.decided request_id=5 outcome=granted"),
+        decided.contains("decided session.permission.granted request_id=5 outcome=granted"),
         "{decided}"
     );
     let recorded = fixture.decisions("5");
@@ -352,7 +355,7 @@ async fn two_sessions_asking_under_one_request_id_are_told_apart() {
         ],
     );
     assert!(
-        decided.contains("decided session.permission.decided request_id=7 outcome=denied"),
+        decided.contains("decided session.permission.denied request_id=7 outcome=denied"),
         "{decided}"
     );
     let recorded = fixture.decisions("7");
