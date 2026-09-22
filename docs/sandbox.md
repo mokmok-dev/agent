@@ -16,6 +16,8 @@ generated:
 
 # agentd sandbox design
 
+The nouns are fixed in [vocabulary](vocabulary.md).
+
 The sandbox is the confinement layer through which an agent drives shell
 commands. **The boundary is the OS, not an in-process check**: the policy is
 rendered into the platform's native isolation mechanism (Seatbelt on macOS,

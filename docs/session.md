@@ -23,6 +23,10 @@ CloudEvents themselves. This document fixes the roles that make that up and the
 names for them, so the conversion layer does not become a property of the
 supervisor.
 
+The nouns are fixed in [vocabulary](vocabulary.md): this document uses
+**Session** for the supervised confined process and **conversation** for an
+agent's chat thread.
+
 ## Goals and non-goals
 
 Goals:
@@ -40,10 +44,10 @@ Non-goals:
 - Turning children into event-bus peers. A child that speaks CloudEvents over the
   daemon's WebSocket (`agentd-node`) is already a first-class participant and
   needs no Bridge; that path is unchanged.
-- A per-session mailbox with its own routing table. The durable log is the
-  mailbox; the bus is the delivery surface. A second routing plane is not built.
-- A worker pool. Third-party tools are not interchangeable — each has its own
-  protocol — so they are supervised individually, not pooled.
+- A per-session routing plane with its own table. The durable log is the only
+  source of truth and the bus is its fanout; a second routing plane is not built.
+- A pool of interchangeable tools. Third-party tools are not interchangeable —
+  each has its own protocol — so they are supervised individually, not pooled.
 
 ## Roles
 
@@ -67,11 +71,11 @@ flowchart LR
     K["agentd-sandbox<br/>confinement"] -. "Policy + SandboxedProcess" .-> M
 ```
 
-The bus is the actor system. The log is the mailbox; `EventBus` is the fanout.
-A node that speaks CloudEvents is a first-class actor on it. A third-party tool
-is a peripheral device with a fixed protocol; a **`Bridge`** is the facade that
-gives it an actor-shaped face. So the actor is the Bridge (and the bus), never
-the child.
+The bus is the actor system: the log is the source of truth and `EventBus` its
+private fanout to in-process subscribers. A node that speaks CloudEvents is a
+first-class actor on it. A third-party tool is a peripheral device with a fixed
+protocol; a **`Bridge`** is the facade that gives it an actor-shaped face. So the
+actor is the Bridge, never the child.
 
 ## Names
 
@@ -99,18 +103,23 @@ deleted: nothing needed a second name for the pairing, and the manager — the
 only holder — holds the bridge directly. "Session" now names the manager's
 domain and its `session.*` events, not a Rust type.
 
+`Session` had picked up a third sense along the way: the agent node called its
+chat thread a session (`agent.session.started`, `latest_session`, `session_key`),
+which contradicted this document and the node's own `--conversation` flag. That
+sense is now the **conversation** everywhere (see
+[vocabulary](vocabulary.md#decisions-this-document-records)), so `session` means
+the supervised process and nothing else.
+
 `Bridge` is chosen over the alternatives for three reasons: the direction is
-symmetric (a child-to-bus *uplink* and a bus-to-child *downlink* are both
+symmetric (a child-to-log *uplink* and a log-to-child *downlink* are both
 "bridging"), the concrete type is named after the protocol (`McpBridge`, and a
 future `LspBridge`), and the name does not claim the manager knows the protocol.
 `Driver` is avoided because it collides with the tokio I/O driver; `Adapter` and
 `Codec` were considered and lose the symmetry or sound byte-level.
 
-Vocabulary that is reserved, not used here:
-
-- **actor** — the bus, the log, and CloudEvents-speaking nodes. Not children.
-- **worker** — a later, interchangeable pool over one protocol. Nothing today
-  is interchangeable.
+The rest of the vocabulary — `actor` above all — is defined in
+[vocabulary](vocabulary.md). `worker` was deleted from it: nothing today is
+interchangeable, and the word should arrive with the pool, not before it.
 
 Child-side nouns, to be chosen deliberately when a consumer appears: `Tool`
 if "third-party tool" is the protagonist, `Workload` if the generality of
@@ -188,8 +197,8 @@ that field is now `data.command` (`agentd-sandbox/src/events.rs`), so the word
 Downlink routes by `subject`. A `Bridge` emits, and a client addresses, an event
 whose `subject` is `session:<id>`; the manager's downlink watcher forwards only
 events whose `subject` matches its own session, so two bridged sessions of the
-same protocol never receive each other's messages. The child does not get a
-mailbox of its own: the log already holds every candidate, and downlink is a
+same protocol never receive each other's messages. The child is not addressed
+directly: the log already holds every candidate, and downlink is a
 filtered projection of it. Type-based selection (`Interest` / `TypePrefixes` in
 `agentd-node/src/filter.rs`) remains available for a future bridge that wants it,
 but `subject` is what the first one needs and uses.
@@ -225,9 +234,9 @@ message) is the `Bridge`'s job precisely because only it knows the protocol.
 `agentd::session::SessionManager` already owns process liveness, restart, and
 lifetime against the durable log, and reconciles on startup by failing any
 session the previous daemon left open (see [sandbox](sandbox.md#sessions)). It
-stays the supervisor. What changes is only that its unit becomes
-`Session { SandboxedProcess, Bridge }` instead of a raw process, so supervision
-and conversion stop being entangled.
+stays the supervisor. What changes is only that it holds a
+`Session`'s `Bridge` alongside the `SandboxedProcess` instead of a raw process,
+so supervision and conversion stop being entangled.
 
 `agentd-node` is deliberately *not* downgraded to a stdio child. It already
 speaks CloudEvents and authenticates as a peer, so it needs no Bridge and the

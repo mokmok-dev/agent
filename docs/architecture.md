@@ -18,6 +18,9 @@ choreography style: they publish events onto an in-process event bus and react
 to the events published by others; there is no central orchestrator. Clients
 connect over a WebSocket served on a Unix domain socket.
 
+The nouns are fixed in [vocabulary](vocabulary.md); this document uses them
+without redefining them.
+
 Every event is written to a durable append-only JSONL log **before** it is
 fanned out, so the log is the source of truth and a live subscriber can never
 see an event that is not already durable. Read models are rebuilt from the log
@@ -300,7 +303,7 @@ reducer's state change and the checkpoint in **one SQLite transaction**, so a
 restart resumes without gaps or duplicates. An event the node is not interested
 in still advances the checkpoint, so it is not re-read.
 
-The JSONL log is the permanent event store; the SQLite file is a projection that
+The JSONL log is permanent; the SQLite file is a projection that
 can always be rebuilt from it. The log is not a write-ahead log and is never
 truncated to a checkpoint, and the projection is not a second source of truth.
 

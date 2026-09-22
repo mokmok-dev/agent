@@ -21,6 +21,8 @@ travels as a `CloudEvents` extension attribute, and each process exports its
 spans over OTLP. It closes the observability gap recorded in
 [reconciliation](reconciliation.md).
 
+The nouns are fixed in [vocabulary](vocabulary.md).
+
 ## The carrier: a traceparent extension
 
 An event may carry a `traceparent` extension attribute
@@ -44,7 +46,7 @@ hops and is the *starting* trace of the transmission, not each hop's own span.
 ## The convention: link, never adopt
 
 The daemon is the producer of every event it appends, but the trace context
-originates in the client, the approval flow, or the session supervisor.
+originates in the client, the approval flow, or the session manager.
 Following the `CloudEvents` span semantic conventions
 (`agentd-telemetry/src/semconv.rs`):
 

@@ -15,6 +15,9 @@ generated:
 
 # agentd inference design
 
+The nouns are fixed in [vocabulary](vocabulary.md). "Message" below is a chat
+message (`agentd_inference::Message`), never an Event.
+
 The sandbox denies network egress outright, so a confined agent cannot reach a
 model provider directly. Inference is therefore a **daemon capability**: the
 daemon holds the provider credentials and performs the request on the agent's

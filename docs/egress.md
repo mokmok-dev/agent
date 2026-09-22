@@ -16,6 +16,10 @@ generated:
 
 # agentd egress design
 
+The nouns are fixed in [vocabulary](vocabulary.md): a **Proxy** is the daemon's
+CONNECT proxy, an **egress allowlist** is the `host:port` set it enforces, and a
+**Forwarder** is the child-side process that reaches it.
+
 The sandbox denies all IP egress today, and that is correct for the shell tool:
 the daemon mediates inference over its own Unix socket, so a confined command
 never needs the network (see [inference](inference.md)). An ACP agent is

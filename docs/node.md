@@ -1,10 +1,10 @@
 ---
 type: Design
 title: node
-description: agentd のイベントログを購読し SQLite に射影する長命ノード(セッション)の設計。チェックポイント、冪等な再適用、sandbox 上での実行方針を定める。
+description: agentd のイベントログを購読し SQLite に射影する長命ノードの設計。チェックポイント、冪等な再適用、sandbox 上での実行方針を定める。
 tags:
   - node
-  - session
+  - conversation
   - projection
   - sqlite
   - eventlog
@@ -18,10 +18,15 @@ generated:
 A node is the client side of the choreography. It is a long-lived process that
 subscribes to the daemon's event log over a WebSocket on a Unix domain socket,
 decides which events it cares about, and keeps a SQLite projection in sync with
-them. The eventual target is a **session** running inside a sandbox; the first
-version is sandbox-agnostic so that constraint does not force a rewrite later.
+them. The eventual target is a node running as a supervised session inside a
+sandbox; the first version is sandbox-agnostic so that constraint does not force
+a rewrite later.
 
-## The store/projection split
+The nouns are fixed in [vocabulary](vocabulary.md): above all, a **session** is
+the supervised confined process the daemon owns, and a **conversation** is the
+chat thread an agent answers.
+
+## The log/projection split
 
 Two layers, with a strict direction of truth:
 
@@ -32,7 +37,7 @@ Two layers, with a strict direction of truth:
 
 The SQLite file is **not** a write-ahead log and the JSONL log is **not** a
 transient journal. A WAL is a database-internal, truncatable structure; the
-JSONL log is the permanent event store. If the projection's schema or reducer
+JSONL log is permanent. If the projection's schema or reducer
 changes, delete the SQLite file and rebuild it from the log — the log is never
 truncated or compacted in this design.
 
@@ -48,7 +53,7 @@ truncated or compacted in this design.
 
 ```mermaid
 flowchart LR
-    D[("events.jsonl<br/>event store (truth)")] -- "replay + live" --> S["agentd<br/>WebSocket /events"]
+    D[("events.jsonl<br/>the log (truth)")] -- "replay + live" --> S["agentd<br/>WebSocket /events"]
     S -- "WireMessage { seq, event }" --> C["WsClient"]
     C --> N["Node"]
     N -- "interested?" --> I["Interest"]
@@ -110,7 +115,7 @@ agentd-node \
   --socket "$XDG_RUNTIME_DIR/agentd/agentd.sock" \
   --db /path/to/session/node.db \
   --token-file /path/to/node.token \
-  --source urn:mokmokd:session:1 \
+  --source urn:mokmokd:node:1 \
   --type-prefix sandbox.
 ```
 
@@ -130,22 +135,23 @@ daemon for a completion on `/inference`, runs the `shell` tool for any tool call
 and publishes the finalized messages as `agent.*` events (see
 [inference](inference.md)).
 
-A **session** is a conversation id. On start the agent publishes
-`agent.session.started` (the conversation, workdir, and model), so sessions are
-discoverable and auditable from the log. Without `--conversation`, a new session
-gets a fresh id; with `--resume` the agent continues the most recent session
-recorded for `--workdir`, which also makes it pick up a turn interrupted by a
-restart. A workdir with no recorded session starts a new one instead of failing
-(the fallback is warned about on the agent's own stdout, which a supervising
-`up` does not surface — see [Sandbox deployment](#sandbox-deployment)), so a
-supervisor can pass `--resume` unconditionally. `agentd-publish --inbox "..."`
-sends a prompt to that same session.
+A **conversation** is identified by its id. On start the agent publishes
+`agent.conversation.started` (the conversation, workdir, and model), so
+conversations are discoverable and auditable from the log. Without
+`--conversation`, a new conversation gets a fresh id; with `--resume` the agent
+continues the most recent conversation recorded for `--workdir`, which also makes
+it pick up a turn interrupted by a restart. A workdir with no recorded
+conversation starts a new one instead of failing (the fallback is warned about on
+the agent's own stdout, which the session manager that launched it does not
+surface — see [Sandbox deployment](#sandbox-deployment)), so the manager can pass
+`--resume` unconditionally. `agentd-publish --inbox "..."` sends a prompt to that
+same conversation.
 
 ```sh
-# start a new session (paths default to the XDG directories)
+# start a new conversation (paths default to the XDG directories)
 agentd-agent --workdir /path/to/workspace --model <alias>
 
-# continue the last session for the workspace, then prompt it
+# continue the last conversation for the workspace, then prompt it
 agentd-agent --resume --workdir /path/to/workspace --model <alias>
 agentd-publish --workdir /path/to/workspace --inbox "fix the failing test"
 ```
@@ -166,12 +172,12 @@ Nodes run inside the sandbox. Everything external is a CLI argument
 and does not read the environment for config. Its stdout and stderr carry
 diagnostics, not state.
 
-The session manager pipes the child's stdio, and except under `--session-bridge`
-(where stdout carries protocol frames) it never drains those pipes: the child's
-diagnostics are therefore **not** surfaced by a supervising `agentd up` (only
-its `CloudEvents` output over the socket is seen). To read them, run
-`agentd-agent` directly; its own diagnostics are on by default, and `RUST_LOG`
-narrows or widens them.
+The session manager pipes the child's stdio, and except under
+`--session-protocol` (where stdout carries protocol frames) it never drains those
+pipes: the child's diagnostics are therefore **not** surfaced by the `agentd up`
+that launched it (only its `CloudEvents` output over the socket is seen). To read
+them, run `agentd-agent` directly; its own diagnostics are on by default, and
+`RUST_LOG` narrows or widens them.
 
 The daemon's session manager (`agentd::session`) launches a configured node on a
 `session.requested` event, reports `session.*` lifecycle, restarts within a
@@ -194,9 +200,9 @@ be writable: place the database in one session `write` entry.
 ## Stated gaps
 
 - **Synchronous SQLite.** A reducer's transaction runs on the async task that
-  receives the event, so a slow disk blocks that worker. There is one commit
-  (and its `fsync`) per event. Batching commits and offloading them to a
-  blocking worker are deliberate follow-ups, not done yet because the node's
+  receives the event, so a slow disk blocks the node's read loop. There is one
+  commit (and its `fsync`) per event. Batching commits and offloading them to a
+  dedicated thread are deliberate follow-ups, not done yet because the node's
   only work is this stream and correctness is easier to see with one event per
   transaction.
 - **A projection ahead of the log is fatal.** If the daemon starts with a fresh

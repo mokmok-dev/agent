@@ -16,6 +16,11 @@ generated:
 
 # agentd ACP design
 
+The nouns are fixed in [vocabulary](vocabulary.md). ACP's own session — the
+`sessionId` its `session/new` returns — is the child's word for its own session,
+and is not the daemon's `session_id`; the daemon's session is the supervised
+process the ACP agent runs in.
+
 The Agent Client Protocol (ACP, <https://agentclientprotocol.com>, v1 stable) is
 the JSON-RPC 2.0 protocol Zed uses to talk to coding agents. Running an ACP agent
 as a supervised child is the target: the agent is confined by the sandbox and the
