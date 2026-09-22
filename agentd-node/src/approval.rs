@@ -26,10 +26,10 @@ pub enum RequestKind {
 }
 
 /// The three request types, in the order they are printed.
-const REQUEST_TYPES: &[(&str, RequestKind)] = &[
-    ("sandbox.permission.requested", RequestKind::Sandbox),
-    ("session.permission.requested", RequestKind::Session),
-    ("session.egress.requested", RequestKind::Egress),
+const REQUEST_KINDS: [RequestKind; 3] = [
+    RequestKind::Sandbox,
+    RequestKind::Session,
+    RequestKind::Egress,
 ];
 
 /// The decision types, which answer a request carrying the same `request_id`.
@@ -59,10 +59,9 @@ impl RequestKind {
     /// The kind an event `type` requests, if any.
     #[must_use]
     fn requested_by(r#type: &str) -> Option<Self> {
-        REQUEST_TYPES
-            .iter()
-            .find(|(candidate, _)| *candidate == r#type)
-            .map(|(_, kind)| *kind)
+        REQUEST_KINDS
+            .into_iter()
+            .find(|kind| kind.requested_type() == r#type)
     }
 }
 
@@ -113,7 +112,31 @@ pub struct Pending {
     data: Value,
 }
 
+/// What a request is identified by.
+///
+/// A bridged child numbers its own requests, so its `request_id` is unique only
+/// within that child: the session a request is addressed to is part of its
+/// identity, or two sessions asking under one id would share an answer.
+type RequestKey = (Option<String>, String);
+
+/// The key an event is correlated by.
+fn key_of(event: &Event) -> Option<RequestKey> {
+    Some((
+        event.subject.clone(),
+        event
+            .data
+            .get("request_id")
+            .and_then(Value::as_str)?
+            .to_string(),
+    ))
+}
+
 impl Pending {
+    /// What this request is identified by.
+    fn key(&self) -> RequestKey {
+        (self.subject.clone(), self.request_id.clone())
+    }
+
     /// The request's kind, which fixes what answers it.
     #[must_use]
     pub const fn kind(&self) -> RequestKind {
@@ -133,6 +156,11 @@ impl Pending {
     }
 
     /// The event that answers this request, addressed to the same session.
+    ///
+    /// A grant for a bridged agent must name one of the options that agent
+    /// offered; a denial selects the agent's own reject option when it offered
+    /// one, and otherwise cancels the request, which is all the protocol can
+    /// express.
     ///
     /// # Errors
     ///
@@ -156,15 +184,21 @@ impl Pending {
                         offered.join(", "),
                     ));
                 }
-                Event::new(
-                    "session.permission.decided",
-                    json!({ "request_id": self.request_id, "option_id": option_id }),
-                )
+                Self::answer(json!({
+                    "request_id": self.request_id,
+                    "option_id": option_id,
+                }))
             },
-            (RequestKind::Session, Decision::Denied | Decision::Cancelled) => Event::new(
-                "session.permission.decided",
-                json!({ "request_id": self.request_id, "cancelled": true }),
+            (RequestKind::Session, Decision::Denied) => self.reject_option().map_or_else(
+                || self.cancellation(),
+                |option_id| {
+                    Self::answer(json!({
+                        "request_id": self.request_id,
+                        "option_id": option_id,
+                    }))
+                },
             ),
+            (RequestKind::Session, Decision::Cancelled) => self.cancellation(),
             (RequestKind::Egress, Decision::Granted) => Event::new(
                 "session.egress.granted",
                 self.egress_data("granted by an approver"),
@@ -193,18 +227,45 @@ impl Pending {
         })
     }
 
-    /// The ids of the options a bridged agent offered.
-    fn option_ids(&self) -> Vec<&str> {
+    /// The `session.permission.decided` that answers a bridged agent.
+    fn answer(data: Value) -> Event {
+        Event::new("session.permission.decided", data)
+    }
+
+    /// The `session.permission.decided` that withdraws a request.
+    fn cancellation(&self) -> Event {
+        Self::answer(json!({ "request_id": self.request_id, "cancelled": true }))
+    }
+
+    /// The options a bridged agent offered for the request.
+    fn options(&self) -> &[Value] {
         self.data
             .get("options")
             .and_then(Value::as_array)
-            .map(|options| {
-                options
-                    .iter()
-                    .filter_map(|option| option.get("optionId").and_then(Value::as_str))
-                    .collect()
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The ids of the options a bridged agent offered.
+    fn option_ids(&self) -> Vec<&str> {
+        self.options()
+            .iter()
+            .filter_map(|option| option.get("optionId").and_then(Value::as_str))
+            .collect()
+    }
+
+    /// The id of the option a bridged agent offered for refusing, when it
+    /// offered one. ACP names those `reject_once` and `reject_always`.
+    fn reject_option(&self) -> Option<&str> {
+        self.options()
+            .iter()
+            .find(|option| {
+                option
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.starts_with("reject"))
             })
-            .unwrap_or_default()
+            .and_then(|option| option.get("optionId"))
+            .and_then(Value::as_str)
     }
 
     /// The proxy's decision payload, echoing the destination it asked about.
@@ -225,7 +286,10 @@ impl Pending {
         match self.kind {
             RequestKind::Sandbox => format!(
                 "command={}",
-                self.data.get("command").and_then(Value::as_str).unwrap_or("")
+                self.data
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
             ),
             RequestKind::Session => {
                 let options = self.option_ids();
@@ -265,20 +329,22 @@ impl std::fmt::Display for Pending {
 /// Collects the requests in `events` that no decision answers, in log order.
 ///
 /// A request answered later in the log is not pending, so folding the whole log
-/// gives the requests awaiting a decision as of its end.
+/// gives the requests awaiting a decision as of its end. A decision answers only
+/// the request it is addressed to: a bridged child numbers its own requests, so
+/// an id alone is not unique.
 #[must_use]
 pub fn pending<'a>(events: impl IntoIterator<Item = &'a Event>) -> Vec<Pending> {
     let mut waiting: Vec<Pending> = Vec::new();
     // A sandbox request that a static rule already decided is recorded with a
     // decision of its own and is not waiting for anyone.
-    let mut decided: BTreeSet<String> = BTreeSet::new();
+    let mut decided: BTreeSet<RequestKey> = BTreeSet::new();
     for event in events {
-        let Some(request_id) = event.data.get("request_id").and_then(Value::as_str) else {
+        let Some(key) = key_of(event) else {
             continue;
         };
         if DECISION_TYPES.contains(&event.r#type.as_str()) {
-            decided.insert(request_id.to_string());
-            waiting.retain(|pending| pending.request_id != request_id);
+            decided.insert(key.clone());
+            waiting.retain(|pending| pending.key() != key);
             continue;
         }
         let Some(kind) = RequestKind::requested_by(&event.r#type) else {
@@ -292,13 +358,13 @@ pub fn pending<'a>(events: impl IntoIterator<Item = &'a Event>) -> Vec<Pending> 
         {
             continue;
         }
-        if decided.contains(request_id) {
+        if decided.contains(&key) {
             continue;
         }
         waiting.push(Pending {
             kind,
-            request_id: request_id.to_string(),
-            subject: event.subject.clone(),
+            request_id: key.1,
+            subject: key.0,
             data: event.data.clone(),
         });
     }
@@ -334,13 +400,32 @@ mod tests {
         let answered = Event::new(
             "session.permission.decided",
             json!({ "request_id": "5", "cancelled": true }),
-        );
+        )
+        .with_subject("session:agent");
         let unanswered = session_request("6");
 
         let waiting = pending([&asked, &answered, &unanswered]);
         assert_eq!(waiting.len(), 1);
         assert_eq!(waiting[0].request_id(), "6");
         assert_eq!(waiting[0].kind(), RequestKind::Session);
+    }
+
+    #[test]
+    fn a_decision_answers_only_the_session_it_is_addressed_to() {
+        // A bridged child numbers its own requests, so two sessions can ask
+        // under one id; only the subject tells the answers apart.
+        let first = session_request("7");
+        let second = session_request("7").with_subject("session:other");
+        let answer = Event::new(
+            "session.permission.decided",
+            json!({ "request_id": "7", "cancelled": true }),
+        )
+        .with_subject("session:agent");
+
+        let waiting = pending([&first, &second, &answer]);
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].subject(), Some("session:other"));
+        assert_eq!(waiting[0].request_id(), "7");
     }
 
     #[test]
@@ -363,7 +448,10 @@ mod tests {
         let waiting = pending([&sandbox, &egress, &unrelated]);
         assert_eq!(waiting.len(), 2);
         assert_eq!(waiting[0].kind(), RequestKind::Sandbox);
-        assert_eq!(waiting[0].to_string(), "sandbox.permission.requested request_id=1 subject=- command=rm -rf /");
+        assert_eq!(
+            waiting[0].to_string(),
+            "sandbox.permission.requested request_id=1 subject=- command=rm -rf /"
+        );
         assert_eq!(waiting[1].kind(), RequestKind::Egress);
         assert_eq!(
             waiting[1].to_string(),
@@ -406,6 +494,30 @@ mod tests {
         let cancelled = pending.decide(Decision::Cancelled, None).expect("cancel");
         assert_eq!(cancelled.data["cancelled"], true);
         assert_eq!(cancelled.data.get("option_id"), None);
+    }
+
+    #[test]
+    fn a_denied_session_permission_selects_the_agents_own_reject_option() {
+        // The fixture's agent offers `reject-once`, so denying names it and the
+        // agent hears which outcome the operator chose.
+        let asked = pending([&session_request("5")]);
+        let denied = asked[0].decide(Decision::Denied, None).expect("deny");
+        assert_eq!(denied.data["option_id"], "reject-once");
+        assert_eq!(denied.data.get("cancelled"), None);
+
+        // An agent that offers only an allow option can only be cancelled.
+        let allow_only = Event::new(
+            "session.permission.requested",
+            json!({
+                "request_id": "6",
+                "options": [{ "optionId": "allow-once", "kind": "allow_once" }],
+            }),
+        )
+        .with_subject("session:agent");
+        let asked = pending([&allow_only]);
+        let denied = asked[0].decide(Decision::Denied, None).expect("deny");
+        assert_eq!(denied.data["cancelled"], true);
+        assert_eq!(denied.data.get("option_id"), None);
     }
 
     #[test]

@@ -294,9 +294,9 @@ impl SessionManager {
         // The permission requests awaiting an approver, by request id. State
         // lives here rather than in the per-session bridge because the bridge is
         // a pure state machine and the wait must end even when no event arrives.
-        let mut pending = BTreeMap::new();
+        let mut pending: BTreeMap<RequestKey, tokio::time::Instant> = BTreeMap::new();
         loop {
-            let deadline = pending.values().map(|entry: &Pending| entry.deadline).min();
+            let deadline = pending.values().copied().min();
             tokio::select! {
                 _ = shutdown.changed() => return Ok(()),
                 () = wait_until(deadline) => self.expire(&mut events, snapshot, &mut pending).await,
@@ -314,7 +314,7 @@ impl SessionManager {
         &self,
         entry: LogEntry,
         snapshot: Seq,
-        pending: &mut BTreeMap<String, Pending>,
+        pending: &mut BTreeMap<RequestKey, tokio::time::Instant>,
     ) {
         if entry.seq <= snapshot {
             return;
@@ -325,8 +325,8 @@ impl SessionManager {
             SESSION_STATUS_REQUESTED => self.report_status().await,
             SESSION_PERMISSION_REQUESTED => self.await_approval(event, pending),
             SESSION_PERMISSION_DECIDED => {
-                if let Some(request_id) = request_id(event) {
-                    pending.remove(request_id);
+                if let Some(key) = RequestKey::of(event) {
+                    pending.remove(&key);
                 }
             },
             _ => {},
@@ -337,23 +337,15 @@ impl SessionManager {
     fn await_approval(
         &self,
         event: &Event,
-        pending: &mut BTreeMap<String, Pending>,
+        pending: &mut BTreeMap<RequestKey, tokio::time::Instant>,
     ) {
         let Some(deadline) = self.permission_approval else {
             return;
         };
-        let Some(request_id) = request_id(event) else {
+        let Some(key) = RequestKey::of(event) else {
             return;
         };
-        pending.insert(
-            request_id.to_string(),
-            Pending {
-                deadline: tokio::time::Instant::now() + deadline,
-                // The request is routed to a child by its `subject`; answering
-                // it without one would leave that child waiting.
-                subject: event.subject.clone(),
-            },
-        );
+        pending.insert(key, tokio::time::Instant::now() + deadline);
     }
 
     /// Cancels every pending request whose deadline has passed.
@@ -364,25 +356,31 @@ impl SessionManager {
         &self,
         events: &mut tokio::sync::broadcast::Receiver<LogEntry>,
         snapshot: Seq,
-        pending: &mut BTreeMap<String, Pending>,
+        pending: &mut BTreeMap<RequestKey, tokio::time::Instant>,
     ) {
         while let Ok(entry) = events.try_recv() {
             self.serve(entry, snapshot, pending).await;
         }
         let now = tokio::time::Instant::now();
-        let expired: Vec<(String, Option<String>)> = pending
+        let expired: Vec<RequestKey> = pending
             .iter()
-            .filter(|(_, entry)| entry.deadline <= now)
-            .map(|(request_id, entry)| (request_id.clone(), entry.subject.clone()))
+            .filter(|(_, deadline)| **deadline <= now)
+            .map(|(key, _)| key.clone())
             .collect();
-        for (request_id, subject) in expired {
-            pending.remove(&request_id);
-            let mut event = permission_cancelled(&request_id);
-            if let Some(subject) = subject {
-                event = event.with_subject(subject);
+        for key in expired {
+            pending.remove(&key);
+            // The cancellation is addressed to the session that asked, because
+            // that is how the bridge routes it back to the child.
+            let mut event = permission_cancelled(&key.request_id);
+            if let Some(subject) = &key.subject {
+                event = event.with_subject(subject.clone());
             }
             if let Err(error) = self.log.publish(event).await {
-                tracing::error!(%error, %request_id, "failed to record a permission cancellation");
+                tracing::error!(
+                    %error,
+                    request_id = %key.request_id,
+                    "failed to record a permission cancellation"
+                );
             }
         }
     }
@@ -963,13 +961,29 @@ async fn write_stdin(
     }
 }
 
-/// A permission request the manager is timing while it waits for an approver.
-struct Pending {
-    /// When the request is cancelled if no decision has arrived.
-    deadline: tokio::time::Instant,
-    /// The `subject` the request carried, so the cancellation reaches the child
-    /// the request came from.
+/// What a pending permission request is identified by.
+///
+/// A bridged child numbers its own requests, so its `request_id` is unique only
+/// within that child: the session the request is addressed to is part of the
+/// identity, or two sessions asking under the same id would share one deadline
+/// and one cancellation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RequestKey {
+    /// The `subject` the request carried, which routes an answer to the child
+    /// that asked. Absent when nothing can be addressed.
     subject: Option<String>,
+    /// The id the child correlated its request by.
+    request_id: String,
+}
+
+impl RequestKey {
+    /// The key a permission request or decision event is timed by.
+    fn of(event: &Event) -> Option<Self> {
+        Some(Self {
+            subject: event.subject.clone(),
+            request_id: request_id(event)?.to_string(),
+        })
+    }
 }
 
 /// The `request_id` a permission request or decision is correlated by.
@@ -1533,7 +1547,8 @@ mod tests {
         let initialize =
             json!({"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}})
                 .to_string();
-        let new_session = json!({"jsonrpc":"2.0","id":1,"result":{"sessionId":"sess_1"}}).to_string();
+        let new_session =
+            json!({"jsonrpc":"2.0","id":1,"result":{"sessionId":"sess_1"}}).to_string();
         let permission = json!({
             "jsonrpc": "2.0",
             "id": 7,
@@ -1573,22 +1588,33 @@ mod tests {
         (sender, handle)
     }
 
-    /// Waits until the child has recorded a reply, failing on timeout.
-    async fn wait_for_reply(replies: &Path) -> String {
+    /// Waits until the child(ren) have recorded `lines` replies.
+    async fn wait_for_replies(
+        replies: &Path,
+        lines: usize,
+    ) -> String {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             if let Ok(content) = std::fs::read_to_string(replies)
-                && !content.is_empty()
+                && content.lines().count() >= lines
             {
                 return content;
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "the child was never answered: {}",
+                "only {} of {lines} replies were written to {}",
+                std::fs::read_to_string(replies)
+                    .map(|content| content.lines().count())
+                    .unwrap_or_default(),
                 replies.display()
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// Waits until the child has recorded a reply, failing on timeout.
+    async fn wait_for_reply(replies: &Path) -> String {
+        wait_for_replies(replies, 1).await
     }
 
     /// Every event recorded in the log, read back from the file.
@@ -1608,7 +1634,10 @@ mod tests {
             .iter()
             .filter(|event| {
                 event.r#type == SESSION_PERMISSION_DECIDED
-                    && event.data.get("request_id").and_then(serde_json::Value::as_str)
+                    && event
+                        .data
+                        .get("request_id")
+                        .and_then(serde_json::Value::as_str)
                         == Some(request_id)
             })
             .cloned()
@@ -1677,7 +1706,8 @@ mod tests {
 
         let reply = wait_for_reply(&replies).await;
         assert!(
-            reply.contains(r#""outcome":"selected""#) && reply.contains(r#""optionId":"allow-once""#),
+            reply.contains(r#""outcome":"selected""#)
+                && reply.contains(r#""optionId":"allow-once""#),
             "the child should be answered with the approver's option: {reply}"
         );
 
@@ -1692,6 +1722,64 @@ mod tests {
         );
 
         shutdown.send(true).expect("shutdown");
+        handle.await.expect("join").expect("clean stop");
+    }
+
+    #[tokio::test]
+    async fn two_sessions_asking_under_one_request_id_are_each_cancelled() {
+        // A bridged child numbers its own permission requests, so its id is
+        // unique only within that child: two sessions asking under the same id
+        // must still be timed and answered apart, each under its own subject.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = open_log(dir.path());
+        let replies = dir.path().join("replies.txt");
+        let manager = acp_manager(
+            log.clone(),
+            &acp_child_requesting_permission(&replies),
+            Supervision::default(),
+        )
+        .with_permission_approval(Duration::from_millis(200));
+        let mut subscriber = log.subscribe();
+        let (sender, receiver) = watch::channel(false);
+        let (ready, barrier) = oneshot::channel();
+        let handle = tokio::spawn(async move { manager.run_ready(receiver, ready).await });
+        barrier.await.expect("the run loop should be ready");
+        log.publish(request("perm-a")).await.expect("publish");
+        log.publish(request("perm-b")).await.expect("publish");
+
+        let mut asked = Vec::new();
+        for _ in 0..2 {
+            let requested = wait_for(&mut subscriber, SESSION_PERMISSION_REQUESTED).await;
+            assert_eq!(requested.data["request_id"], "7");
+            asked.push(requested.subject.clone().expect("a subject"));
+        }
+        asked.sort();
+        assert_eq!(asked, ["session:perm-a", "session:perm-b"]);
+
+        // Each session's request is timed on its own, so each is cancelled and
+        // each cancellation is addressed to the session that asked.
+        let mut cancelled = Vec::new();
+        for _ in 0..2 {
+            let decided = wait_for(&mut subscriber, SESSION_PERMISSION_DECIDED).await;
+            assert_eq!(decided.data["request_id"], "7");
+            assert_eq!(decided.data["cancelled"], true);
+            cancelled.push(decided.subject.clone().expect("a subject"));
+        }
+        cancelled.sort();
+        assert_eq!(cancelled, ["session:perm-a", "session:perm-b"]);
+
+        // Both children were unblocked, so neither wait was lost to the other.
+        let replies = wait_for_replies(&replies, 2).await;
+        assert_eq!(
+            replies
+                .lines()
+                .filter(|line| line.contains(r#""outcome":"cancelled""#))
+                .count(),
+            2,
+            "{replies}"
+        );
+
+        sender.send(true).expect("shutdown");
         handle.await.expect("join").expect("clean stop");
     }
 
@@ -1725,7 +1813,10 @@ mod tests {
         let decisions = decisions_for(&recorded(&log), "7");
         assert_eq!(decisions.len(), 2, "the late decision is recorded as sent");
         assert_eq!(
-            decisions.iter().filter(|event| event.data["cancelled"] == true).count(),
+            decisions
+                .iter()
+                .filter(|event| event.data["cancelled"] == true)
+                .count(),
             1,
             "only the deadline cancels the request"
         );

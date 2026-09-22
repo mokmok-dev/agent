@@ -126,7 +126,10 @@ async fn run() -> Result<(), RunError> {
     let position = committed
         .seq
         .map_or_else(|| String::from("?"), |seq| seq.to_string());
-    println!("committed {} at position {position}", committed.event.r#type);
+    println!(
+        "committed {} at position {position}",
+        committed.event.r#type
+    );
     Ok(())
 }
 

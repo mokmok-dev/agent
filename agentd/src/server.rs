@@ -1,6 +1,4 @@
-use agentd_events::{
-    DAEMON_CAUGHT_UP, Event, EventLog, LogEntry, LogError, Seq, WireMessage,
-};
+use agentd_events::{DAEMON_CAUGHT_UP, Event, EventLog, LogEntry, LogError, Seq, WireMessage};
 use agentd_inference::{Delta, InferenceRequest, Provider};
 use axum::Router;
 use axum::extract::Query;

@@ -8,7 +8,7 @@
 //! republishing the decision uses the authority token, because every request and
 //! decision type is reserved to daemon-authority publishers.
 
-use agentd_node::approval::{Decision, pending};
+use agentd_node::approval::{Decision, Pending, pending};
 use agentd_node::{Event, PublishError, WsClient};
 use clap::{Parser, Subcommand};
 use secrecy::zeroize::Zeroizing;
@@ -59,6 +59,11 @@ struct Decide {
     /// The `request_id` of the request being answered, as `pending` printed it.
     #[arg(long)]
     request_id: String,
+    /// The session the request was addressed to, needed only when two requests
+    /// share one `request_id` — a bridged child numbers its own requests, so its
+    /// id is unique only within that child.
+    #[arg(long)]
+    subject: Option<String>,
     /// Allow the request.
     #[arg(long)]
     granted: bool,
@@ -95,6 +100,9 @@ enum RunError {
     /// No request with that id is awaiting a decision.
     #[error("no request with id {0} is awaiting a decision; run `agentd-approve pending`")]
     UnknownRequest(String),
+    /// Several requests share that id, so the answer would be ambiguous.
+    #[error("{1} requests have id {0}; pass --subject to say which")]
+    AmbiguousRequest(String, usize),
     /// The flags did not name exactly one decision, or named none.
     #[error("pass exactly one of --granted, --denied, or --cancelled")]
     AmbiguousDecision,
@@ -142,12 +150,25 @@ async fn run() -> Result<(), RunError> {
             Ok(())
         },
         Command::Decide(decide) => {
-            let pending = pending(&read_log(&decide.connection).await?);
-            let Some(request) = pending
+            let requests = pending(&read_log(&decide.connection).await?);
+            let matching: Vec<&Pending> = requests
                 .iter()
-                .find(|request| request.request_id() == decide.request_id)
-            else {
-                return Err(RunError::UnknownRequest(decide.request_id));
+                .filter(|request| {
+                    request.request_id() == decide.request_id
+                        && decide
+                            .subject
+                            .as_deref()
+                            .is_none_or(|subject| request.subject() == Some(subject))
+                })
+                .collect();
+            let request = match matching.as_slice() {
+                [] => return Err(RunError::UnknownRequest(decide.request_id)),
+                [request] => *request,
+                // Answering one of two would leave the other waiting under an id
+                // the operator cannot tell apart.
+                many => {
+                    return Err(RunError::AmbiguousRequest(decide.request_id, many.len()));
+                },
             };
             let decision = match (decide.granted, decide.denied, decide.cancelled) {
                 (true, false, false) => Decision::Granted,
