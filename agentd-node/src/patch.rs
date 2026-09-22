@@ -14,6 +14,12 @@
 //! cannot be patched, because the `\r` it carries is part of each line's text
 //! while the patch's own `\r` is not.
 //!
+//! Matching is exact. A hunk header whose counts disagree with its body is
+//! repaired by recounting the body, but the context lines themselves must match
+//! at the offset the header names: there is no offset search and no fuzzy
+//! match, so a diff computed against other content is refused rather than
+//! applied somewhere it might fit.
+//!
 //! Application is all-or-nothing by construction: [`Patch::apply`] returns every
 //! file's result only once every one of them applied, so a caller writes nothing
 //! unless the whole patch holds.
