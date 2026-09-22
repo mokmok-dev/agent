@@ -11,7 +11,6 @@
 
 use agentd_events::Event;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
 use thiserror::Error;
 
 /// The kind of request awaiting a decision, which fixes what answers it.
@@ -119,6 +118,13 @@ pub struct Pending {
 /// identity, or two sessions asking under one id would share an answer.
 type RequestKey = (Option<String>, String);
 
+/// A value as it is safe to print: a command, a host, and an option id all come
+/// from an agent or a session, so an escape sequence in one must not reach the
+/// operator's terminal raw.
+fn printable(value: &str) -> String {
+    value.escape_debug().to_string()
+}
+
 /// The key an event is correlated by.
 fn key_of(event: &Event) -> Option<RequestKey> {
     Some((
@@ -221,8 +227,12 @@ impl Pending {
             (RequestKind::Sandbox, decision) => {
                 let (r#type, value) = match decision {
                     Decision::Granted => ("sandbox.permission.granted", "granted"),
-                    Decision::Denied => ("sandbox.permission.denied", "denied"),
-                    Decision::Cancelled => ("sandbox.permission.denied", "cancelled"),
+                    // The sandbox's own contract has no `cancelled` decision
+                    // value, and its waiter reads the type, so a withdrawal is
+                    // recorded as a denial.
+                    Decision::Denied | Decision::Cancelled => {
+                        ("sandbox.permission.denied", "denied")
+                    },
                 };
                 let mut data = self.data.clone();
                 data["decision"] = json!(value);
@@ -290,26 +300,39 @@ impl Pending {
     }
 
     /// What the request is about, for the operator deciding it.
+    ///
+    /// Every value here is chosen by the agent or the session rather than by the
+    /// operator, so each is escaped: an escape sequence in a command must not
+    /// rewrite the output the operator reads it from.
     fn detail(&self) -> String {
         match self.kind {
             RequestKind::Sandbox => format!(
                 "command={}",
-                self.data
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
+                printable(
+                    self.data
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                )
             ),
             RequestKind::Session => {
                 let options = self.option_ids();
                 if options.is_empty() {
                     String::from("options=-")
                 } else {
-                    format!("options={}", options.join(","))
+                    format!(
+                        "options={}",
+                        options
+                            .iter()
+                            .map(|option| printable(option))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
                 }
             },
             RequestKind::Egress => format!(
                 "destination={}:{}",
-                self.data.get("host").and_then(Value::as_str).unwrap_or(""),
+                printable(self.data.get("host").and_then(Value::as_str).unwrap_or("")),
                 self.data
                     .get("port")
                     .map_or_else(|| String::from("?"), Value::to_string),
@@ -339,34 +362,31 @@ impl std::fmt::Display for Pending {
 /// A request answered later in the log is not pending, so folding the whole log
 /// gives the requests awaiting a decision as of its end. A decision answers only
 /// the request it is addressed to: a bridged child numbers its own requests, so
-/// an id alone is not unique.
+/// an id alone is not unique. Nothing is remembered about a decision once it has
+/// been folded: a request that appears *after* one is a fresh ask — a restarted
+/// child numbers its requests from the start again — and must still be listed.
 #[must_use]
 pub fn pending<'a>(events: impl IntoIterator<Item = &'a Event>) -> Vec<Pending> {
     let mut waiting: Vec<Pending> = Vec::new();
-    // A sandbox request that a static rule already decided is recorded with a
-    // decision of its own and is not waiting for anyone.
-    let mut decided: BTreeSet<RequestKey> = BTreeSet::new();
     for event in events {
         let Some(key) = key_of(event) else {
             continue;
         };
         if DECISION_TYPES.contains(&event.r#type.as_str()) {
-            decided.insert(key.clone());
             waiting.retain(|pending| pending.key() != key);
             continue;
         }
         let Some(kind) = RequestKind::requested_by(&event.r#type) else {
             continue;
         };
+        // A sandbox request that a static rule already decided is recorded with
+        // a decision of its own and is not waiting for anyone.
         if event
             .data
             .get("decision")
             .and_then(Value::as_str)
             .is_some_and(|decision| decision != DECISION_PENDING)
         {
-            continue;
-        }
-        if decided.contains(&key) {
             continue;
         }
         waiting.push(Pending {
@@ -528,6 +548,55 @@ mod tests {
         let denied = asked[0].decide(Decision::Denied, None).expect("deny");
         assert_eq!(denied.data["cancelled"], true);
         assert_eq!(denied.data.get("option_id"), None);
+    }
+
+    #[test]
+    fn a_request_asked_again_after_a_decision_is_pending_once_more() {
+        // A supervised session that restarts numbers its requests from the start
+        // again, so the same id under the same subject asks a second time; the
+        // first answer must not hide it.
+        let first = session_request("1");
+        let answered = Event::new(
+            "session.permission.decided",
+            json!({ "request_id": "1", "cancelled": true }),
+        )
+        .with_subject("session:agent");
+        let again = session_request("1");
+
+        let waiting = pending([&first, &answered, &again]);
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].request_id(), "1");
+        assert_eq!(waiting[0].subject(), Some("session:agent"));
+    }
+
+    #[test]
+    fn a_withdrawn_sandbox_request_is_recorded_as_the_sandbox_understands_it() {
+        // The sandbox's decision values are auto/pending/granted/denied, so a
+        // withdrawal has to be a denial rather than a value it never emits.
+        let asked = Event::new(
+            "sandbox.permission.requested",
+            json!({ "request_id": "4", "command": "rm -rf /tmp/x", "decision": "pending" }),
+        );
+        let asked = pending([&asked]);
+        let withdrawn = asked[0].decide(Decision::Cancelled, None).expect("cancel");
+
+        assert_eq!(withdrawn.r#type, "sandbox.permission.denied");
+        assert_eq!(withdrawn.data["decision"], "denied");
+        assert_eq!(withdrawn.data["command"], "rm -rf /tmp/x");
+    }
+
+    #[test]
+    fn a_printed_request_escapes_what_the_session_chose() {
+        // The command and the destination are not the operator's, so a control
+        // sequence in one must not reach the terminal.
+        let asked = Event::new(
+            "sandbox.permission.requested",
+            json!({ "request_id": "1", "command": "echo \u{1b}[2Jcleared", "decision": "pending" }),
+        );
+        let printed = pending([&asked])[0].to_string();
+
+        assert!(!printed.contains('\u{1b}'), "{printed}");
+        assert!(printed.contains("\\u{1b}"), "{printed}");
     }
 
     #[test]

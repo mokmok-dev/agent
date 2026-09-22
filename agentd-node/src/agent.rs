@@ -564,9 +564,10 @@ fn patch_tool() -> ToolSpec {
     ToolSpec {
         name: String::from("apply_patch"),
         description: String::from(
-            "Apply a unified diff to the files it names, all of them or none. \
-             Prefer this over `shell` for changing files: the diff is recorded, \
-             so the change can be undone from the log.",
+            "Apply a unified diff to the files it names. Every hunk must match before \
+             anything is written, and each file is then replaced in one step. Prefer \
+             this over `shell` for changing files: the diff is recorded, so the change \
+             can be undone from the log.",
         ),
         parameters: json!({
             "type": "object",
@@ -576,7 +577,9 @@ fn patch_tool() -> ToolSpec {
                     "description":
                         "A unified diff with `---`/`+++` file headers and `@@` hunks. \
                          Files are edited in place, created (`--- /dev/null`), or deleted \
-                         (`+++ /dev/null`); renames are not supported.",
+                         (`+++ /dev/null`). Refused: a rename, a file named twice, a \
+                         section with no hunk, and a creation whose file already has \
+                         content.",
                 },
             },
             "required": ["patch"],
@@ -732,6 +735,19 @@ enum PatchToolError {
         /// The removal failure.
         error: std::io::Error,
     },
+    /// The commit step failed after it had already changed some files.
+    #[error(
+        "the patch was applied in part: {path} failed with {error}, after {done} of its files \
+         were already changed, and nothing was recorded for them"
+    )]
+    Partial {
+        /// The path the commit stopped at.
+        path: String,
+        /// How many files it had changed by then.
+        done: usize,
+        /// The failure.
+        error: std::io::Error,
+    },
 }
 
 /// Applies a unified diff to the workspace and reports the change.
@@ -828,6 +844,13 @@ fn rejection(error: &PatchToolError) -> String {
     format!("the patch was not applied: {error}")
 }
 
+/// A staged replacement: the temporary file holding the new content, and the
+/// file it will replace.
+struct Staged {
+    temporary: PathBuf,
+    target: PathBuf,
+}
+
 /// Writes every new file content beside its target, changing nothing yet.
 ///
 /// A deletion stages nothing and is carried out at commit time. When one file
@@ -836,7 +859,7 @@ fn rejection(error: &PatchToolError) -> String {
 fn stage_all(
     applied: &[Applied],
     targets: &BTreeMap<String, PathBuf>,
-) -> Result<Vec<(PathBuf, PathBuf)>, PatchToolError> {
+) -> Result<Vec<Staged>, PatchToolError> {
     let mut staged = Vec::new();
     for file in applied {
         let Some(content) = file.content.as_deref() else {
@@ -846,7 +869,10 @@ fn stage_all(
             return Err(PatchToolError::Outside(file.path.clone()));
         };
         match stage(target, content) {
-            Ok(temporary) => staged.push((temporary, target.clone())),
+            Ok(temporary) => staged.push(Staged {
+                temporary,
+                target: target.clone(),
+            }),
             Err(error) => {
                 discard(&staged);
                 return Err(PatchToolError::Write {
@@ -859,50 +885,72 @@ fn stage_all(
     Ok(staged)
 }
 
-/// Renames each staged file onto its target, then removes each deleted file.
+/// Commits the staged replacements: removes each deleted file, then renames each
+/// staged one onto its target.
+///
+/// Removals come first so that a file the workspace will not let go of is found
+/// before any file is replaced, which leaves the common failure with nothing to
+/// undo. A failure after that point has already changed files, and it is
+/// reported as such rather than as a patch that did not apply.
 fn commit(
     applied: &[Applied],
     targets: &BTreeMap<String, PathBuf>,
-    staged: &[(PathBuf, PathBuf)],
+    staged: &[Staged],
 ) -> Result<(), PatchToolError> {
-    for (temporary, target) in staged {
-        if let Err(error) = std::fs::rename(temporary, target) {
-            let _ = std::fs::remove_file(temporary);
-            return Err(PatchToolError::Write {
-                path: target.display().to_string(),
-                error,
-            });
-        }
-    }
-    for file in applied {
-        if file.content.is_some() {
-            continue;
-        }
+    let mut done = 0;
+    for file in applied.iter().filter(|file| file.content.is_none()) {
         let Some(target) = targets.get(&file.path) else {
             return Err(PatchToolError::Outside(file.path.clone()));
         };
-        if let Err(error) = std::fs::remove_file(target) {
-            return Err(PatchToolError::Remove {
-                path: file.path.clone(),
-                error,
-            });
+        match std::fs::remove_file(target) {
+            Ok(()) => done += 1,
+            Err(error) if done == 0 => {
+                return Err(PatchToolError::Remove {
+                    path: file.path.clone(),
+                    error,
+                });
+            },
+            Err(error) => {
+                return Err(PatchToolError::Partial {
+                    path: file.path.clone(),
+                    done,
+                    error,
+                });
+            },
+        }
+    }
+    for (index, replacement) in staged.iter().enumerate() {
+        match std::fs::rename(&replacement.temporary, &replacement.target) {
+            Ok(()) => done += 1,
+            Err(error) => {
+                discard(&staged[index..]);
+                let path = replacement.target.display().to_string();
+                return Err(if done == 0 {
+                    PatchToolError::Write { path, error }
+                } else {
+                    PatchToolError::Partial { path, done, error }
+                });
+            },
         }
     }
     Ok(())
 }
 
 /// Removes the staged files a failed patch left behind.
-fn discard(staged: &[(PathBuf, PathBuf)]) {
-    for (temporary, _) in staged {
-        let _ = std::fs::remove_file(temporary);
+fn discard(staged: &[Staged]) {
+    for staged in staged {
+        let _ = std::fs::remove_file(&staged.temporary);
     }
 }
 
 /// The absolute path `path` names inside `root`, refusing one that leaves it.
 ///
-/// The parent is resolved before the name is joined, so a symlink inside the
-/// workspace cannot redirect a write outside it. The parent must exist: a patch
-/// edits files where they are rather than creating directories.
+/// Both the parent and, when the file is already there, the file itself are
+/// resolved, so a symbolic link inside the workspace cannot make the patch read
+/// or write outside it: the parent check stops a link to a directory, and the
+/// file check stops a link to a file, whose read would otherwise reach a path
+/// the sandbox policy masks and quote it back in a rejection. The parent must
+/// exist: a patch edits files where they are rather than creating directories.
 fn resolve(
     root: &Path,
     path: &str,
@@ -924,14 +972,21 @@ fn resolve(
     if !parent.starts_with(root) {
         return Err(PatchToolError::Outside(path.to_string()));
     }
-    Ok(parent.join(name))
+    let target = parent.join(name);
+    if let Ok(resolved) = target.canonicalize()
+        && !resolved.starts_with(root)
+    {
+        return Err(PatchToolError::Outside(path.to_string()));
+    }
+    Ok(target)
 }
 
 /// Writes `content` to a temporary file beside `target`, ready to be renamed
 /// onto it.
 ///
-/// The target's permission bits are copied to the temporary, so replacing a
-/// patch target does not clear the mode of an executable or a script.
+/// The temporary is created private and then given the target's permission bits,
+/// so a patch neither exposes the content it carries while it is staged nor
+/// clears the mode of an executable or a script.
 fn stage(
     target: &Path,
     content: &str,
@@ -941,16 +996,30 @@ fn stage(
         |name| name.to_string_lossy().into_owned(),
     );
     let temporary = target.with_file_name(format!(".{name}.agentd-{}", uuid::Uuid::new_v4()));
-    let written = std::fs::write(&temporary, content).and_then(|()| {
-        std::fs::metadata(target).map_or(Ok(()), |metadata| {
-            std::fs::set_permissions(&temporary, metadata.permissions())
-        })
-    });
+    let written = create_private(&temporary)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, content.as_bytes()))
+        .and_then(|()| {
+            std::fs::metadata(target).map_or(Ok(()), |metadata| {
+                std::fs::set_permissions(&temporary, metadata.permissions())
+            })
+        });
     if let Err(error) = written {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
     Ok(temporary)
+}
+
+/// Creates `path` for writing, readable by its owner only.
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 /// Runs `command` with `bash -c` in `workdir`, enforcing the limits.
@@ -1503,6 +1572,43 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(elsewhere.join("target.txt")).expect("the file outside"),
+            "secret\n"
+        );
+    }
+
+    /// A workspace symlink *file* is a way to *read* out of the workspace, which
+    /// would disclose a file the sandbox policy masks.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_patch_refuses_a_symlinked_file_pointing_out_of_the_workspace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("the workspace");
+        let secret = dir.path().join("admin.token");
+        std::fs::write(&secret, "secret\n").expect("the file outside");
+        std::os::unix::fs::symlink(&secret, workspace.join("leak")).expect("the symlink");
+
+        let run = run_tool(
+            &patch_call(&diff("leak", "changed", "CHANGED")),
+            &workspace,
+            ShellLimits::default(),
+            CONVERSATION,
+        )
+        .await;
+
+        assert!(run.event.is_none());
+        assert!(
+            run.outcome.content.contains("outside the workspace"),
+            "{}",
+            run.outcome.content
+        );
+        assert!(
+            !run.outcome.content.contains("secret"),
+            "a rejected patch must not quote what it could not legitimately read: {}",
+            run.outcome.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(&secret).expect("the file outside"),
             "secret\n"
         );
     }

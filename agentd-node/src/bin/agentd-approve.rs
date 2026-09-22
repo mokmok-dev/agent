@@ -8,7 +8,7 @@
 //! republishing the decision uses the authority token, because every request and
 //! decision type is reserved to daemon-authority publishers.
 
-use agentd_node::approval::{Decision, Pending, pending};
+use agentd_node::approval::{Decision, Pending, RequestKind, pending};
 use agentd_node::{Event, PublishError, WsClient};
 use clap::{Parser, Subcommand};
 use secrecy::zeroize::Zeroizing;
@@ -109,6 +109,9 @@ enum RunError {
     /// The flags did not name exactly one decision, or named none.
     #[error("pass exactly one of --granted, --denied, or --cancelled")]
     AmbiguousDecision,
+    /// `--option-id` was given for a request that offers no options.
+    #[error("{0} offers no option to select; drop --option-id")]
+    UnexpectedOption(String),
     /// The request cannot be answered as asked.
     #[error(transparent)]
     Approval(#[from] agentd_node::approval::ApprovalError),
@@ -179,6 +182,13 @@ async fn run() -> Result<(), RunError> {
                 (false, false, true) => Decision::Cancelled,
                 _ => return Err(RunError::AmbiguousDecision),
             };
+            // Only a bridged agent's request carries options, so the flag would
+            // otherwise be accepted and silently discarded.
+            if decide.option_id.is_some() && request.kind() != RequestKind::Session {
+                return Err(RunError::UnexpectedOption(
+                    request.kind().requested_type().to_string(),
+                ));
+            }
             let event = request.decide(decision, decide.option_id.as_deref())?;
             publish(&decide, &event, decision).await
         },

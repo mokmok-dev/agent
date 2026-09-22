@@ -18,6 +18,7 @@
 //! file's result only once every one of them applied, so a caller writes nothing
 //! unless the whole patch holds.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use thiserror::Error;
 
@@ -63,6 +64,17 @@ pub enum PatchError {
     /// put those bytes beyond the reach of the undo the log records.
     #[error("{0} already exists; the patch creates it")]
     Exists(String),
+    /// Both sides of the patch name `/dev/null`, so it changes nothing.
+    #[error("the patch names /dev/null on both sides of the file, so it changes nothing")]
+    NoFile,
+    /// A hunk carries no line, so it changes nothing.
+    #[error("hunk {hunk} of {path} carries no line")]
+    EmptyHunk {
+        /// The path the patch names.
+        path: String,
+        /// The one-based hunk number within that file.
+        hunk: usize,
+    },
     /// A file patch carries no hunk, so it would change nothing.
     #[error("the patch names {0} but carries no hunk")]
     Hunkless(String),
@@ -246,6 +258,7 @@ impl Patch {
     pub fn parse(text: &str) -> Result<Self, PatchError> {
         let lines: Vec<&str> = text.lines().collect();
         let mut files = Vec::new();
+        let mut paths: BTreeSet<String> = BTreeSet::new();
         let mut index = 0;
         while index < lines.len() {
             if lines[index].trim().is_empty() {
@@ -260,6 +273,9 @@ impl Patch {
             }
             let old_path = stripped_path(header_path(lines[index]));
             let new_path = stripped_path(header_path(lines[index + 1]));
+            if old_path == DEV_NULL && new_path == DEV_NULL {
+                return Err(PatchError::NoFile);
+            }
             // A rename is two real paths that differ; a creation or a deletion
             // names the absent side `/dev/null`.
             let absent = old_path == DEV_NULL || new_path == DEV_NULL;
@@ -276,19 +292,29 @@ impl Patch {
                 new_path,
                 hunks,
             };
-            // A section with no hunk asks for nothing this patcher can do.
+            // A section that asks for nothing this patcher can do is refused
+            // rather than recorded as a change that did not happen.
             if file.hunks.is_empty() {
                 return Err(PatchError::Hunkless(file.path().to_string()));
+            }
+            if let Some((number, _)) = file
+                .hunks
+                .iter()
+                .enumerate()
+                .find(|(_, hunk)| hunk.body.is_empty())
+            {
+                return Err(PatchError::EmptyHunk {
+                    path: file.path().to_string(),
+                    hunk: number + 1,
+                });
             }
             // Two sections for one path would each be computed against the same
             // original and then written in turn, so only the last would survive
             // while the patch claimed both.
-            if let Some(named) = files
-                .iter()
-                .find(|named: &&FilePatch| named.path() == file.path())
-            {
-                return Err(PatchError::Duplicate(named.path().to_string()));
+            if paths.contains(file.path()) {
+                return Err(PatchError::Duplicate(file.path().to_string()));
             }
+            paths.insert(file.path().to_string());
             files.push(file);
         }
         if files.is_empty() {
@@ -347,7 +373,15 @@ impl Patch {
             let mut result: Vec<Line> = Vec::new();
             let mut cursor = 0;
             for (number, hunk) in file.hunks.iter().enumerate() {
-                let start = hunk.old_start.saturating_sub(1);
+                // A hunk that removes nothing is an insertion, and a unified
+                // diff puts an insertion *after* the line its header names
+                // (`-l,0`), which is the index `l` rather than `l - 1`; only a
+                // hunk with an old side starts at the line it names.
+                let start = if hunk.old_count == 0 {
+                    hunk.old_start
+                } else {
+                    hunk.old_start.saturating_sub(1)
+                };
                 if start < cursor {
                     return Err(PatchError::Overlap {
                         path: path.to_string(),
@@ -750,7 +784,14 @@ fn preview<'a>(lines: impl Iterator<Item = &'a str>) -> String {
         if !text.is_empty() {
             text.push_str("\\n");
         }
-        let _ = write!(text, "{}", line.escape_debug());
+        // Each line is cut to the budget before it is escaped: escaping
+        // allocates in proportion to the line, and the file's line length is not
+        // this function's to trust.
+        let bounded: String = line.chars().take(PREVIEW_BYTES).collect();
+        let _ = write!(text, "{}", bounded.escape_debug());
+        if text.len() > PREVIEW_BYTES {
+            break;
+        }
     }
     if text.is_empty() {
         return String::from("nothing");
@@ -1044,6 +1085,32 @@ mod tests {
     }
 
     #[test]
+    fn a_hunk_that_carries_no_line_is_rejected() {
+        // It would be reported as an applied change that changed nothing.
+        let diff = "\
+--- a/file.txt
++++ b/file.txt
+@@ -1,0 +1,0 @@
+";
+        assert!(matches!(
+            Patch::parse(diff),
+            Err(PatchError::EmptyHunk { path, hunk: 1 }) if path == "file.txt"
+        ));
+    }
+
+    #[test]
+    fn a_patch_that_names_dev_null_on_both_sides_is_rejected() {
+        // It is a creation and a deletion at once, which is not a change.
+        let diff = "\
+--- /dev/null
++++ /dev/null
+@@ -0,0 +1,1 @@
++nowhere
+";
+        assert!(matches!(Patch::parse(diff), Err(PatchError::NoFile)));
+    }
+
+    #[test]
     fn a_deletion_patch_removes_the_file_and_its_inverse_creates_it() {
         let diff = "\
 --- a/gone.txt
@@ -1174,6 +1241,60 @@ mod tests {
         assert_eq!(
             apply_to(&patch, "file.txt", "alpha\n\nbeta\n"),
             "alpha\n\nBETA\n"
+        );
+    }
+
+    #[test]
+    fn an_insertion_lands_where_its_header_says() {
+        // `-l,0` is an insertion *after* line l, which the new side's own start
+        // confirms: `-1,0 +2,1` adds new line 2.
+        let original = "alpha\nbeta\ngamma\n";
+        for (diff, expected) in [
+            (
+                "\
+--- a/file.txt
++++ b/file.txt
+@@ -1,0 +2,1 @@
++middle
+",
+                "alpha\nmiddle\nbeta\ngamma\n",
+            ),
+            (
+                "\
+--- a/file.txt
++++ b/file.txt
+@@ -3,0 +4,1 @@
++last
+",
+                "alpha\nbeta\ngamma\nlast\n",
+            ),
+        ] {
+            let patch = Patch::parse(diff).expect("the diff should parse");
+            assert_eq!(apply_to(&patch, "file.txt", original), expected);
+            // The inverse has to find the inserted line where it was put, or the
+            // undo the log records cannot be applied.
+            assert_eq!(
+                apply_to(&patch.inverse(), "file.txt", expected),
+                original,
+                "the inverse of {diff:?} should restore the original"
+            );
+        }
+    }
+
+    #[test]
+    fn an_insertion_at_the_start_of_an_empty_file_is_the_creation_case() {
+        let diff = "\
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1,1 @@
++only
+";
+        let patch = Patch::parse(diff).expect("the diff should parse");
+        assert_eq!(
+            patch.apply(absent).expect("a creation")[0]
+                .content
+                .as_deref(),
+            Some("only\n")
         );
     }
 
