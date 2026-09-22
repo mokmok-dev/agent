@@ -191,15 +191,6 @@ impl Event {
         self
     }
 
-    /// Sets the `traceparent` extension attribute in place, mirroring
-    /// [`set_provenance`](Event::set_provenance) for a caller holding `&mut self`.
-    pub fn set_traceparent(
-        &mut self,
-        traceparent: &Traceparent,
-    ) {
-        self.traceparent = Some(traceparent.to_header());
-    }
-
     /// The parsed `traceparent` extension attribute, or `None` when the field is
     /// absent or malformed.
     ///
