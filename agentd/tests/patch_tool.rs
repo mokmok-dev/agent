@@ -190,7 +190,9 @@ async fn a_patch_tool_call_changes_the_workspace_and_is_reversible_from_the_log(
         json!([{ "path": FILE, "added": 1, "removed": 0 }]),
         "{applied:#?}"
     );
-    let inverse = applied["data"]["inverse"].as_str().expect("an inverse patch");
+    let inverse = applied["data"]["inverse"]
+        .as_str()
+        .expect("an inverse patch");
 
     // Undo is "read the inverse from the log and apply it": the file goes back
     // to the bytes it had, with nothing but the event.
@@ -201,7 +203,14 @@ async fn a_patch_tool_call_changes_the_workspace_and_is_reversible_from_the_log(
             std::fs::read_to_string(&file)
         })
         .expect("the inverse should apply");
-    std::fs::write(&file, &restored[0].content).expect("the undo should write");
+    std::fs::write(
+        &file,
+        restored[0]
+            .content
+            .as_deref()
+            .expect("the inverse of an edit produces content"),
+    )
+    .expect("the undo should write");
     assert_eq!(
         std::fs::read_to_string(&file).expect("the file should be readable"),
         ORIGINAL

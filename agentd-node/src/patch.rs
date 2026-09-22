@@ -2,14 +2,17 @@
 //! invert it.
 //!
 //! The diff is the mechanism that makes an agent's edit reviewable and
-//! reversible: [`Patch::inverse`] returns the patch that undoes an applied one,
-//! so an undo needs nothing but the log entry that carried it.
+//! reversible: [`Patch::inverse`] returns the patch that undoes an applied one
+//! — including the deletion that undoes a creation — so an undo needs nothing
+//! but the log entry that carried it.
 //!
 //! The representation is exact byte-for-byte, so a patch that touches the last
 //! line of a file without a trailing newline round-trips: each line records
 //! whether it ended in a newline, which is what the `\ No newline at end of
 //! file` marker denotes. The patch text is read as lines, so a patch's own line
-//! endings are not content.
+//! endings are not content; that also means a file whose lines end in CRLF
+//! cannot be patched, because the `\r` it carries is part of each line's text
+//! while the patch's own `\r` is not.
 //!
 //! Application is all-or-nothing by construction: [`Patch::apply`] returns every
 //! file's result only once every one of them applied, so a caller writes nothing
@@ -52,9 +55,10 @@ pub enum PatchError {
         /// The one-based line in the patch text.
         line: usize,
     },
-    /// The patch deletes a file, which this patcher does not do.
-    #[error("the patch deletes {0}; delete the file with the shell tool instead")]
-    DeleteUnsupported(String),
+    /// The patch names the same file twice, which would apply only the last of
+    /// its sections.
+    #[error("the patch names {0} twice; a file is named by one section")]
+    Duplicate(String),
     /// The patch renames a file, which this patcher does not do.
     #[error("the patch renames {old} to {new}; this patcher edits files in place")]
     RenameUnsupported {
@@ -71,6 +75,14 @@ pub enum PatchError {
         /// The read failure.
         #[source]
         error: std::io::Error,
+    },
+    /// The patch deletes a file but leaves lines in it.
+    #[error("the patch deletes {path} but its hunks leave {lines} lines behind")]
+    DeleteIncomplete {
+        /// The path the patch names.
+        path: String,
+        /// How many lines the hunks would leave.
+        lines: usize,
     },
     /// A hunk does not match the file, so the patch is rejected whole.
     #[error(
@@ -174,8 +186,8 @@ struct Line {
 pub struct Applied {
     /// The path the patch edited, as the patch names it.
     pub path: String,
-    /// The file's new content.
-    pub content: String,
+    /// The file's new content, or `None` when the patch deletes the file.
+    pub content: Option<String>,
     /// The lines the patch added to it.
     pub added: usize,
     /// The lines the patch removed from it.
@@ -192,8 +204,8 @@ impl Patch {
     /// # Errors
     ///
     /// Returns a [`PatchError`] for text that is not a unified diff, for a
-    /// deletion or a rename (which this patcher does not do), and for a patch
-    /// that names no file.
+    /// rename (which this patcher does not do), for a file named twice, and for
+    /// a patch that names no file.
     pub fn parse(text: &str) -> Result<Self, PatchError> {
         let lines: Vec<&str> = text.lines().collect();
         let mut files = Vec::new();
@@ -211,10 +223,10 @@ impl Patch {
             }
             let old_path = stripped_path(header_path(lines[index]));
             let new_path = stripped_path(header_path(lines[index + 1]));
-            if new_path == DEV_NULL {
-                return Err(PatchError::DeleteUnsupported(old_path));
-            }
-            if old_path != DEV_NULL && old_path != new_path {
+            // A rename is two real paths that differ; a creation or a deletion
+            // names the absent side `/dev/null`.
+            let absent = old_path == DEV_NULL || new_path == DEV_NULL;
+            if !absent && old_path != new_path {
                 return Err(PatchError::RenameUnsupported {
                     old: old_path,
                     new: new_path,
@@ -222,11 +234,21 @@ impl Patch {
             }
             let (hunks, next) = parse_hunks(&lines, index + 2)?;
             index = next;
-            files.push(FilePatch {
+            let file = FilePatch {
                 old_path,
                 new_path,
                 hunks,
-            });
+            };
+            // Two sections for one path would each be computed against the same
+            // original and then written in turn, so only the last would survive
+            // while the patch claimed both.
+            if let Some(named) = files
+                .iter()
+                .find(|named: &&FilePatch| named.path() == file.path())
+            {
+                return Err(PatchError::Duplicate(named.path().to_string()));
+            }
+            files.push(file);
         }
         if files.is_empty() {
             return Err(PatchError::Empty);
@@ -238,12 +260,15 @@ impl Patch {
     /// `read` unless the patch creates it.
     ///
     /// The results are returned only once every file applied, so a caller that
-    /// writes them afterwards writes nothing when any hunk does not match.
+    /// writes them afterwards writes nothing when any hunk does not match. A
+    /// result whose content is `None` deletes the file, which is how the inverse
+    /// of a creation undoes it.
     ///
     /// # Errors
     ///
-    /// Returns [`PatchError::Read`] when a file cannot be read and
-    /// [`PatchError::Mismatch`] when a hunk does not match the file it names.
+    /// Returns [`PatchError::Read`] when a file cannot be read,
+    /// [`PatchError::Mismatch`] when a hunk does not match the file it names, and
+    /// [`PatchError::DeleteIncomplete`] when a deletion leaves lines behind.
     pub fn apply<F>(
         &self,
         mut read: F,
@@ -314,9 +339,17 @@ impl Patch {
             if cursor < lines.len() {
                 result.extend_from_slice(&lines[cursor..]);
             }
+            // A deletion the hunks do not complete would silently drop whatever
+            // they left behind, because the file is removed rather than emptied.
+            if file.deletes() && !result.is_empty() {
+                return Err(PatchError::DeleteIncomplete {
+                    path: path.to_string(),
+                    lines: result.len(),
+                });
+            }
             applied.push(Applied {
                 path: path.to_string(),
-                content: render_lines(&result),
+                content: (!file.deletes()).then(|| render_lines(&result)),
                 added: file.count(Side::New),
                 removed: file.count(Side::Old),
             });
@@ -327,8 +360,8 @@ impl Patch {
     /// The patch that undoes this one: the sides and their paths swapped, and
     /// each hunk's `-` lines turned into `+` lines and back.
     ///
-    /// Applying it to the content this patch produced restores the bytes this
-    /// patch was applied to.
+    /// Applying it to the state this patch produced restores what it was applied
+    /// to; the inverse of a creation is the deletion of the file it created.
     #[must_use]
     pub fn inverse(&self) -> Self {
         Self {
@@ -339,6 +372,14 @@ impl Patch {
     /// The paths the patch edits, in the order it names them.
     pub fn paths(&self) -> impl Iterator<Item = &str> {
         self.files.iter().map(FilePatch::path)
+    }
+}
+
+impl std::str::FromStr for Patch {
+    type Err = PatchError;
+
+    fn from_str(text: &str) -> Result<Self, PatchError> {
+        Self::parse(text)
     }
 }
 
@@ -355,6 +396,11 @@ impl FilePatch {
     /// Whether the patch creates the file, so there is no original to read.
     fn creates(&self) -> bool {
         self.old_path == DEV_NULL
+    }
+
+    /// Whether the patch deletes the file.
+    fn deletes(&self) -> bool {
+        self.new_path == DEV_NULL
     }
 
     /// How many lines of `side` the file patch carries.
@@ -530,8 +576,15 @@ fn parse_hunk(
             Some('+') => (Side::New, &line[1..]),
             Some('-') => (Side::Old, &line[1..]),
             // An empty line is an empty context line with its leading space
-            // dropped, which a hand-written diff does and `git apply` accepts.
-            None => (Side::Context, ""),
+            // dropped, which a hand-written diff does and `git apply` accepts
+            // — unless it separates this hunk from the next header, where it is
+            // a separator rather than a line of the file.
+            None if !lines
+                .get(index + 1)
+                .is_some_and(|next| is_hunk_header(next) || next.starts_with("--- ")) =>
+            {
+                (Side::Context, "")
+            },
             Some('\\') => {
                 let Some(last) = body.last_mut() else {
                     return Err(PatchError::DanglingMarker { line: index + 1 });
@@ -540,7 +593,7 @@ fn parse_hunk(
                 index += 1;
                 continue;
             },
-            Some(_) => break,
+            _ => break,
         };
         body.push(BodyLine {
             side,
@@ -605,35 +658,51 @@ fn render_lines(lines: &[Line]) -> String {
 
 /// Whether the file's lines are exactly the lines a hunk expects.
 fn matches(
-    expected: &[Line],
-    found: &[&BodyLine],
+    file: &[Line],
+    hunk: &[&BodyLine],
 ) -> bool {
-    expected.len() == found.len()
-        && expected
+    file.len() == hunk.len()
+        && file
             .iter()
-            .zip(found)
+            .zip(hunk)
             .all(|(line, body)| line.text == body.text && line.newline == body.newline)
 }
 
-/// A one-line preview of some lines, for a mismatch message.
+/// How many lines a mismatch message quotes.
+const PREVIEW_LINES: usize = 3;
+
+/// How long a mismatch message's quote may grow.
+const PREVIEW_BYTES: usize = 160;
+
+/// A short preview of some lines, for a mismatch message.
+///
+/// It is bounded: the text reaches the model's context and the durable log, so
+/// quoting a whole file's tail on every rejected patch is both expensive and a
+/// disclosure the tool has no reason to make.
 fn preview<'a>(lines: impl Iterator<Item = &'a str>) -> String {
     let mut text = String::new();
-    for line in lines {
+    for line in lines.take(PREVIEW_LINES) {
         if !text.is_empty() {
             text.push_str("\\n");
         }
         let _ = write!(text, "{line}");
     }
     if text.is_empty() {
-        String::from("nothing")
-    } else {
-        text
+        return String::from("nothing");
     }
+    if text.len() > PREVIEW_BYTES {
+        let mut end = PREVIEW_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{NO_NEWLINE, Patch, PatchError};
+    use super::{Applied, NO_NEWLINE, Patch, PatchError};
     use std::collections::BTreeMap;
 
     /// Reads `files` as a patch's reader does, failing on an unknown path.
@@ -648,16 +717,28 @@ mod tests {
         }
     }
 
-    /// Applies `patch` to `content` and returns the result.
+    /// Applies `patch` to `content` and returns the whole result.
+    fn apply_to_patch(
+        patch: &Patch,
+        name: &str,
+        content: &str,
+    ) -> Vec<Applied> {
+        let files = BTreeMap::from([(name.to_string(), content.to_string())]);
+        patch.apply(reader(&files)).expect("the patch should apply")
+    }
+
+    /// Applies `patch` to `content` and returns the content it produces.
     fn apply_to(
         patch: &Patch,
         name: &str,
         content: &str,
     ) -> String {
-        let files = BTreeMap::from([(name.to_string(), content.to_string())]);
-        let applied = patch.apply(reader(&files)).expect("the patch should apply");
+        let applied = apply_to_patch(patch, name, content);
         assert_eq!(applied.len(), 1);
-        applied[0].content.clone()
+        applied[0]
+            .content
+            .clone()
+            .expect("an edit produces content")
     }
 
     #[test]
@@ -760,7 +841,10 @@ mod tests {
 ";
         let patch = Patch::parse(diff).expect("the diff should parse");
         assert!(patch.to_string().contains("@@ -2,1 +2,1 @@"));
-        assert_eq!(apply_to(&patch, "file.txt", "first\ngone\n"), "first\nhere\n");
+        assert_eq!(
+            apply_to(&patch, "file.txt", "first\ngone\n"),
+            "first\nhere\n"
+        );
     }
 
     #[test]
@@ -819,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn a_creation_patch_writes_the_whole_file() {
+    fn a_creation_patch_writes_the_whole_file_and_its_inverse_deletes_it() {
         let diff = "\
 --- /dev/null
 +++ b/new.txt
@@ -833,24 +917,88 @@ mod tests {
             .apply(|path| Err(std::io::Error::other(format!("unexpected read of {path}"))))
             .expect("a creation needs no original");
         assert_eq!(applied[0].path, "new.txt");
-        assert_eq!(applied[0].content, "hello\nworld\n");
+        assert_eq!(applied[0].content.as_deref(), Some("hello\nworld\n"));
         assert_eq!(applied[0].added, 2);
         assert_eq!(applied[0].removed, 0);
+
+        // The inverse is the deletion of the file it created, and applying it to
+        // the created content removes the file rather than editing it.
+        let inverse = patch.inverse();
+        assert!(inverse.to_string().contains("+++ /dev/null"));
+        let undo = inverse
+            .apply(reader(&BTreeMap::from([(
+                String::from("new.txt"),
+                String::from("hello\nworld\n"),
+            )])))
+            .expect("the inverse should apply");
+        assert_eq!(undo[0].path, "new.txt");
+        assert_eq!(undo[0].content, None);
+    }
+
+    #[test]
+    fn a_deletion_patch_removes_the_file_and_its_inverse_creates_it() {
+        let diff = "\
+--- a/gone.txt
++++ /dev/null
+@@ -1,2 +0,0 @@
+-goodbye
+-world
+";
+        let patch = Patch::parse(diff).expect("the diff should parse");
+        let applied = apply_to_patch(&patch, "gone.txt", "goodbye\nworld\n");
+        assert_eq!(applied[0].content, None);
+        assert_eq!(applied[0].removed, 2);
+
+        let inverse = patch.inverse();
+        assert!(inverse.to_string().contains("--- /dev/null"));
+        let restored = inverse
+            .apply(|path| Err(std::io::Error::other(format!("unexpected read of {path}"))))
+            .expect("a creation needs no original");
+        assert_eq!(restored[0].content.as_deref(), Some("goodbye\nworld\n"));
+    }
+
+    #[test]
+    fn a_deletion_that_leaves_lines_behind_is_rejected() {
+        let diff = "\
+--- a/gone.txt
++++ /dev/null
+@@ -1,1 +0,0 @@
+-goodbye
+";
+        let error = Patch::parse(diff)
+            .expect("the diff should parse")
+            .apply(reader(&BTreeMap::from([(
+                String::from("gone.txt"),
+                String::from("goodbye\nworld\n"),
+            )])));
+        assert!(matches!(
+            error,
+            Err(PatchError::DeleteIncomplete { path, lines: 1 }) if path == "gone.txt"
+        ));
+    }
+
+    #[test]
+    fn a_file_named_by_two_sections_is_rejected() {
+        let diff = "\
+--- a/file.txt
++++ b/file.txt
+@@ -1,1 +1,1 @@
+-alpha
++ALPHA
+--- a/file.txt
++++ b/file.txt
+@@ -2,1 +2,1 @@
+-beta
++BETA
+";
+        assert!(matches!(
+            Patch::parse(diff),
+            Err(PatchError::Duplicate(path)) if path == "file.txt"
+        ));
     }
 
     #[test]
     fn a_deletion_or_rename_is_reported_rather_than_guessed_at() {
-        let deleted = "\
---- a/gone.txt
-+++ /dev/null
-@@ -1,1 +0,0 @@
--gone
-";
-        assert!(matches!(
-            Patch::parse(deleted),
-            Err(PatchError::DeleteUnsupported(path)) if path == "gone.txt"
-        ));
-
         let renamed = "\
 --- a/old.txt
 +++ b/new.txt
@@ -915,7 +1063,10 @@ mod tests {
 +BETA
 ";
         let patch = Patch::parse(diff).expect("the diff should parse");
-        assert_eq!(apply_to(&patch, "file.txt", "alpha\n\nbeta\n"), "alpha\n\nBETA\n");
+        assert_eq!(
+            apply_to(&patch, "file.txt", "alpha\n\nbeta\n"),
+            "alpha\n\nBETA\n"
+        );
     }
 
     #[test]

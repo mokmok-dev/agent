@@ -24,6 +24,7 @@ use agentd_inference::{
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 use serde_json::json;
+use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::sync::watch;
@@ -35,7 +36,7 @@ use crate::conversation::{
     AGENT_TURN_COMPLETED, AGENT_TURN_FAILED, AGENT_TURN_STARTED, Conversation, session_key,
 };
 use crate::error::AgentError;
-use crate::patch::{Patch, PatchError};
+use crate::patch::{Applied, Patch, PatchError};
 use crate::projection::SqliteProjection;
 
 /// The delay before the first reconnect attempt; doubled on each failure.
@@ -463,7 +464,7 @@ impl Turn<'_> {
             let mut results = Vec::with_capacity(message.tool_calls.len());
             for call in &message.tool_calls {
                 tracing::debug!(tool = %call.name, "running a tool");
-                let run = run_tool(call, self.workdir, self.limits).await;
+                let run = run_tool(call, self.workdir, self.limits, self.conversation_id).await;
                 tracing::debug!(
                     tool = %call.name,
                     timed_out = run.outcome.timed_out,
@@ -680,6 +681,7 @@ async fn run_tool(
     call: &ToolCall,
     workdir: &Path,
     limits: ShellLimits,
+    conversation_id: &str,
 ) -> ToolRun {
     match call.name.as_str() {
         "shell" => {
@@ -698,29 +700,70 @@ async fn run_tool(
                     return ToolRun::failed(format!("invalid tool arguments: {error}"));
                 },
             };
-            run_patch(&arguments.patch, workdir)
+            run_patch(&arguments.patch, workdir, conversation_id)
         },
         other => ToolRun::failed(format!("there is no {other} tool")),
     }
 }
 
+/// Why the patch tool did not apply a patch.
+#[derive(Debug, Error)]
+enum PatchToolError {
+    /// The diff itself is unusable.
+    #[error(transparent)]
+    Patch(#[from] PatchError),
+    /// The patch names a path that is not the workspace's to change.
+    #[error("{0} is outside the workspace")]
+    Outside(String),
+    /// A file could not be replaced.
+    #[error("{path} could not be written: {error}")]
+    Write {
+        /// The path the patch names.
+        path: String,
+        /// The write failure.
+        error: std::io::Error,
+    },
+    /// A file the patch deletes could not be removed.
+    #[error("{path} could not be removed: {error}")]
+    Remove {
+        /// The path the patch names.
+        path: String,
+        /// The removal failure.
+        error: std::io::Error,
+    },
+}
+
 /// Applies a unified diff to the workspace and reports the change.
 ///
-/// Nothing is written unless every hunk of every file in the patch matches, and
-/// each file is replaced atomically, so a rejected patch leaves the workspace as
-/// it was. The `agent.patch.applied` event carries the inverse patch, which is
-/// how the change is undone: read it from the log and apply it.
+/// Nothing is staged unless every hunk of every file in the patch matches, and
+/// every file's new content is staged before the first of them is committed, so
+/// a patch that cannot be written at all leaves the workspace as it was.
+/// Committing (renaming each staged file onto its target, removing each deleted
+/// file) is the point of no return, and a failure there is reported in the
+/// result rather than hidden. The `agent.patch.applied` event carries the
+/// inverse patch, which is how the change is undone: read it from the log and
+/// apply it.
 fn run_patch(
     diff: &str,
     workdir: &Path,
+    conversation_id: &str,
 ) -> ToolRun {
     let patch = match Patch::parse(diff) {
         Ok(patch) => patch,
-        Err(error) => return ToolRun::failed(rejection(&error)),
+        Err(error) => return ToolRun::failed(rejection(&error.into())),
+    };
+    let root = match workdir.canonicalize() {
+        Ok(root) => root,
+        Err(error) => {
+            return ToolRun::failed(format!(
+                "{} is not a usable workspace: {error}",
+                workdir.display()
+            ));
+        },
     };
     let targets: BTreeMap<String, PathBuf> = match patch
         .paths()
-        .map(|path| resolve(workdir, path).map(|target| (path.to_string(), target)))
+        .map(|path| resolve(&root, path).map(|target| (path.to_string(), target)))
         .collect()
     {
         Ok(targets) => targets,
@@ -734,15 +777,14 @@ fn run_patch(
         std::fs::read_to_string(target)
     }) {
         Ok(applied) => applied,
+        Err(error) => return ToolRun::failed(rejection(&error.into())),
+    };
+    let staged = match stage_all(&applied, &targets) {
+        Ok(staged) => staged,
         Err(error) => return ToolRun::failed(rejection(&error)),
     };
-    for file in &applied {
-        let Some(target) = targets.get(&file.path) else {
-            return ToolRun::failed(format!("{} is not in the workspace", file.path));
-        };
-        if let Err(error) = write_atomically(target, &file.content) {
-            return ToolRun::failed(format!("{} could not be written: {error}", file.path));
-        }
+    if let Err(error) = commit(&applied, &targets, &staged) {
+        return ToolRun::failed(rejection(&error));
     }
     let files: Vec<serde_json::Value> = applied
         .iter()
@@ -756,7 +798,10 @@ fn run_patch(
         .collect();
     let summary = applied
         .iter()
-        .map(|file| format!("{} (+{}/-{})", file.path, file.added, file.removed))
+        .map(|file| match file.content {
+            Some(_) => format!("{} (+{}/-{})", file.path, file.added, file.removed),
+            None => format!("{} (deleted)", file.path),
+        })
         .collect::<Vec<_>>()
         .join(", ");
     ToolRun {
@@ -767,62 +812,143 @@ fn run_patch(
         },
         event: Some(Event::new(
             AGENT_PATCH_APPLIED,
-            json!({ "files": files, "inverse": patch.inverse().to_string() }),
+            json!({
+                "conversation_id": conversation_id,
+                "files": files,
+                "inverse": patch.inverse().to_string(),
+            }),
         )),
     }
 }
 
 /// Turns a rejected patch into the text the model reads.
-fn rejection(error: &PatchError) -> String {
+fn rejection(error: &PatchToolError) -> String {
     format!("the patch was not applied: {error}")
 }
 
-/// The absolute path `path` names inside `workdir`, refusing one that leaves it.
+/// Writes every new file content beside its target, changing nothing yet.
+///
+/// A deletion stages nothing and is carried out at commit time. When one file
+/// cannot be staged the others are discarded, so a patch that cannot be written
+/// leaves no temporary files and no changes behind.
+fn stage_all(
+    applied: &[Applied],
+    targets: &BTreeMap<String, PathBuf>,
+) -> Result<Vec<(PathBuf, PathBuf)>, PatchToolError> {
+    let mut staged = Vec::new();
+    for file in applied {
+        let Some(content) = file.content.as_deref() else {
+            continue;
+        };
+        let Some(target) = targets.get(&file.path) else {
+            return Err(PatchToolError::Outside(file.path.clone()));
+        };
+        match stage(target, content) {
+            Ok(temporary) => staged.push((temporary, target.clone())),
+            Err(error) => {
+                discard(&staged);
+                return Err(PatchToolError::Write {
+                    path: file.path.clone(),
+                    error,
+                });
+            },
+        }
+    }
+    Ok(staged)
+}
+
+/// Renames each staged file onto its target, then removes each deleted file.
+fn commit(
+    applied: &[Applied],
+    targets: &BTreeMap<String, PathBuf>,
+    staged: &[(PathBuf, PathBuf)],
+) -> Result<(), PatchToolError> {
+    for (temporary, target) in staged {
+        if let Err(error) = std::fs::rename(temporary, target) {
+            let _ = std::fs::remove_file(temporary);
+            return Err(PatchToolError::Write {
+                path: target.display().to_string(),
+                error,
+            });
+        }
+    }
+    for file in applied {
+        if file.content.is_some() {
+            continue;
+        }
+        let Some(target) = targets.get(&file.path) else {
+            return Err(PatchToolError::Outside(file.path.clone()));
+        };
+        if let Err(error) = std::fs::remove_file(target) {
+            return Err(PatchToolError::Remove {
+                path: file.path.clone(),
+                error,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Removes the staged files a failed patch left behind.
+fn discard(staged: &[(PathBuf, PathBuf)]) {
+    for (temporary, _) in staged {
+        let _ = std::fs::remove_file(temporary);
+    }
+}
+
+/// The absolute path `path` names inside `root`, refusing one that leaves it.
 ///
 /// The parent is resolved before the name is joined, so a symlink inside the
 /// workspace cannot redirect a write outside it. The parent must exist: a patch
 /// edits files where they are rather than creating directories.
 fn resolve(
-    workdir: &Path,
+    root: &Path,
     path: &str,
-) -> Result<PathBuf, PatchError> {
-    let outside = |error: std::io::Error| PatchError::Read {
-        path: path.to_string(),
-        error,
+) -> Result<PathBuf, PatchToolError> {
+    let outside = |error: std::io::Error| {
+        PatchToolError::Patch(PatchError::Read {
+            path: path.to_string(),
+            error,
+        })
     };
-    let candidate = workdir.join(path);
-    let name = candidate
-        .file_name()
-        .ok_or_else(|| outside(std::io::Error::other("the path names no file")))?;
-    let parent = candidate
-        .parent()
-        .ok_or_else(|| outside(std::io::Error::other("the path names no directory")))?
-        .canonicalize()
-        .map_err(&outside)?;
-    let root = workdir.canonicalize().map_err(&outside)?;
-    if !parent.starts_with(&root) {
-        return Err(outside(std::io::Error::other(
-            "the path is outside the workspace",
-        )));
+    let candidate = root.join(path);
+    let Some(name) = candidate.file_name() else {
+        return Err(PatchToolError::Outside(path.to_string()));
+    };
+    let Some(parent) = candidate.parent() else {
+        return Err(PatchToolError::Outside(path.to_string()));
+    };
+    let parent = parent.canonicalize().map_err(&outside)?;
+    if !parent.starts_with(root) {
+        return Err(PatchToolError::Outside(path.to_string()));
     }
     Ok(parent.join(name))
 }
 
-/// Replaces `target` with `content` in one step.
+/// Writes `content` to a temporary file beside `target`, ready to be renamed
+/// onto it.
 ///
-/// The new content is written beside the file and renamed onto it, which is
-/// atomic within a filesystem, so a reader never sees a half-written file.
-fn write_atomically(
+/// The target's permission bits are copied to the temporary, so replacing a
+/// patch target does not clear the mode of an executable or a script.
+fn stage(
     target: &Path,
     content: &str,
-) -> std::io::Result<()> {
-    let temporary = target.with_extension(format!("agentd-{}", uuid::Uuid::new_v4()));
-    std::fs::write(&temporary, content)?;
-    if let Err(error) = std::fs::rename(&temporary, target) {
+) -> std::io::Result<PathBuf> {
+    let name = target.file_name().map_or_else(
+        || String::from("file"),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let temporary = target.with_file_name(format!(".{name}.agentd-{}", uuid::Uuid::new_v4()));
+    let written = std::fs::write(&temporary, content).and_then(|()| {
+        std::fs::metadata(target).map_or(Ok(()), |metadata| {
+            std::fs::set_permissions(&temporary, metadata.permissions())
+        })
+    });
+    if let Err(error) = written {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
-    Ok(())
+    Ok(temporary)
 }
 
 /// Runs `command` with `bash -c` in `workdir`, enforcing the limits.
@@ -933,6 +1059,9 @@ mod tests {
     use agentd_inference::{Delta, Message, ToolCall};
     use serde_json::json;
     use std::time::Duration;
+
+    /// The conversation a test's tool call belongs to.
+    const CONVERSATION: &str = "c1";
 
     fn agent() -> (tempfile::TempDir, Agent) {
         let dir = tempfile::tempdir().expect("tempdir should be created");
@@ -1177,7 +1306,11 @@ mod tests {
 
     /// A one-file diff against `path` whose single hunk replaces `from` with
     /// `to`, so a test says what it changes without writing a header by hand.
-    fn diff(path: &str, from: &str, to: &str) -> String {
+    fn diff(
+        path: &str,
+        from: &str,
+        to: &str,
+    ) -> String {
         format!("--- a/{path}\n+++ b/{path}\n@@ -1,1 +1,1 @@\n-{from}\n+{to}\n")
     }
 
@@ -1196,7 +1329,13 @@ mod tests {
  three
 ";
 
-        let run = run_tool(&patch_call(patch), dir.path(), ShellLimits::default()).await;
+        let run = run_tool(
+            &patch_call(patch),
+            dir.path(),
+            ShellLimits::default(),
+            CONVERSATION,
+        )
+        .await;
         assert_eq!(run.outcome.content, "applied notes.txt (+1/-0)");
         assert_eq!(run.outcome.exit_code, None);
         assert_eq!(
@@ -1221,7 +1360,14 @@ mod tests {
                 std::fs::read_to_string(&file)
             })
             .expect("the inverse should apply");
-        std::fs::write(&file, &applied[0].content).expect("the undo should write");
+        std::fs::write(
+            &file,
+            applied[0]
+                .content
+                .as_deref()
+                .expect("the inverse of an edit produces content"),
+        )
+        .expect("the undo should write");
         assert_eq!(
             std::fs::read_to_string(&file).expect("the file should be readable"),
             "one\ntwo\nthree\n"
@@ -1238,12 +1384,15 @@ mod tests {
             &patch_call(&diff("notes.txt", "gamma", "GAMMA")),
             dir.path(),
             ShellLimits::default(),
+            CONVERSATION,
         )
         .await;
 
         assert!(run.event.is_none(), "a rejected patch records nothing");
         assert!(
-            run.outcome.content.starts_with("the patch was not applied:"),
+            run.outcome
+                .content
+                .starts_with("the patch was not applied:"),
             "{}",
             run.outcome.content
         );
@@ -1266,7 +1415,13 @@ mod tests {
             diff("second.txt", "gamma", "GAMMA")
         );
 
-        let run = run_tool(&patch_call(&patch), dir.path(), ShellLimits::default()).await;
+        let run = run_tool(
+            &patch_call(&patch),
+            dir.path(),
+            ShellLimits::default(),
+            CONVERSATION,
+        )
+        .await;
 
         assert!(run.event.is_none());
         assert_eq!(
@@ -1292,6 +1447,7 @@ mod tests {
             &patch_call(&diff("../outside.txt", "secret", "leaked")),
             &workspace,
             ShellLimits::default(),
+            CONVERSATION,
         )
         .await;
 
@@ -1323,6 +1479,7 @@ mod tests {
             &patch_call(&diff("link/target.txt", "secret", "leaked")),
             &workspace,
             ShellLimits::default(),
+            CONVERSATION,
         )
         .await;
 
@@ -1349,14 +1506,142 @@ mod tests {
 +world
 ";
 
-        let run = run_tool(&patch_call(patch), dir.path(), ShellLimits::default()).await;
+        let run = run_tool(
+            &patch_call(patch),
+            dir.path(),
+            ShellLimits::default(),
+            CONVERSATION,
+        )
+        .await;
 
         assert_eq!(run.outcome.content, "applied new.txt (+2/-0)");
+        let file = dir.path().join("new.txt");
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("new.txt")).expect("the new file"),
+            std::fs::read_to_string(&file).expect("the new file"),
             "hello\nworld\n"
         );
-        assert!(run.event.is_some());
+
+        // The inverse of a creation is a deletion, which is the undo.
+        let event = run.event.expect("an applied patch is recorded");
+        let inverse = Patch::parse(event.data["inverse"].as_str().expect("an inverse patch"))
+            .expect("the inverse should parse");
+        assert!(inverse.to_string().contains("+++ /dev/null"));
+        let undo = inverse
+            .apply(|path| {
+                assert_eq!(path, "new.txt");
+                std::fs::read_to_string(&file)
+            })
+            .expect("the inverse should apply");
+        assert_eq!(undo[0].content, None);
+    }
+
+    #[tokio::test]
+    async fn apply_patch_deletes_a_file_and_its_inverse_creates_it_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("gone.txt");
+        std::fs::write(&file, "goodbye\nworld\n").expect("the original");
+        let patch = "\
+--- a/gone.txt
++++ /dev/null
+@@ -1,2 +0,0 @@
+-goodbye
+-world
+";
+
+        let run = run_tool(
+            &patch_call(patch),
+            dir.path(),
+            ShellLimits::default(),
+            CONVERSATION,
+        )
+        .await;
+
+        assert_eq!(run.outcome.content, "applied gone.txt (deleted)");
+        assert!(!file.exists(), "the patch should remove the file");
+
+        let event = run.event.expect("an applied patch is recorded");
+        assert_eq!(event.data["conversation_id"], CONVERSATION);
+        assert_eq!(
+            event.data["files"],
+            json!([{ "path": "gone.txt", "added": 0, "removed": 2 }])
+        );
+
+        // The inverse creates the file again, which is what makes the deletion
+        // reversible from the log alone.
+        let inverse = Patch::parse(event.data["inverse"].as_str().expect("an inverse patch"))
+            .expect("the inverse should parse");
+        assert!(inverse.to_string().contains("--- /dev/null"));
+        let restored = inverse
+            .apply(|path| Err(std::io::Error::other(format!("unexpected read of {path}"))))
+            .expect("a creation needs no original");
+        assert_eq!(restored[0].content.as_deref(), Some("goodbye\nworld\n"));
+    }
+
+    #[tokio::test]
+    async fn a_patch_that_names_one_file_twice_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "alpha\nbeta\n").expect("the original");
+        let patch = format!(
+            "{}{}",
+            diff("notes.txt", "alpha", "ALPHA"),
+            diff("notes.txt", "beta", "BETA")
+        );
+
+        let run = run_tool(
+            &patch_call(&patch),
+            dir.path(),
+            ShellLimits::default(),
+            CONVERSATION,
+        )
+        .await;
+
+        assert!(run.event.is_none());
+        assert!(
+            run.outcome.content.contains("names notes.txt twice"),
+            "{}",
+            run.outcome.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the file should be readable"),
+            "alpha\nbeta\n"
+        );
+    }
+
+    /// Replacing a file must not clear the mode it had.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_patch_keeps_the_files_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("run.sh");
+        std::fs::write(&file, "#!/bin/sh\necho old\n").expect("the script");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))
+            .expect("the script's mode");
+        let patch = "\
+--- a/run.sh
++++ b/run.sh
+@@ -1,2 +1,2 @@
+ #!/bin/sh
+-echo old
++echo new
+";
+
+        let run = run_tool(
+            &patch_call(patch),
+            dir.path(),
+            ShellLimits::default(),
+            CONVERSATION,
+        )
+        .await;
+
+        assert_eq!(run.outcome.content, "applied run.sh (+1/-1)");
+        let mode = std::fs::metadata(&file)
+            .expect("the script's metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755, "the mode should survive the patch");
     }
 
     #[tokio::test]
@@ -1368,7 +1653,7 @@ mod tests {
             arguments: String::from("{}"),
         };
 
-        let run = run_tool(&call, dir.path(), ShellLimits::default()).await;
+        let run = run_tool(&call, dir.path(), ShellLimits::default(), CONVERSATION).await;
 
         assert_eq!(run.outcome.content, "there is no edit tool");
         assert!(run.event.is_none());
