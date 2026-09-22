@@ -30,8 +30,7 @@ agent's own network egress — is handled with a managed proxy.
 
 ## Why ACP is not just another codec
 
-`McpBridge` is a stateless line converter: `uplink` and `downlink` are pure
-functions of one line, and the manager routes by `subject`. ACP breaks both
+`McpBridge` is a stateless line converter: each conversion is a pure function of one line, and the manager routes by `subject`. ACP breaks both
 assumptions.
 
 | | MCP (built) | ACP (this design) |
@@ -66,11 +65,12 @@ flowchart LR
     A -. "runs its own fs and shell work<br/>inside the sandbox" .-> W["workspace, workdir = cwd"]
 ```
 
-## Bridge shape change
+## The Bridge shape
 
-The `Bridge` trait becomes session-scoped and stateful. A shared `Protocol`
-factory creates one `Bridge` per supervised session; each `Bridge` is a small
-state machine that turns lines and events into [`Action`](#actions).
+The `Bridge` trait is session-scoped and stateful, because ACP cannot be driven
+by the stateless conversion the MCP case needed. A shared `Protocol` factory
+creates one `Bridge` per supervised session; each `Bridge` is a small state
+machine that turns lines and events into `Action`s.
 
 ```rust
 /// A protocol, shared across sessions. Creates a state machine per session.
@@ -107,10 +107,10 @@ lock only for the duration of one synchronous `on_line`/`on_event` call. All I/O
 stays in the manager, so this preserves the existing single-writer and
 bounded-read guarantees (see [session](session.md)).
 
-`McpBridge` is refactored onto this trait without behavior change: `start()`
+`McpBridge` implements the same trait without needing its state: `start()`
 returns the `initialize` request, `on_line` returns the `notifications/initialized`
-reply plus the event, and `on_event` returns the `tools/call` line. The stateless
-converter becomes a state machine whose state happens to be constant.
+reply plus the event, and `on_event` returns the `tools/call` line. Its state is
+constant.
 
 ## AcpBridge
 
@@ -202,7 +202,7 @@ Event types this adds:
 | `session.permission.requested` | uplink | `request_id`, `tool_call`, `options` | — |
 | `session.permission.granted` | downlink | `request_id`, `option_id` (an allow option) | `bridge::permission_granted` |
 | `session.permission.denied` | downlink | `request_id`, `option_id` (a reject option) | `bridge::permission_denied` |
-| `session.permission.cancelled` | downlink | `request_id`, `cancelled: true` | `bridge::permission_cancelled` |
+| `session.permission.cancelled` | downlink | `request_id`, `decision: cancelled` | `bridge::permission_cancelled` |
 | `session.protocol.ready` | uplink | the handshake completed | `bridge::PROTOCOL_READY` |
 | `session.protocol.failed` | uplink | the handshake failed, so the child cannot be driven | `bridge::PROTOCOL_FAILED` |
 | `session.prompt.completed` | uplink | a prompt turn ended, with its stop reason | `bridge::PROMPT_COMPLETED` |

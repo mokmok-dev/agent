@@ -104,11 +104,9 @@ only holder — holds the bridge directly. "Session" now names the manager's
 domain and its `session.*` events, not a Rust type.
 
 `Session` had picked up a third sense along the way: the agent node called its
-chat thread a session (`agent.session.started`, `latest_session`, `session_key`),
-which contradicted this document and the node's own `--conversation` flag. That
-sense is now the **conversation** everywhere (see
-[vocabulary](vocabulary.md#decisions-this-document-records)), so `session` means
-the supervised process and nothing else.
+chat thread a session, which contradicted this document and the node's own
+`--conversation` flag. That sense is now the **conversation**, and the decision
+is recorded in [vocabulary](vocabulary.md#decisions-this-document-records).
 
 `Bridge` is chosen over the alternatives for three reasons: the direction is
 symmetric (a child-to-log *uplink* and a log-to-child *downlink* are both
@@ -127,29 +125,18 @@ confinement is. The name should not imply more capability than the child has.
 
 ## Bridge contract
 
-```rust
-pub trait Bridge: Send + Sync {
-    /// A stable label for the protocol, recorded on every event.
-    fn protocol(&self) -> &'static str;
-    /// Lines to write once the child starts; empty when there is no handshake.
-    fn handshake(&self) -> Vec<String>;
-    /// One child output line -> an event, plus any protocol replies it owes.
-    fn uplink(&self, line: &str) -> Option<Conversion>;
-    /// An event routed to this session -> a line to write, or `None`.
-    fn downlink(&self, event: &Event) -> Option<String>;
-}
-```
-
-The methods are synchronous because they are pure conversions of one already
-delimited line; all I/O and task orchestration stays in the manager. `uplink` is
-driven by the child's output; `downlink` by the bus. The manager takes the
-child's `stdin` and `stdout` (`SandboxedProcess::take_stdin` / `take_stdout`,
-see [sandbox](sandbox.md)) and drives them; it never inspects the bytes. A single
+A `Bridge` is per-session, stateful, and synchronous: it turns one child line or
+one routed event into `Action`s — events to append, lines to write — and all
+I/O and task orchestration stays in the manager. The manager takes the child's
+`stdin` and `stdout` (`SandboxedProcess::take_stdin` / `take_stdout`, see
+[sandbox](sandbox.md)) and drives them; it never inspects the bytes. A single
 task owns the stdin pipe, fed by one channel that both the downlink watcher and
-the uplink reader's replies write to, so no two writers interleave a frame.
-`Conversion::to_child` carries protocol obligations that follow a response
-(for example MCP's `notifications/initialized`), so the handshake is a two-step
-exchange the bridge can describe without holding a pipe.
+the uplink reader's replies write to, so no two writers interleave a frame, and
+a reply that follows a response (for example MCP's `notifications/initialized`)
+travels in the same `Action`s as the event it belongs to.
+
+The trait itself, and why a stateful shape replaced a stateless codec, are in
+[acp](acp.md); the code is `agentd/src/bridge.rs`.
 
 A `Bridge` is per-protocol. `McpBridge` is the first: it frames the Model
 Context Protocol, newline-delimited JSON-RPC 2.0, opens with `initialize`, and

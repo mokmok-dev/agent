@@ -56,11 +56,9 @@ Non-goals (stated honestly, per the Sheena precedent):
 - The sandbox is not a boundary for hostile native code. It confines the tool
   calls an agent *requests* against a configured policy.
 - **No general network allowlist.** Egress is denied outright, not filtered by
-  host; the only network grants are per-path Unix sockets the daemon itself
-  needs, plus the opt-in managed proxy in [egress](egress.md) (a loopback port
-  the daemon's CONNECT proxy listens on; the proxy, not the OS, enforces the
-  host allowlist). The OS still has no host/IP allowlist, because Linux cannot
-  enforce one.
+  host; the only network grants are the per-path Unix sockets the daemon itself
+  needs and the opt-in managed Proxy ([egress](egress.md)), and the OS has no
+  host/IP allowlist because Linux cannot enforce one.
 - **Cedar is not adopted.** A policy language was considered for the path rules
   and dropped: the rules are path lists with three access levels, and the layer-1
   profile is rendered from them directly. Revisit only if policies must be
@@ -184,26 +182,14 @@ sandbox profile will treat as a boundary.
 ### Network
 
 Egress and ingress are denied at the OS level by `deny default` (macOS) /
-bubblewrap's `--unshare-all`, or Landlock net rules in the fallback (Linux); the
-only exception is the `network.unix_sockets` list, plus the opt-in managed proxy
-in [egress](egress.md).
-Inference — the reason an
-earlier design left egress open — is a daemon capability: the agent asks the
-daemon over its Unix socket, and the daemon holds the provider credentials and
-reaches the network.
-The sandbox thus has no IP exfiltration channel, so per-host rules and an SSRF
-guard are unnecessary for a command that does not opt in.
-
-A session that must reach a provider directly — an ACP agent speaking its own
-API — opts into the **managed proxy**, which is the one place egress is granted:
-the OS still has no host allowlist, it grants only the transport to a proxy the
-daemon runs, and the proxy enforces the `host:port` allowlist (see
-[egress](egress.md)). On Linux that transport is a Unix socket inside the private
-namespace, so even that session has no IP route; on macOS, which has no
-namespace, it is the proxy's loopback port, granted by port only. The policy
-carries it as `network.proxy`, and the private namespace is what the backend
-selection keys on: a `loopback`-only or Unix-socket-proxy policy needs
-bubblewrap and fails closed without it.
+bubblewrap's `--unshare-all`, or Landlock net rules in the fallback (Linux). The
+only exceptions are the `network.unix_sockets` list and the opt-in managed Proxy,
+whose design is in [egress](egress.md); the sandbox grants the transport, never a
+host. Inference — the reason an earlier design left egress open — is a daemon
+capability: the agent asks the daemon over its Unix socket, and the daemon holds
+the provider credentials and reaches the network. The sandbox thus has no IP
+exfiltration channel, so per-host rules and an SSRF guard are unnecessary for a
+command that does not opt in.
 
 The daemon grants its own event socket to the session policy when it starts the
 manager, so a launched node can reach the daemon that supervises it. On macOS

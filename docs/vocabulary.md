@@ -73,6 +73,7 @@ where a design doc names a protocol's own concept: an ACP `sessionId` returned b
 | **Executor** | The strategy that runs a command under a policy, one-shot (`exec`) or long-lived (`spawn`). | `agentd_sandbox::Executor` |
 | **Protocol** | A factory that creates one `Bridge` per Session for one child protocol. | `agentd::bridge::Protocol` |
 | **Bridge** | The per-Session conversion between a child's protocol messages and Events, in both directions. | `agentd::bridge::{Bridge, McpBridge, AcpBridge}` |
+| **conversion** | What a `Bridge` performs: one protocol message or one event becomes the other direction's actions. "Protocol" names the factory, "Bridge" the thing that converts. | — (design word) |
 | **protocol message** | One message of the child's own protocol (a JSON-RPC object), carried in an event's `data.message`. | `data.message` |
 | **frame** | One byte-level unit of that protocol on the child's stdio: a newline-delimited line, capped by `MAX_FRAME_BYTES`. Framing is the `Bridge`'s job. | `MAX_FRAME_BYTES` |
 | **turn** | One agent-loop cycle: from an `agent.inbox` until the conversation's tail is answered. A turn may run several tool rounds. | `agent.turn.*` |
