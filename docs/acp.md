@@ -30,7 +30,7 @@ agent's own network egress — is handled with a managed proxy.
 
 ## Why ACP is not just another codec
 
-`McpBridge` is a stateless line codec: `uplink` and `downlink` are pure
+`McpBridge` is a stateless line converter: `uplink` and `downlink` are pure
 functions of one line, and the manager routes by `subject`. ACP breaks both
 assumptions.
 
@@ -110,7 +110,7 @@ bounded-read guarantees (see [session](session.md)).
 `McpBridge` is refactored onto this trait without behavior change: `start()`
 returns the `initialize` request, `on_line` returns the `notifications/initialized`
 reply plus the event, and `on_event` returns the `tools/call` line. The stateless
-codec becomes a state machine whose state happens to be constant.
+converter becomes a state machine whose state happens to be constant.
 
 ## AcpBridge
 

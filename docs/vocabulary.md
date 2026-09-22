@@ -150,11 +150,11 @@ wrote the bytes: the daemon appends and therefore owns `sandbox.*`, `session.*`,
 | --- | --- | --- |
 | `event store`, `eventstore` | The thing is a log: append-only, ordered, addressed by position. "Store" also reads as the SQLite file. | `EventLog` |
 | `store` unqualified | Two different files would share the word. | `EventLog` or `projection` |
-| `worker` | Nothing is interchangeable and pooled: each supervised child speaks its own protocol. Reintroduce the word with the pool, not before. | `Session` (today) |
+| `worker` | As a domain noun there is nothing to name: no pool exists, and each supervised child speaks its own protocol. Reintroduce the word with the pool, not before. (A "worker thread" belongs to a thread pool, not to this vocabulary.) | `Session` (today) |
 | `network manager` | There is no such component: the OS enforces the policy, the `Proxy` decides egress, the `Forwarder` carries bytes. | `Proxy`, `NetworkPolicy`, `Forwarder` |
 | `mailbox` | An actor-model metaphor for the log; it collides with `protocol message`. | `EventLog` |
 | `container`, `jail`, `VM` | The boundary is the platform's own isolation, not a machine. | `Sandbox`, `confinement` |
-| `adapter`, `codec`, `driver` for `Bridge` | They lose the symmetry of the two directions, collide with the tokio I/O driver, or sound byte-level only. | `Bridge` (`McpBridge`, `AcpBridge`) |
+| `adapter`, `codec`, `driver` as a synonym for `Bridge` | They lose the symmetry of the two directions, collide with the tokio I/O driver, or sound byte-level only. (A provider adapter is a different thing and keeps its name.) | `Bridge` (`McpBridge`, `AcpBridge`) |
 | `message` meaning Event | Four concepts already need the word. | `Event`, `notice` |
 | `supervisor` as a type | The type is named after what it does to its unit. | `SessionManager` |
 

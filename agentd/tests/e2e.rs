@@ -161,18 +161,18 @@ async fn choreographed_events_flow_from_websockets_into_the_log() {
     let server = spawn_server(socket.clone(), log);
 
     let mut producer = connect(&socket).await;
-    let mut worker = connect(&socket).await;
+    let mut subscriber = connect(&socket).await;
 
     let submitted = Event::new("task.submitted", json!({ "task": "demo" }));
     send_event(&mut producer, &submitted).await;
 
     let completed = {
-        let (seq, relayed) = recv_wire(&mut worker).await;
+        let (seq, relayed) = recv_wire(&mut subscriber).await;
         assert_eq!(seq, Some(1));
         assert_attributed(&relayed, &submitted);
 
         let completed = Event::new("task.completed", json!({ "task": "demo" }));
-        send_event(&mut worker, &completed).await;
+        send_event(&mut subscriber, &completed).await;
         completed
     };
 

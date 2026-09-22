@@ -1,7 +1,7 @@
 //! A SQLite-backed read model.
 //!
 //! [`SqliteProjection`] derives state from the event log by applying events in
-//! [`Seq`] order. The JSONL event store is the source of truth; the SQLite file
+//! [`Seq`] order. The JSONL event log is the source of truth; the SQLite file
 //! is a projection that can always be rebuilt from the log, so it is safe to
 //! delete when the schema or the reducer changes.
 //!

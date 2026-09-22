@@ -9,7 +9,7 @@
 //! inspects the protocol payload, so adding a protocol does not touch it.
 //!
 //! Two protocols ship: `mcp` ([`McpProtocol`]), the Model Context Protocol over
-//! stdio, a line codec with no real state; and `acp` ([`AcpProtocol`]), the
+//! stdio, a line protocol with no real state; and `acp` ([`AcpProtocol`]), the
 //! Agent Client Protocol, a client-side state machine that negotiates a session
 //! and answers the agent's permission requests over the log.
 
