@@ -135,7 +135,7 @@ where
             let from = self.projection.applied_seq().saturating_add(1);
             match WsClient::connect(&self.socket, Some(from), self.token.expose_secret()).await {
                 Ok(mut client) => {
-                    let received = self.session(&mut client, &mut shutdown).await?;
+                    let received = self.run_connection(&mut client, &mut shutdown).await?;
                     if received {
                         backoff = INITIAL_BACKOFF;
                     }
@@ -163,7 +163,7 @@ where
     /// Processes one connection until it closes or `shutdown` fires, returning
     /// whether any message was received (used to decide whether to reset the
     /// reconnect backoff).
-    async fn session(
+    async fn run_connection(
         &mut self,
         client: &mut WsClient,
         shutdown: &mut watch::Receiver<bool>,

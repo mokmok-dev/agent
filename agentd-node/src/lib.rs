@@ -33,7 +33,7 @@
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let projection = SqliteProjection::<Counts>::open("node.db")?;
 //! let interest = TypePrefixes::new(["sandbox."]);
-//! let mut node = Node::new("/tmp/mokmokd.sock", projection, interest, "urn:mokmokd:session:1", "token");
+//! let mut node = Node::new("/tmp/mokmokd.sock", projection, interest, "urn:mokmokd:node:1", "token");
 //! let (sender, shutdown) = tokio::sync::watch::channel(false);
 //! let _ = sender;
 //! node.run(shutdown).await?;
@@ -56,8 +56,8 @@ pub use agentd_events::{DAEMON_CAUGHT_UP, Event, LogEntry, Projection, Seq, Wire
 pub use agentd_inference::{Delta, Message, Role, ToolCall, ToolSpec};
 pub use client::{ClientError, PublishError, WsClient};
 pub use conversation::{
-    AGENT_INBOX, AGENT_MESSAGE, AGENT_PATCH_APPLIED, AGENT_SESSION_STARTED, AGENT_TOOL_RESULT,
-    AGENT_TURN_COMPLETED, AGENT_TURN_FAILED, AGENT_TURN_STARTED, Conversation, session_key,
+    AGENT_CONVERSATION_STARTED, AGENT_INBOX, AGENT_MESSAGE, AGENT_PATCH_APPLIED, AGENT_TOOL_RESULT,
+    AGENT_TURN_COMPLETED, AGENT_TURN_FAILED, AGENT_TURN_STARTED, Conversation, conversation_key,
 };
 pub use error::AgentError;
 pub use filter::{Interest, TypePrefixes};

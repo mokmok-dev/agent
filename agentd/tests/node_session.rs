@@ -103,7 +103,7 @@ fn spawn_node(
         socket,
         projection,
         TypePrefixes::new(["test."]),
-        "urn:mokmokd:session:test",
+        "urn:mokmokd:node:test",
         NODE_TOKEN,
     );
     let (sender, receiver) = watch::channel(false);

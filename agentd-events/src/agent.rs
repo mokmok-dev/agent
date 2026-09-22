@@ -6,8 +6,8 @@
 //! dependency on this crate is real, so this is the one place the contract can
 //! be stated once.
 
-/// A session began: the conversation id it runs, the workdir, and the model.
-pub const AGENT_SESSION_STARTED: &str = "agent.session.started";
+/// A conversation began: its id, the workdir, and the model.
+pub const AGENT_CONVERSATION_STARTED: &str = "agent.conversation.started";
 /// A user prompt that starts a turn.
 pub const AGENT_INBOX: &str = "agent.inbox";
 /// A finalized assistant message.

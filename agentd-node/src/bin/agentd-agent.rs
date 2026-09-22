@@ -8,7 +8,9 @@
 //! session manager launched it under, so the commands it spawns inherit the
 //! confinement.
 
-use agentd_node::{Agent, AgentError, Conversation, ShellLimits, SqliteProjection, session_key};
+use agentd_node::{
+    Agent, AgentError, Conversation, ShellLimits, SqliteProjection, conversation_key,
+};
 use clap::Parser;
 use secrecy::zeroize::Zeroizing;
 use std::path::{Path, PathBuf};
@@ -32,13 +34,14 @@ struct Args {
     /// `$XDG_CONFIG_HOME/agentd/agent.token`.
     #[arg(long, default_value_os_t = default_agent_token())]
     token_file: PathBuf,
-    /// The conversation this agent answers. Without it, a new session is
+    /// The conversation this agent answers. Without it, a new conversation is
     /// created unless `--resume` is given.
     #[arg(long)]
     conversation: Option<String>,
-    /// Continue the most recent session recorded for `--workdir` instead of
-    /// starting a new one. A workdir with no recorded session starts a new one
-    /// rather than failing, so a supervisor may pass this unconditionally.
+    /// Continue the most recent conversation recorded for `--workdir` instead
+    /// of starting a new one. A workdir with no recorded conversation starts a
+    /// new one rather than failing, so the session manager may pass this
+    /// unconditionally.
     #[arg(long)]
     resume: bool,
     /// The workspace directory the shell tool runs in.
@@ -106,17 +109,17 @@ async fn run() -> Result<(), RunError> {
         SqliteProjection::<Conversation>::open(&args.db).map_err(RunError::Projection)?;
     let conversation = match args.conversation {
         Some(conversation) => conversation,
-        // A workdir with no recorded session is not an error: a supervisor
-        // passes `--resume` on every launch, including the first, and failing
-        // there would kill a session that has nothing to resume yet.
+        // A workdir with no recorded conversation is not an error: the session
+        // manager passes `--resume` on every launch, including the first, and
+        // failing there would kill a session that has nothing to resume yet.
         None if args.resume => {
-            let key = session_key(&args.workdir);
-            Conversation::latest_session(projection.connection(), &key)
+            let key = conversation_key(&args.workdir);
+            Conversation::latest_conversation(projection.connection(), &key)
                 .map_err(RunError::Projection)?
                 .unwrap_or_else(|| {
                     tracing::warn!(
                         workdir = %key,
-                        "no session to resume for this workdir; starting a new one",
+                        "no conversation to resume for this workdir; starting a new one",
                     );
                     Uuid::new_v4().to_string()
                 })

@@ -2,13 +2,13 @@
 //! be committed.
 //!
 //! It exists so the system can be driven from a shell. With `--inbox` it sends
-//! a user prompt to the current session; otherwise it publishes a raw event.
+//! a user prompt to the current conversation; otherwise it publishes a raw event.
 //! It connects to the event API over the Unix domain socket, sends the event,
 //! and reports the position the daemon assigned (or the error notice it
 //! answered with).
 
 use agentd_events::Event;
-use agentd_node::{AGENT_INBOX, Conversation, SqliteProjection, WsClient, session_key};
+use agentd_node::{AGENT_INBOX, Conversation, SqliteProjection, WsClient, conversation_key};
 use clap::Parser;
 use secrecy::zeroize::Zeroizing;
 use serde_json::{Value, json};
@@ -31,18 +31,19 @@ struct Args {
     /// to `$XDG_CONFIG_HOME/agentd/user.token`.
     #[arg(long, default_value_os_t = agentd_events::paths::default_user_token())]
     token_file: PathBuf,
-    /// The SQLite projection used to resolve the session when `--conversation`
-    /// is omitted. Defaults to `$XDG_DATA_HOME/agentd/agent.db`.
+    /// The SQLite projection used to resolve the conversation when
+    /// `--conversation` is omitted. Defaults to `$XDG_DATA_HOME/agentd/agent.db`.
     #[arg(long, default_value_os_t = default_db())]
     db: PathBuf,
-    /// The workspace whose session to target. Defaults to the current directory.
+    /// The workspace whose conversation to target. Defaults to the current
+    /// directory.
     #[arg(long, default_value_os_t = default_workdir())]
     workdir: PathBuf,
-    /// The conversation to target. By default the most recent session recorded
+    /// The conversation to target. By default the most recent one recorded
     /// for `--workdir`.
     #[arg(long)]
     conversation: Option<String>,
-    /// Send a user prompt to the session: shorthand for
+    /// Send a user prompt to the conversation: shorthand for
     /// `--type agent.inbox --data '{"conversation_id":...,"content":...}'`.
     #[arg(long)]
     inbox: Option<String>,
@@ -73,7 +74,7 @@ enum RunError {
     /// The `--data` argument was not valid JSON.
     #[error("the --data value is not valid JSON: {0}")]
     Data(#[from] serde_json::Error),
-    /// Opening the projection to resolve a session failed.
+    /// Opening the projection to resolve a conversation failed.
     #[error(transparent)]
     Projection(agentd_node::AgentError),
     /// The WebSocket connection failed.
@@ -82,9 +83,9 @@ enum RunError {
     /// The daemon did not commit or reject the event in time.
     #[error(transparent)]
     Publish(#[from] agentd_node::PublishError),
-    /// `--inbox` was given but no session exists for the workdir.
-    #[error("no session found for this workdir; start agentd-agent first")]
-    NoSession,
+    /// `--inbox` was given but no conversation exists for the workdir.
+    #[error("no conversation found for this workdir; start agentd-agent first")]
+    NoConversation,
     /// Neither `--inbox` nor `--type`/`--data` was given.
     #[error("pass --inbox <text>, or both --type and --data")]
     MissingEvent,
@@ -98,11 +99,11 @@ fn resolve_event(args: &Args) -> Result<(&str, Value), RunError> {
         } else {
             let projection =
                 SqliteProjection::<Conversation>::open(&args.db).map_err(RunError::Projection)?;
-            let key = session_key(&args.workdir);
+            let key = conversation_key(&args.workdir);
             Cow::Owned(
-                Conversation::latest_session(projection.connection(), &key)
+                Conversation::latest_conversation(projection.connection(), &key)
                     .map_err(RunError::Projection)?
-                    .ok_or(RunError::NoSession)?,
+                    .ok_or(RunError::NoConversation)?,
             )
         };
         return Ok((

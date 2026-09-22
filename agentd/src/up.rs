@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agentd_events::LogEntry;
-use agentd_events::agent::AGENT_SESSION_STARTED;
+use agentd_events::agent::AGENT_CONVERSATION_STARTED;
 use agentd_sandbox::{Access, FsEntry, FsPolicy, Policy, ShellPolicy};
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -70,7 +70,7 @@ pub async fn await_conversation(
                 );
                 return None;
             },
-            Ok(Ok(entry)) if entry.event.r#type == AGENT_SESSION_STARTED => {
+            Ok(Ok(entry)) if entry.event.r#type == AGENT_CONVERSATION_STARTED => {
                 let data = &entry.event.data;
                 // Another `up` may share the log while serving a different
                 // socket and workdir; only this workspace's session is ours.
@@ -85,8 +85,8 @@ pub async fn await_conversation(
             Ok(Err(RecvError::Closed)) => return None,
             Err(_) => {
                 tracing::warn!(
-                    "the agent has not announced its session within {}s; the printed command \
-                     leaves --conversation to the most recent session for --workdir",
+                    "the agent has not announced its conversation within {}s; the printed \
+                     command leaves --conversation to the most recent one for --workdir",
                     SESSION_ANNOUNCE_TIMEOUT.as_secs(),
                 );
                 return None;
@@ -514,7 +514,7 @@ pub enum UpError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AGENT_SESSION_STARTED, SESSION_EXITED, UpError, UpPaths, await_conversation, quote,
+        AGENT_CONVERSATION_STARTED, SESSION_EXITED, UpError, UpPaths, await_conversation, quote,
     };
     use agentd_sandbox::Access;
     use std::path::PathBuf;
@@ -626,20 +626,20 @@ mod tests {
         .expect("publish");
         // Another instance's session on the shared log must not win the race.
         log.publish(agentd_events::Event::new(
-            AGENT_SESSION_STARTED,
+            AGENT_CONVERSATION_STARTED,
             serde_json::json!({ "conversation_id": "other", "workdir": "/elsewhere" }),
         ))
         .await
         .expect("publish");
         // A malformed announcement without an id is skipped, not accepted.
         log.publish(agentd_events::Event::new(
-            AGENT_SESSION_STARTED,
+            AGENT_CONVERSATION_STARTED,
             serde_json::json!({ "workdir": "/ws" }),
         ))
         .await
         .expect("publish");
         log.publish(agentd_events::Event::new(
-            AGENT_SESSION_STARTED,
+            AGENT_CONVERSATION_STARTED,
             serde_json::json!({ "conversation_id": "mine", "workdir": "/ws" }),
         ))
         .await

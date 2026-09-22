@@ -32,8 +32,8 @@ use tokio::time::timeout;
 
 use crate::client::WsClient;
 use crate::conversation::{
-    AGENT_INBOX, AGENT_MESSAGE, AGENT_PATCH_APPLIED, AGENT_SESSION_STARTED, AGENT_TOOL_RESULT,
-    AGENT_TURN_COMPLETED, AGENT_TURN_FAILED, AGENT_TURN_STARTED, Conversation, session_key,
+    AGENT_CONVERSATION_STARTED, AGENT_INBOX, AGENT_MESSAGE, AGENT_PATCH_APPLIED, AGENT_TOOL_RESULT,
+    AGENT_TURN_COMPLETED, AGENT_TURN_FAILED, AGENT_TURN_STARTED, Conversation, conversation_key,
 };
 use crate::error::AgentError;
 use crate::patch::{Applied, Patch, PatchError};
@@ -101,7 +101,7 @@ pub struct Agent {
     /// The position of the last unanswered turn already run, so recovery does
     /// not re-run the same tail twice.
     last_answered: Seq,
-    /// Whether the session has been announced on the log this process.
+    /// Whether the conversation has been announced on the log this process.
     announced: bool,
 }
 
@@ -191,7 +191,7 @@ impl Agent {
             let from = self.projection.applied_seq().saturating_add(1);
             match WsClient::connect(&self.socket, Some(from), self.token.expose_secret()).await {
                 Ok(mut client) => {
-                    let received = self.session(&mut client, &mut shutdown).await?;
+                    let received = self.run_connection(&mut client, &mut shutdown).await?;
                     if received {
                         backoff = INITIAL_BACKOFF;
                     }
@@ -217,7 +217,7 @@ impl Agent {
     }
 
     /// Processes one connection until it closes or `shutdown` fires.
-    async fn session(
+    async fn run_connection(
         &mut self,
         client: &mut WsClient,
         shutdown: &mut watch::Receiver<bool>,
@@ -225,10 +225,10 @@ impl Agent {
         if !self.announced {
             publish(
                 client,
-                AGENT_SESSION_STARTED,
+                AGENT_CONVERSATION_STARTED,
                 json!({
                     "conversation_id": self.conversation_id,
-                    "workdir": session_key(&self.workdir),
+                    "workdir": conversation_key(&self.workdir),
                     "model": self.model.as_deref().unwrap_or(""),
                 }),
             )
