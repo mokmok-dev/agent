@@ -279,14 +279,25 @@ impl Patch {
                     .iter()
                     .filter(|line| line.side != Side::New)
                     .collect();
-                let found = lines.get(start..end).unwrap_or_default();
+                let mismatch = || PatchError::Mismatch {
+                    path: path.to_string(),
+                    hunk: number + 1,
+                    expected: preview(expected.iter().map(|line| line.text.as_str())),
+                    found: preview(
+                        lines
+                            .get(start..)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|line| line.text.as_str()),
+                    ),
+                };
+                // A hunk whose range is not a range of the file cannot match,
+                // so the range is checked before it is sliced.
+                let Some(found) = lines.get(start..end) else {
+                    return Err(mismatch());
+                };
                 if !matches(found, &expected) {
-                    return Err(PatchError::Mismatch {
-                        path: path.to_string(),
-                        hunk: number + 1,
-                        expected: preview(expected.iter().map(|line| line.text.as_str())),
-                        found: preview(found.iter().map(|line| line.text.as_str())),
-                    });
+                    return Err(mismatch());
                 }
                 result.extend_from_slice(&lines[cursor..start]);
                 result.extend(
@@ -928,5 +939,24 @@ mod tests {
                 String::from("alpha\nbeta\ngamma\n"),
             )])));
         assert!(matches!(error, Err(PatchError::Overlap { hunk: 2, .. })));
+    }
+
+    #[test]
+    fn a_hunk_past_the_end_of_the_file_is_rejected_rather_than_slicing_past_it() {
+        // An insertion at a line far past the file cannot match, and reporting
+        // that must not be a panic.
+        let diff = "\
+--- a/file.txt
++++ b/file.txt
+@@ -99,0 +100,1 @@
++inserted
+";
+        let error = Patch::parse(diff)
+            .expect("the diff should parse")
+            .apply(reader(&BTreeMap::from([(
+                String::from("file.txt"),
+                String::from("alpha\nbeta\n"),
+            )])));
+        assert!(matches!(error, Err(PatchError::Mismatch { hunk: 1, .. })));
     }
 }
