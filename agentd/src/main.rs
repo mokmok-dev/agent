@@ -107,6 +107,12 @@ struct ServeArgs {
     /// denied outright.
     #[arg(long = "session-egress-approval-secs", value_name = "SECS")]
     session_egress_approval_secs: Option<u64>,
+    /// Answer a `session.permission.requested` from a bridged agent with a
+    /// cancellation when no approver decides within this many seconds, so a
+    /// child blocked on a permission always unblocks (`agentd-approve` is the
+    /// client that decides). Without this flag the wait is unbounded.
+    #[arg(long = "session-permission-approval-secs", value_name = "SECS")]
+    session_permission_approval_secs: Option<u64>,
     /// Restart a crashed session up to this many times.
     #[arg(long, default_value_t = 0)]
     session_max_restarts: u32,
@@ -243,6 +249,9 @@ struct SessionOptions {
     /// How long to wait for an approver before denying a destination that is not
     /// on the static allowlist. `None` denies unknown destinations outright.
     egress_approval: Option<Duration>,
+    /// How long a `session.permission.requested` waits for an approver before
+    /// the manager cancels it. `None` waits forever.
+    permission_approval: Option<Duration>,
     /// Whether the session may use loopback freely (an ACP agent's internal
     /// HTTP server).
     loopback: bool,
@@ -266,6 +275,7 @@ async fn start_session_manager(
         bridge,
         egress,
         egress_approval,
+        permission_approval,
         loopback,
         socket,
         ..
@@ -298,6 +308,10 @@ async fn start_session_manager(
     };
     let manager = agentd::session::SessionManager::new(log.clone(), &policy, command, agent_id)?
         .with_supervision(supervision);
+    let manager = match permission_approval {
+        Some(deadline) => manager.with_permission_approval(deadline),
+        None => manager,
+    };
     let manager = match bridge {
         None => manager,
         Some(BridgeKind::Mcp) => {
@@ -348,6 +362,7 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
         session_egress,
         session_loopback,
         session_egress_approval_secs,
+        session_permission_approval_secs,
         session_max_restarts,
         session_lifetime_secs,
         session_bridge,
@@ -382,6 +397,7 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
                 bridge: session_bridge,
                 egress,
                 egress_approval: session_egress_approval_secs.map(Duration::from_secs),
+                permission_approval: session_permission_approval_secs.map(Duration::from_secs),
                 loopback: session_loopback,
                 socket: socket.clone(),
             },
@@ -411,6 +427,7 @@ async fn serve_command(args: ServeArgs) -> Result<(), RunError> {
             session_egress,
             session_loopback,
             session_egress_approval_secs,
+            session_permission_approval_secs,
         );
     }
 

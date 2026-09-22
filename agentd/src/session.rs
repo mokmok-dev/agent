@@ -35,7 +35,10 @@ use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::bridge::{Action, Bridge, Protocol, session_subject};
+use crate::bridge::{
+    Action, Bridge, Protocol, SESSION_PERMISSION_DECIDED, SESSION_PERMISSION_REQUESTED,
+    permission_cancelled, session_subject,
+};
 
 /// The largest protocol frame accepted from a bridged child before the frame is
 /// dropped and the stream resynchronizes at the next newline. The read is
@@ -119,6 +122,9 @@ pub struct SessionManager {
     /// The sandbox working directory, handed to a protocol that advertises it
     /// (an ACP agent gets it as the session `cwd`).
     workdir: PathBuf,
+    /// How long a pending permission request waits for an approver before the
+    /// manager cancels it. `None` waits forever (the default).
+    permission_approval: Option<Duration>,
     /// The active sessions, by id, with the restart count of each.
     ///
     /// A `std` mutex is sufficient because no critical section awaits; keeping
@@ -149,6 +155,7 @@ impl SessionManager {
             supervision: Supervision::default(),
             protocol: None,
             workdir: policy.shell.workdir.clone(),
+            permission_approval: None,
             active: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
@@ -170,6 +177,7 @@ impl SessionManager {
             supervision: Supervision::default(),
             protocol: None,
             workdir: PathBuf::from("/"),
+            permission_approval: None,
             active: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -203,6 +211,22 @@ impl SessionManager {
         protocol: Arc<dyn Protocol>,
     ) -> Self {
         self.protocol = Some(protocol);
+        self
+    }
+
+    /// Bounds how long a `session.permission.requested` waits for an approver:
+    /// once `deadline` elapses the manager answers it with a cancellation, so a
+    /// child that is blocked on a permission cannot wait forever.
+    ///
+    /// Unset, the wait is unbounded (the default). A decision published before
+    /// the deadline is honoured; one published after it is dropped by the bridge,
+    /// which no longer holds the request.
+    #[must_use]
+    pub const fn with_permission_approval(
+        mut self,
+        deadline: Duration,
+    ) -> Self {
+        self.permission_approval = Some(deadline);
         self
     }
 
@@ -267,19 +291,98 @@ impl SessionManager {
             // stopped caring, which does not affect running the loop.
             let _ = ready.send(());
         }
+        // The permission requests awaiting an approver, by request id. State
+        // lives here rather than in the per-session bridge because the bridge is
+        // a pure state machine and the wait must end even when no event arrives.
+        let mut pending = BTreeMap::new();
         loop {
+            let deadline = pending.values().map(|entry: &Pending| entry.deadline).min();
             tokio::select! {
                 _ = shutdown.changed() => return Ok(()),
+                () = wait_until(deadline) => self.expire(&mut events, snapshot, &mut pending).await,
                 recorded = events.recv() => match recorded {
-                    Ok(entry) if entry.seq <= snapshot => {},
-                    Ok(entry) => match entry.event.r#type.as_str() {
-                        SESSION_REQUESTED => self.launch(&entry.event),
-                        SESSION_STATUS_REQUESTED => self.report_status().await,
-                        _ => {},
-                    },
+                    Ok(entry) => self.serve(entry, snapshot, &mut pending).await,
                     Err(RecvError::Lagged(_)) => {},
                     Err(RecvError::Closed) => return Ok(()),
                 },
+            }
+        }
+    }
+
+    /// Serves one recorded event, skipping the ones reconciliation folded.
+    async fn serve(
+        &self,
+        entry: LogEntry,
+        snapshot: Seq,
+        pending: &mut BTreeMap<String, Pending>,
+    ) {
+        if entry.seq <= snapshot {
+            return;
+        }
+        let event = &entry.event;
+        match event.r#type.as_str() {
+            SESSION_REQUESTED => self.launch(event),
+            SESSION_STATUS_REQUESTED => self.report_status().await,
+            SESSION_PERMISSION_REQUESTED => self.await_approval(event, pending),
+            SESSION_PERMISSION_DECIDED => {
+                if let Some(request_id) = request_id(event) {
+                    pending.remove(request_id);
+                }
+            },
+            _ => {},
+        }
+    }
+
+    /// Starts timing `event`, a permission request, when a deadline is set.
+    fn await_approval(
+        &self,
+        event: &Event,
+        pending: &mut BTreeMap<String, Pending>,
+    ) {
+        let Some(deadline) = self.permission_approval else {
+            return;
+        };
+        let Some(request_id) = request_id(event) else {
+            return;
+        };
+        pending.insert(
+            request_id.to_string(),
+            Pending {
+                deadline: tokio::time::Instant::now() + deadline,
+                // The request is routed to a child by its `subject`; answering
+                // it without one would leave that child waiting.
+                subject: event.subject.clone(),
+            },
+        );
+    }
+
+    /// Cancels every pending request whose deadline has passed.
+    ///
+    /// Any decision already queued is served first, so a decision published
+    /// before the deadline is honoured rather than raced by the cancellation.
+    async fn expire(
+        &self,
+        events: &mut tokio::sync::broadcast::Receiver<LogEntry>,
+        snapshot: Seq,
+        pending: &mut BTreeMap<String, Pending>,
+    ) {
+        while let Ok(entry) = events.try_recv() {
+            self.serve(entry, snapshot, pending).await;
+        }
+        let now = tokio::time::Instant::now();
+        let expired: Vec<(String, Option<String>)> = pending
+            .iter()
+            .filter(|(_, entry)| entry.deadline <= now)
+            .map(|(request_id, entry)| (request_id.clone(), entry.subject.clone()))
+            .collect();
+        for (request_id, subject) in expired {
+            pending.remove(&request_id);
+            let mut event = permission_cancelled(&request_id);
+            if let Some(subject) = subject {
+                event = event.with_subject(subject);
+            }
+            if let Err(error) = self.log.publish(event).await {
+                tracing::error!(%error, %request_id, "failed to record a permission cancellation");
             }
         }
     }
@@ -860,6 +963,29 @@ async fn write_stdin(
     }
 }
 
+/// A permission request the manager is timing while it waits for an approver.
+struct Pending {
+    /// When the request is cancelled if no decision has arrived.
+    deadline: tokio::time::Instant,
+    /// The `subject` the request carried, so the cancellation reaches the child
+    /// the request came from.
+    subject: Option<String>,
+}
+
+/// The `request_id` a permission request or decision is correlated by.
+fn request_id(event: &Event) -> Option<&str> {
+    event.data.get("request_id").and_then(Value::as_str)
+}
+
+/// Sleeps until `deadline`, or forever when nothing is pending, so the run
+/// loop's timer branch is inert while no approval is awaited.
+async fn wait_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Removes a session from the active set when dropped, so every exit path
 /// (return, `?`, or unwind) leaves the set consistent.
 struct ActiveSession<'a> {
@@ -991,7 +1117,10 @@ mod tests {
         SESSION_FAILED, SESSION_REQUESTED, SESSION_RESTARTED, SESSION_STARTED,
         SESSION_STATUS_REQUESTED, SessionManager, Supervision,
     };
-    use crate::bridge::{BRIDGED_INBOUND, McpProtocol};
+    use crate::bridge::{
+        BRIDGED_INBOUND, McpProtocol, SESSION_PERMISSION_DECIDED, SESSION_PERMISSION_REQUESTED,
+        permission_decided,
+    };
     use agentd_events::{Event, EventLog, LogEntry};
     use agentd_sandbox::{
         Access, ExecResult, Executor, FsEntry, FsPolicy, Policy, Sandbox, ShellPolicy, SpawnError,
@@ -1393,6 +1522,224 @@ mod tests {
         assert_eq!(ready.subject.as_deref(), Some("session:acp-1"));
 
         wait_for(&mut subscriber, super::SESSION_EXITED).await;
+    }
+
+    /// An ACP child that completes the handshake, asks for permission for a tool
+    /// call under id 7, and appends every reply it is written to `replies`.
+    ///
+    /// The child writes each reply on its own line, so the number of lines says
+    /// how many answers it received.
+    fn acp_child_requesting_permission(replies: &Path) -> String {
+        let initialize =
+            json!({"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}})
+                .to_string();
+        let new_session = json!({"jsonrpc":"2.0","id":1,"result":{"sessionId":"sess_1"}}).to_string();
+        let permission = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "sess_1",
+                "toolCall": { "toolCallId": "call_1" },
+                "options": [{ "optionId": "allow-once", "name": "Allow", "kind": "allow_once" }],
+            },
+        })
+        .to_string();
+        format!(
+            "read line; printf '%s\\n' '{initialize}'; \
+             read line; printf '%s\\n' '{new_session}'; \
+             printf '%s\\n' '{permission}'; \
+             read line; printf '%s\\n' \"$line\" >> '{replies}'; \
+             read line; printf '%s\\n' \"$line\" >> '{replies}'",
+            replies = replies.display()
+        )
+    }
+
+    /// Starts `manager`'s run loop and publishes the session request once it is
+    /// serving, so the request is a live event.
+    async fn run_and_request(
+        manager: SessionManager,
+        log: &EventLog,
+        session_id: &str,
+    ) -> (
+        watch::Sender<bool>,
+        tokio::task::JoinHandle<Result<(), super::SessionError>>,
+    ) {
+        let (sender, receiver) = watch::channel(false);
+        let (ready, barrier) = oneshot::channel();
+        let handle = tokio::spawn(async move { manager.run_ready(receiver, ready).await });
+        barrier.await.expect("the run loop should be ready");
+        log.publish(request(session_id)).await.expect("publish");
+        (sender, handle)
+    }
+
+    /// Waits until the child has recorded a reply, failing on timeout.
+    async fn wait_for_reply(replies: &Path) -> String {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(content) = std::fs::read_to_string(replies)
+                && !content.is_empty()
+            {
+                return content;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the child was never answered: {}",
+                replies.display()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Every event recorded in the log, read back from the file.
+    fn recorded(log: &EventLog) -> Vec<Event> {
+        log.read_from(1)
+            .expect("the log should be readable")
+            .map(|entry| entry.expect("every line should decode").event)
+            .collect()
+    }
+
+    /// The `session.permission.decided` events for `request_id`.
+    fn decisions_for(
+        events: &[Event],
+        request_id: &str,
+    ) -> Vec<Event> {
+        events
+            .iter()
+            .filter(|event| {
+                event.r#type == SESSION_PERMISSION_DECIDED
+                    && event.data.get("request_id").and_then(serde_json::Value::as_str)
+                        == Some(request_id)
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_permission_request_is_cancelled_at_the_deadline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = open_log(dir.path());
+        let replies = dir.path().join("replies.txt");
+        let manager = acp_manager(
+            log.clone(),
+            &acp_child_requesting_permission(&replies),
+            Supervision::default(),
+        )
+        .with_permission_approval(Duration::from_millis(200));
+        let mut subscriber = log.subscribe();
+        let (shutdown, handle) = run_and_request(manager, &log, "perm-1").await;
+
+        let asked = wait_for(&mut subscriber, SESSION_PERMISSION_REQUESTED).await;
+        assert_eq!(asked.data["request_id"], "7");
+        assert_eq!(asked.subject.as_deref(), Some("session:perm-1"));
+
+        // No approver answers, so the manager cancels the request itself.
+        let decided = wait_for(&mut subscriber, SESSION_PERMISSION_DECIDED).await;
+        assert_eq!(decided.data["request_id"], "7");
+        assert_eq!(decided.data["cancelled"], true);
+        assert_eq!(
+            decided.subject.as_deref(),
+            Some("session:perm-1"),
+            "the cancellation must be addressed to the child that asked"
+        );
+
+        // The cancellation is what unblocks the child: it is answered with
+        // `cancelled`, exactly as it would be for a human denial.
+        let reply = wait_for_reply(&replies).await;
+        assert!(
+            reply.contains(r#""outcome":{"outcome":"cancelled"}"#),
+            "the child should be answered with a cancellation: {reply}"
+        );
+
+        shutdown.send(true).expect("shutdown");
+        handle.await.expect("join").expect("clean stop");
+    }
+
+    #[tokio::test]
+    async fn a_decision_before_the_deadline_is_honoured_without_a_cancel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = open_log(dir.path());
+        let replies = dir.path().join("replies.txt");
+        let manager = acp_manager(
+            log.clone(),
+            &acp_child_requesting_permission(&replies),
+            Supervision::default(),
+        )
+        .with_permission_approval(Duration::from_secs(1));
+        let mut subscriber = log.subscribe();
+        let (shutdown, handle) = run_and_request(manager, &log, "perm-2").await;
+
+        let asked = wait_for(&mut subscriber, SESSION_PERMISSION_REQUESTED).await;
+        assert_eq!(asked.data["request_id"], "7");
+        log.publish(permission_decided("7", "allow-once").with_subject("session:perm-2"))
+            .await
+            .expect("publish a decision");
+
+        let reply = wait_for_reply(&replies).await;
+        assert!(
+            reply.contains(r#""outcome":"selected""#) && reply.contains(r#""optionId":"allow-once""#),
+            "the child should be answered with the approver's option: {reply}"
+        );
+
+        // Past the deadline the request must not also be cancelled.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let decisions = decisions_for(&recorded(&log), "7");
+        assert_eq!(decisions.len(), 1, "a decision must not be re-answered");
+        assert_eq!(
+            decisions[0].data.get("cancelled"),
+            None,
+            "a decision before the deadline must not be cancelled"
+        );
+
+        shutdown.send(true).expect("shutdown");
+        handle.await.expect("join").expect("clean stop");
+    }
+
+    #[tokio::test]
+    async fn a_decision_after_the_deadline_is_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = open_log(dir.path());
+        let replies = dir.path().join("replies.txt");
+        let manager = acp_manager(
+            log.clone(),
+            &acp_child_requesting_permission(&replies),
+            Supervision::default(),
+        )
+        .with_permission_approval(Duration::from_millis(200));
+        let mut subscriber = log.subscribe();
+        let (shutdown, handle) = run_and_request(manager, &log, "perm-3").await;
+
+        let asked = wait_for(&mut subscriber, SESSION_PERMISSION_REQUESTED).await;
+        assert_eq!(asked.data["request_id"], "7");
+        let cancelled = wait_for(&mut subscriber, SESSION_PERMISSION_DECIDED).await;
+        assert_eq!(cancelled.data["cancelled"], true);
+        assert_eq!(wait_for_reply(&replies).await.lines().count(), 1);
+
+        // The late decision is recorded, but the bridge no longer holds the
+        // request, so the child is not answered a second time.
+        log.publish(permission_decided("7", "allow-once").with_subject("session:perm-3"))
+            .await
+            .expect("publish a decision");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        let decisions = decisions_for(&recorded(&log), "7");
+        assert_eq!(decisions.len(), 2, "the late decision is recorded as sent");
+        assert_eq!(
+            decisions.iter().filter(|event| event.data["cancelled"] == true).count(),
+            1,
+            "only the deadline cancels the request"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&replies)
+                .expect("the child's replies")
+                .lines()
+                .count(),
+            1,
+            "a decision after the deadline must not answer the child again"
+        );
+
+        shutdown.send(true).expect("shutdown");
+        handle.await.expect("join").expect("clean stop");
     }
 
     #[tokio::test]
