@@ -148,7 +148,10 @@ fn bash() -> Option<PathBuf> {
 /// Whether the host can build the namespace this test needs.
 fn namespace_supported() -> bool {
     if std::env::var_os("NIX_BUILD_TOP").is_some() {
-        // The Nix build sandbox cannot nest a user namespace.
+        // A Nix build sandbox cannot nest a user namespace. `nix develop` sets
+        // this variable too, so a `cargo test` run inside the dev shell skips
+        // these tests: run them with `bwrap` on `PATH` outside it to exercise
+        // the confinement they check.
         return false;
     }
     let (Some(bwrap), Some(bash)) = (bwrap(), bash()) else {

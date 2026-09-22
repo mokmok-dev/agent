@@ -237,6 +237,7 @@ Re-establishing the ledger from a clean tree:
 | OverlayFS, pause, `process-compose` are absent | `rg -i 'overlay\|lowerdir\|sigstop\|process-compose' --glob '!target'` |
 | The patcher parses, applies, and inverts | `cargo test -p agentd-node --lib -- patch::` |
 | `bubblewrap` ships in the dev shell | `rg -n bubblewrap flake.nix`, `nix develop -c bwrap --version` |
+| The tests that need `bubblewrap` run, rather than skip | `cargo test -p agentd-sandbox --test egress_flow` with `bwrap` on `PATH` **outside** the dev shell: `nix develop` sets `NIX_BUILD_TOP`, which the test's own probe reads as "cannot nest a user namespace" |
 | The permission wait is bounded | `rg -n 'permission-approval-secs' agentd/src/main.rs`, `cargo test -p agentd --lib -- session::tests` |
 | An approver binary ships | `ls agentd-node/src/bin`, `cargo test -p agentd --test approve` |
 | The tree is green | `cargo test --workspace --all-features --no-fail-fast` |
