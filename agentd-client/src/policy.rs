@@ -11,16 +11,24 @@ pub enum Route {
     Authority,
 }
 
-/// The decision families the client server forwards on the authority
-/// connection.
+/// The only reserved types the client server forwards on the authority
+/// connection: the decisions, matched exactly.
 ///
-/// Every other reserved family — `error.*`, `daemon.*`, `session.started`,
-/// `sandbox.exec.completed` — stays refused, so a downstream client cannot use
-/// the client server to append a reserved event it has no decision for.
-const DECISION_PREFIXES: &[&str] = &[
-    "sandbox.permission.",
-    "session.permission.",
-    "session.egress.",
+/// A prefix rule would also admit `*.requested`, which is what an approver
+/// *reads*; a downstream client could then append a fabricated approval request
+/// for the operator to answer. Every other reserved type — `error.*`,
+/// `daemon.*`, `session.*` lifecycle, `sandbox.exec.*`, and the requests
+/// themselves — stays refused.
+const DECISIONS: &[&str] = &[
+    "sandbox.permission.granted",
+    "sandbox.permission.denied",
+    "sandbox.permission.cancelled",
+    "session.permission.granted",
+    "session.permission.denied",
+    "session.permission.cancelled",
+    "session.egress.granted",
+    "session.egress.denied",
+    "session.egress.cancelled",
 ];
 
 /// Classifies an event a downstream client sent.
@@ -36,11 +44,7 @@ pub fn route(
     if !is_reserved_type(r#type) {
         return Some(Route::User);
     }
-    if allow_approve
-        && DECISION_PREFIXES
-            .iter()
-            .any(|prefix| r#type.starts_with(prefix))
-    {
+    if allow_approve && DECISIONS.contains(&r#type) {
         return Some(Route::Authority);
     }
     None
@@ -58,22 +62,34 @@ mod tests {
     }
 
     #[test]
-    fn a_decision_routes_to_the_authority_connection_only_when_enabled() {
-        assert_eq!(
-            route("sandbox.permission.granted", true),
-            Some(Route::Authority)
-        );
-        assert_eq!(
-            route("session.permission.cancelled", true),
-            Some(Route::Authority)
-        );
-        assert_eq!(route("session.egress.denied", true), Some(Route::Authority));
-        assert_eq!(route("sandbox.permission.granted", false), None);
+    fn every_decision_routes_to_the_authority_connection_only_when_enabled() {
+        for decision in [
+            "sandbox.permission.granted",
+            "sandbox.permission.denied",
+            "sandbox.permission.cancelled",
+            "session.permission.granted",
+            "session.permission.denied",
+            "session.permission.cancelled",
+            "session.egress.granted",
+            "session.egress.denied",
+            "session.egress.cancelled",
+        ] {
+            assert_eq!(route(decision, true), Some(Route::Authority), "{decision}");
+            assert_eq!(route(decision, false), None, "{decision}");
+        }
+    }
+
+    #[test]
+    fn a_request_is_refused_even_with_approvals_enabled() {
+        assert_eq!(route("sandbox.permission.requested", true), None);
+        assert_eq!(route("session.permission.requested", true), None);
+        assert_eq!(route("session.egress.requested", true), None);
     }
 
     #[test]
     fn another_reserved_family_is_refused_even_with_approvals_enabled() {
         assert_eq!(route("sandbox.exec.completed", true), None);
+        assert_eq!(route("sandbox.permission", true), None);
         assert_eq!(route("session.started", true), None);
         assert_eq!(route("error.invalid_event", true), None);
         assert_eq!(route("daemon.caught_up", true), None);

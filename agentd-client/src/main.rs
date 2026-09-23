@@ -1,7 +1,7 @@
 //! The `agentd-client` binary: relay the daemon's event API to a TUI or a
 //! browser over a loopback WebSocket.
 
-use agentd_client::{Args, Config, RunError, run};
+use agentd_client::{Args, Config, ServerError, run};
 use clap::Parser as _;
 
 #[tokio::main]
@@ -27,7 +27,7 @@ async fn main() -> std::process::ExitCode {
 }
 
 /// Parses the arguments and serves until a signal.
-async fn run_command() -> Result<(), RunError> {
+async fn run_command() -> Result<(), ServerError> {
     let args = Args::parse();
     let config = Config::try_from(&args)?;
     run(config).await

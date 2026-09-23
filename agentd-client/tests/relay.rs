@@ -19,12 +19,14 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::net::{TcpStream, UnixListener};
 use tokio::sync::watch;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{HeaderValue, header};
 
 /// The token a read-and-publish client presents to the daemon.
 const USER_TOKEN: &str = "user-secret";
@@ -53,6 +55,14 @@ struct Fixture {
 impl Fixture {
     /// Starts a daemon and a client server under it.
     async fn start(allow_approve: bool) -> Self {
+        Self::start_with(allow_approve, Vec::new()).await
+    }
+
+    /// Starts a daemon and a client server that allows the given origins.
+    async fn start_with(
+        allow_approve: bool,
+        allow_origins: Vec<String>,
+    ) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let socket = dir.path().join("agentd.sock");
         let log_path = dir.path().join("events.jsonl");
@@ -89,6 +99,7 @@ impl Fixture {
             admin_token_file: allow_approve.then_some(admin_token_file),
             allow_approve,
             publish_timeout: TIMEOUT,
+            allow_origins,
         };
         let listener = bind(config.bind).await.expect("the client server binds");
         let address = listener.local_addr().expect("the bound address");
@@ -116,18 +127,7 @@ impl Fixture {
             || format!("ws://{}/events", self.address),
             |from| format!("ws://{}/events?from={from}", self.address),
         );
-        for _ in 0..100 {
-            let Ok(stream) = TcpStream::connect(self.address).await else {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                continue;
-            };
-            let request = url.as_str().into_client_request().expect("a request");
-            let (socket, _) = tokio_tungstenite::client_async(request, stream)
-                .await
-                .expect("the handshake succeeds");
-            return socket;
-        }
-        panic!("the client server did not accept a connection");
+        connect_ws(&url, self.address).await
     }
 
     /// The events durable in the log, in order.
@@ -139,6 +139,26 @@ impl Fixture {
             .filter_map(|line| serde_json::from_str::<Event>(line).ok())
             .collect()
     }
+}
+
+/// Connects a downstream WebSocket to `url` at `address`, retrying while the
+/// client server starts.
+async fn connect_ws(
+    url: &str,
+    address: SocketAddr,
+) -> WebSocketStream<TcpStream> {
+    for _ in 0..100 {
+        let Ok(stream) = TcpStream::connect(address).await else {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            continue;
+        };
+        let request = url.into_client_request().expect("a request");
+        let (socket, _) = tokio_tungstenite::client_async(request, stream)
+            .await
+            .expect("the handshake succeeds");
+        return socket;
+    }
+    panic!("the client server did not accept a connection");
 }
 
 impl Drop for Fixture {
@@ -366,18 +386,228 @@ async fn a_retried_id_is_not_appended_twice() {
     );
 }
 
-#[test]
-fn a_non_loopback_bind_is_refused() {
+#[tokio::test]
+async fn a_malformed_frame_is_answered_with_a_null_event_id() {
+    let fixture = Fixture::start(false).await;
+    let mut client = fixture.connect(None).await;
+
+    client
+        .send(Message::text("{ not json"))
+        .await
+        .expect("the frame is sent");
+    let failed = wait_for(&mut client, "client.publish_failed").await;
+
+    assert!(
+        failed["event"]["data"]["event_id"].is_null(),
+        "an unparsable frame has no id to correlate: {failed}"
+    );
+    let error = failed["event"]["data"]["error"]
+        .as_str()
+        .expect("the notice names the reason");
+    assert!(error.contains("CloudEvent"), "{error}");
+    assert!(fixture.log_events().is_empty());
+}
+
+#[tokio::test]
+async fn shutdown_closes_an_open_connection() {
+    let fixture = Fixture::start(false).await;
+    let mut client = fixture.connect(None).await;
+
+    fixture.shutdown.send(true).ok();
+    let closed = tokio::time::timeout(TIMEOUT, async {
+        while let Some(frame) = client.next().await {
+            if !matches!(frame, Ok(Message::Text(_))) {
+                break;
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        closed.is_ok(),
+        "an open connection must end itself on shutdown, or the graceful \
+         shutdown never returns"
+    );
+}
+
+#[tokio::test]
+async fn an_absent_daemon_is_reported_as_upstream_lost() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let token_file = dir.path().join("user.token");
+    std::fs::write(&token_file, USER_TOKEN).expect("the token");
+    let config = Config {
+        bind: "127.0.0.1:0".parse().expect("a loopback address"),
+        socket: dir.path().join("absent.sock"),
+        token_file,
+        admin_token_file: None,
+        allow_approve: false,
+        publish_timeout: TIMEOUT,
+        allow_origins: Vec::new(),
+    };
+    let listener = bind(config.bind).await.expect("the client server binds");
+    let address = listener.local_addr().expect("the bound address");
+    let (shutdown, receiver) = watch::channel(false);
+    tokio::spawn(async move {
+        serve(listener, &config, receiver)
+            .await
+            .expect("the client server serves");
+    });
+
+    let url = format!("ws://{address}/events");
+    let mut client = connect_ws(&url, address).await;
+    let lost = wait_for(&mut client, "client.upstream_lost").await;
+
+    assert!(
+        lost["event"]["data"]["error"].as_str().is_some(),
+        "the notice names why the daemon could not be reached: {lost}"
+    );
+    shutdown.send(true).ok();
+}
+
+#[tokio::test]
+async fn an_unanswered_publish_is_unknown_and_is_retried() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("agentd.sock");
+    let token_file = dir.path().join("user.token");
+    std::fs::write(&token_file, USER_TOKEN).expect("the token");
+    // A stand-in daemon that completes the handshake and never answers, so the
+    // read connection lives while a publish goes unresolved.
+    let listener = UnixListener::bind(&socket).expect("the stand-in binds");
+    let connects = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&connects);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                if let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await {
+                    while socket.next().await.is_some() {}
+                }
+            });
+        }
+    });
+
+    let config = Config {
+        bind: "127.0.0.1:0".parse().expect("a loopback address"),
+        socket,
+        token_file,
+        admin_token_file: None,
+        allow_approve: false,
+        publish_timeout: Duration::from_millis(300),
+        allow_origins: Vec::new(),
+    };
+    let listener = bind(config.bind).await.expect("the client server binds");
+    let address = listener.local_addr().expect("the bound address");
+    let (shutdown, receiver) = watch::channel(false);
+    tokio::spawn(async move {
+        serve(listener, &config, receiver)
+            .await
+            .expect("the client server serves");
+    });
+    let url = format!("ws://{address}/events");
+    let mut client = connect_ws(&url, address).await;
+    let prompt = event(
+        "018f6b2e-7e5c-7000-8000-000000000006",
+        "agent.inbox",
+        json!({ "conversation_id": "c1", "content": "unanswered" }),
+    );
+
+    send(&mut client, &prompt).await;
+    let failed = wait_for(&mut client, "client.publish_failed").await;
+    assert_eq!(
+        failed["event"]["data"]["outcome"].as_str(),
+        Some("unknown"),
+        "an unanswered publish is unresolved, not rejected: {failed}"
+    );
+
+    send(&mut client, &prompt).await;
+    let retried = wait_for(&mut client, "client.publish_failed").await;
+    assert_eq!(
+        retried["event"]["data"]["outcome"].as_str(),
+        Some("unknown")
+    );
+    assert!(
+        connects.load(Ordering::SeqCst) >= 3,
+        "an unresolved verdict is not remembered, so the retry opens a new \
+         connection instead of being answered from the map"
+    );
+    shutdown.send(true).ok();
+}
+
+/// Tries one downstream connection carrying `origin`, and reports whether the
+/// handshake succeeded.
+async fn connect_with_origin(
+    fixture: &Fixture,
+    origin: &str,
+) -> bool {
+    let url = format!("ws://{}/events", fixture.address);
+    let mut request = url.as_str().into_client_request().expect("a request");
+    request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_str(origin).expect("a valid origin"),
+    );
+    let stream = TcpStream::connect(fixture.address)
+        .await
+        .expect("the connect");
+    tokio_tungstenite::client_async(request, stream)
+        .await
+        .is_ok()
+}
+
+#[tokio::test]
+async fn a_browser_origin_is_refused_unless_allowed() {
+    // No origin is allow-listed by default, so a page cannot reach the socket.
+    let closed = Fixture::start(false).await;
+    assert!(!connect_with_origin(&closed, "https://evil.example").await);
+
+    // A configured Web UI's origin is the one exception.
+    let open = Fixture::start_with(false, vec![String::from("http://localhost:3000")]).await;
+    assert!(!connect_with_origin(&open, "https://evil.example").await);
+    assert!(connect_with_origin(&open, "http://localhost:3000").await);
+}
+
+#[tokio::test]
+async fn a_locally_invalid_event_is_refused_with_its_id() {
+    let fixture = Fixture::start(false).await;
+    let mut client = fixture.connect(None).await;
+    let invalid = event(
+        "not-a-uuid",
+        "agent.inbox",
+        json!({ "conversation_id": "c1", "content": "x" }),
+    );
+
+    send(&mut client, &invalid).await;
+    let failed = wait_for(&mut client, "client.publish_failed").await;
+
+    assert_eq!(
+        failed["event"]["data"]["event_id"].as_str(),
+        Some("not-a-uuid"),
+        "the refusal names the id the client chose: {failed}"
+    );
+    assert_eq!(
+        failed["event"]["data"]["outcome"].as_str(),
+        Some("rejected")
+    );
+    assert!(fixture.log_events().is_empty());
+}
+
+#[tokio::test]
+async fn a_non_loopback_bind_is_refused() {
     let args = agentd_client::Args {
         socket: PathBuf::from("/tmp/agentd.sock"),
         token_file: PathBuf::from("/tmp/user.token"),
         admin_token_file: None,
         allow_approve: false,
         bind: "0.0.0.0:8787".parse().expect("an address"),
+        allow_origin: Vec::new(),
         publish_timeout_secs: 10,
     };
+    let error = Config::try_from(&args).expect_err("the command line must refuse it");
+    assert!(matches!(error, agentd_client::ServerError::NotLoopback(_)));
 
-    let error = Config::try_from(&args).expect_err("a non-loopback bind must be refused");
-
-    assert!(matches!(error, agentd_client::RunError::NotLoopback(_)));
+    // The library path must refuse it too: an embedder never sees `Args`, and
+    // the downstream socket carries no authentication.
+    let error = bind("0.0.0.0:0".parse().expect("an address"))
+        .await
+        .expect_err("bind must refuse a non-loopback address");
+    assert!(matches!(error, agentd_client::ServerError::NotLoopback(_)));
 }

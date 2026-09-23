@@ -1,7 +1,7 @@
 //! The downstream WebSocket server: one daemon connection per client, relaying
 //! the daemon's own frames and forwarding the client's publishes.
 
-use crate::error::RunError;
+use crate::error::ServerError;
 use crate::frame::{PUBLISH_FAILED, UPSTREAM_LOST, notice, wire};
 use crate::policy::route;
 use crate::uplink::PublishRequest;
@@ -11,35 +11,44 @@ use axum::Router;
 use axum::extract::Query;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use futures_util::SinkExt;
 use futures_util::stream::{SplitSink, StreamExt};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::future::IntoFuture as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 
-/// The largest downstream frame accepted, matching the daemon's bridge cap.
+/// The largest downstream frame accepted, matching the daemon's bridge cap. It
+/// is also the socket's own message and frame limit, so a frame larger than this
+/// is refused by the transport instead of being buffered first.
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 
-/// How many verdict notices may queue for one client before the publish task
-/// backpressures.
+/// How many verdict notices may queue for one client. The publish task offers a
+/// verdict and drops it rather than waiting, so this only bounds one client's
+/// lag.
 const VERDICT_CAPACITY: usize = 16;
+
+/// How long the graceful shutdown waits for connections to close cleanly before
+/// the server is dropped.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
 
 /// The delay before the first upstream connection retry; doubled each failure.
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 
 /// The longest delay between upstream connection attempts.
-const MAX_BACKOFF: Duration = Duration::from_secs(5);
+const MAX_BACKOFF: Duration = Duration::from_millis(400);
 
 /// How many times the daemon connection is retried before the client is told the
 /// daemon is unreachable.
-const UPSTREAM_ATTEMPTS: u32 = 5;
+const UPSTREAM_ATTEMPTS: u32 = 3;
 
 /// The state every downstream connection shares.
 #[derive(Debug)]
@@ -50,26 +59,50 @@ pub struct AppState {
     pub user_token: Arc<SecretString>,
     /// Whether a decision may be forwarded on the authority connection.
     pub allow_approve: bool,
+    /// The browser origins allowed to connect; empty refuses every request that
+    /// carries an `Origin` header.
+    pub allow_origins: Vec<String>,
     /// The publish task's request channel.
     pub uplink: mpsc::Sender<PublishRequest>,
+    /// The shutdown signal, cloned into each connection so an open downstream
+    /// socket closes instead of holding the graceful shutdown open forever.
+    pub shutdown: watch::Receiver<bool>,
 }
 
 /// Serves the downstream event API on `listener` until `shutdown`.
 ///
 /// # Errors
 ///
-/// Returns [`RunError::Serve`] if the listener fails.
+/// Returns [`ServerError::NotLoopback`] when the listener is not on a loopback
+/// address, and [`ServerError::Serve`] if it fails.
 pub async fn serve(
     listener: TcpListener,
     state: Arc<AppState>,
     shutdown: watch::Receiver<bool>,
-) -> Result<(), RunError> {
+) -> Result<(), ServerError> {
+    if let Ok(address) = listener.local_addr()
+        && !address.ip().is_loopback()
+    {
+        return Err(ServerError::NotLoopback(address));
+    }
     let app = Router::new()
         .route("/events", any(events_handler))
         .with_state(state);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(until_shutdown(shutdown))
-        .await?;
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(until_shutdown(shutdown.clone()))
+        .into_future();
+    tokio::pin!(server);
+    let mut grace = false;
+    tokio::select! {
+        result = &mut server => result?,
+        () = until_shutdown(shutdown) => grace = true,
+    }
+    if grace {
+        // The graceful shutdown waits for every open connection, so a client
+        // that has stopped reading would hold the process here. The handlers
+        // close themselves on the same signal; the timeout only bounds the wait.
+        let _ = tokio::time::timeout(SHUTDOWN_GRACE, &mut server).await;
+    }
     Ok(())
 }
 
@@ -94,12 +127,40 @@ struct Resume {
 }
 
 /// Upgrades `GET /events` connections to bidirectional event streams.
+///
+/// A request that carries an `Origin` header is refused unless the origin is
+/// allow-listed. A browser always sends one, so a page the operator visits
+/// cannot reach the loopback socket; a TUI sends none and is unaffected.
 async fn events_handler(
     State(state): State<Arc<AppState>>,
     Query(resume): Query<Resume>,
+    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    upgrade.on_upgrade(move |socket| handle_socket(socket, state, resume.from))
+    if !origin_allowed(&state, &headers) {
+        tracing::debug!("rejected a downstream connection from a foreign origin");
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    upgrade
+        .max_message_size(MAX_FRAME_BYTES)
+        .max_frame_size(MAX_FRAME_BYTES)
+        .on_upgrade(move |socket| handle_socket(socket, state, resume.from))
+}
+
+/// Whether a downstream request may proceed.
+///
+/// A missing `Origin` is not a browser and is allowed; a present one must be
+/// allow-listed by `--allow-origin`. A value that is not valid UTF-8 is refused
+/// rather than allowed, so the rule fails closed.
+fn origin_allowed(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> bool {
+    headers.get(header::ORIGIN).is_none_or(|value| {
+        value
+            .to_str()
+            .is_ok_and(|origin| state.allow_origins.iter().any(|allowed| allowed == origin))
+    })
 }
 
 /// Relays one client for the life of its connection.
@@ -108,6 +169,10 @@ async fn handle_socket(
     state: Arc<AppState>,
     from: Option<Seq>,
 ) {
+    if *state.shutdown.borrow() {
+        return;
+    }
+    let mut shutdown = state.shutdown.clone();
     let (mut sink, mut inbound) = socket.split();
     let mut upstream = match connect_upstream(&state, from).await {
         Ok(client) => client,
@@ -146,6 +211,11 @@ async fn handle_socket(
                         }
                     },
                     Some(Ok(Message::Close(_))) | None => return,
+                    Some(Ok(Message::Binary(_))) => {
+                        if !refuse(&mut sink, None, "binary frames are not accepted").await {
+                            return;
+                        }
+                    },
                     Some(Ok(_)) => {},
                     Some(Err(error)) => {
                         tracing::debug!(%error, "a downstream frame failed");
@@ -158,6 +228,14 @@ async fn handle_socket(
                     return;
                 };
                 if sink.send(verdict).await.is_err() {
+                    return;
+                }
+            },
+            changed = shutdown.changed() => {
+                // The graceful shutdown waits for every in-flight connection, so
+                // an open socket must end itself; otherwise the process never
+                // exits while a client is attached.
+                if changed.is_err() || *shutdown.borrow() {
                     return;
                 }
             },
@@ -182,6 +260,12 @@ async fn forward(
             return refuse(sink, None, &reason).await;
         },
     };
+    // Validate here rather than only at the daemon, so a malformed event is
+    // refused with its id attached instead of an uncorrelated daemon notice.
+    if let Err(error) = event.validate() {
+        let reason = format!("the event is not valid: {error}");
+        return refuse(sink, Some(&event.id), &reason).await;
+    }
     let Some(route) = route(&event.r#type, state.allow_approve) else {
         let reason = if state.allow_approve {
             "the event type is reserved and is not a permission decision"
@@ -196,13 +280,22 @@ async fn forward(
         route,
         reply: replies.clone(),
     };
-    state.uplink.send(request).await.is_ok()
+    match state.uplink.send(request).await {
+        Ok(()) => true,
+        Err(error) => {
+            // The publish task is gone; say so instead of closing silently.
+            let id = error.0.event.id;
+            refuse(sink, Some(&id), "the publish task is not running").await
+        },
+    }
 }
 
 /// Answers a frame the client server will not forward.
 ///
-/// `event_id` is `None` when the frame could not be parsed, so the client has no
-/// id to correlate with.
+/// The outcome is always `rejected`: the decision is local and terminal, so the
+/// client discards the id rather than resolving it from the log. `event_id` is
+/// `None` when the frame could not be parsed, so the client has no id to
+/// correlate with.
 async fn refuse(
     sink: &mut SplitSink<WebSocket, Message>,
     event_id: Option<&str>,
@@ -211,7 +304,7 @@ async fn refuse(
     let id = event_id.map_or(Value::Null, |id| Value::String(id.to_owned()));
     sink.send(notice(
         PUBLISH_FAILED,
-        json!({ "event_id": id, "error": error }),
+        json!({ "event_id": id, "outcome": "rejected", "error": error }),
     ))
     .await
     .is_ok()

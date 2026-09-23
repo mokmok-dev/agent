@@ -79,12 +79,16 @@ Step 2 of the design process, before the code:
 | Type | Data | When |
 | --- | --- | --- |
 | `client.publish_committed` | `event_id`, `seq` | the daemon committed the event |
-| `client.publish_failed` | `event_id`, `error` | refused locally, rejected, or unresolved |
+| `client.publish_failed` | `event_id`, `outcome`, `error` | refused locally (`rejected`), rejected by the daemon (`rejected`), or unresolved (`unknown`) |
 | `client.upstream_lost` | `error` | the daemon connection ended; the socket then closes |
 
 `event_id` is `null` in `client.publish_failed` when the frame could not be
-parsed, so the client has no id to correlate with. These are downstream-only
-transport notices in the same sense as `daemon.caught_up`; they are recorded in
+parsed, so the client has no id to correlate with. `outcome` separates the two
+cases the client must treat differently: `rejected` is terminal and the id is
+finished with, while `unknown` means the daemon was not reached or did not
+answer in time, so the event may still have committed and must be resolved from
+the log. These are downstream-only transport notices in the same sense as
+`daemon.caught_up`; they are recorded in
 [vocabulary](vocabulary.md#event-types).
 
 ## Connections
@@ -92,8 +96,8 @@ transport notices in the same sense as `daemon.caught_up`; they are recorded in
 - **One daemon read connection per downstream client**, opened with the client's
   own `?from=` unchanged. The daemon's replay and backpressure therefore serve
   each client directly and the client server buffers nothing. A connection is
-  retried with backoff (100 ms doubling to 5 s) for a bounded number of attempts,
-  so a client that arrives while the daemon is starting still connects.
+  retried a few times with backoff (100 ms doubling to 400 ms), so a client that
+  arrives while the daemon is starting still connects.
 - **One daemon connection per publish**, opened with the user or admin token and
   dropped after the verdict. This is deliberately not a shared long-lived
   connection: a connection that stays subscribed but is not read accumulates live
@@ -103,27 +107,41 @@ transport notices in the same sense as `daemon.caught_up`; they are recorded in
 
 ## Routing and access control
 
-`is_reserved_type` decides the route, and only the three decision families may
-cross to the authority connection:
+An uplink event is routed by `is_reserved_type`, and only the **nine decision
+types** may cross to the authority token — matched exactly, never by prefix:
 
 | Uplink event | Route |
 | --- | --- |
-| non-reserved (`agent.*`) | user connection (`read`, `publish`) |
-| `sandbox.permission.*`, `session.permission.*`, `session.egress.*` | authority connection (`admin.token`) |
-| any other reserved type (`error.*`, `daemon.*`, `session.started`, `sandbox.exec.completed`, …) | refused locally |
+| non-reserved (`agent.*`) | the user token (`read`, `publish`) |
+| `{sandbox,session}.permission.{granted,denied,cancelled}`, `session.egress.{granted,denied,cancelled}` | the `admin.token` (`authority`) |
+| everything else reserved — `error.*`, `daemon.*`, `session.*` lifecycle, `sandbox.exec.*`, and every `*.requested` | refused locally |
 
 A refusal is answered with `client.publish_failed` and the daemon is never
 contacted, so a downstream client cannot ask the client server to forge a
-reserved event. Approvals are additionally opt-in: without `--allow-approve`,
-every reserved type is refused.
+reserved event. The exact match matters for `*.requested`: a fabricated approval
+*request* is what an approver reads, so a prefix rule would let a client invent
+one. Approvals are additionally opt-in: without `--allow-approve`, every
+reserved type is refused.
 
-The downstream socket binds **loopback only**; a non-loopback `--bind` is a
-startup error. There is no downstream authentication in v1, so a network bind
-would expose publishing to anyone who can reach the port. A remote bind and its
-authentication are a later increment.
+The uplink event is validated locally before it is published, so a malformed one
+is refused with its id attached rather than surfacing as an uncorrelated daemon
+notice.
+
+The downstream socket binds **loopback only**. A non-loopback `--bind` is a
+startup error, and `bind` and `serve` refuse one too, so an embedder that never
+goes through the command line cannot bypass the rule. There is no downstream
+authentication in v1, so a network bind would expose publishing to anyone who
+can reach the port. A remote bind and its authentication are a later increment.
+
+A request that carries an `Origin` header is refused unless its origin is listed
+with `--allow-origin`. A browser always sends one and a TUI never does, so the
+default — no allowed origin — closes the cross-site WebSocket path from a page
+the operator visits, without touching a non-browser client. The value is refused
+rather than allowed when it cannot be read, so the rule fails closed.
 
 The `admin.token` is read only when approvals are enabled and never leaves the
-client server.
+client server. A configured path while approvals are off is ignored, with a
+warning.
 
 ## Retry and idempotency
 
@@ -134,18 +152,23 @@ restart. The UI must:
    pending alongside its own `?from=` checkpoint;
 2. on reconnect, replay from its checkpoint: an event whose `id` is pending means
    the prompt committed — clear it, do not resend;
-3. treat `client.publish_failed` as a definite rejection — discard the id;
+3. treat a `client.publish_failed` with `outcome: "rejected"` as terminal —
+   discard the id;
 4. a pending id not observed after `daemon.caught_up` was never committed —
-   resend with the **same** id.
+   resend with the **same** id. An `outcome: "unknown"` notice is exactly this
+   case: the publish may or may not have committed, so the id must be resolved
+   from the replay, never resent blindly under a new id.
 
 This is complete because the daemon validates but does not deduplicate the id,
 and every committed event returns on the client's own read connection. No
 `agentd-node` change is required.
 
-Within one run the client server also remembers each publish's terminal verdict
-by id, so a resend is answered from the reminder rather than appended twice even
-when the UI skips rule 2. That map does not survive a restart; rule 2 is what
-covers the restart.
+Within one run the client server also remembers each publish's **terminal**
+verdict by id, so a resend is answered from the remembered verdict rather than
+appended twice even when the UI skips rule 2. An unresolved publish is not
+remembered: answering a retry with a stale failure would block recovery after the
+daemon returns. That map does not survive a restart; rule 2 is what covers the
+restart.
 
 ## Placement
 
@@ -159,14 +182,21 @@ no build-infrastructure change (see
 
 ## Stated gaps
 
-- **The verdict map is unbounded.** It grows with the number of publishes in a
-  run. Prompts and decisions are human-rate, so this is small today; a bound is
-  a follow-up if the map ever matters.
+- **The verdict map is bounded, and that is deliberate.** The most recent 1024
+  terminal verdicts are remembered; past that, the oldest is evicted and a retry
+  of it is re-attempted. The bound is what keeps a client publishing at machine
+  rate from growing the map without limit.
 - **No downstream authentication, and loopback only.** Anything that can reach
   the loopback port can publish as the user, and approve when approvals are on.
+  The `Origin` gate closes the browser path; a local non-browser process is not
+  authenticated.
 - **`error.lagged` on a publish connection is read as a rejection.** The window
   is one round trip (connect to publish) and cannot overflow the daemon's
   1024-event subscriber buffer in practice, but it is not structurally excluded.
+- **A verdict can be dropped for a client that is behind.** The publish task
+  offers a verdict into a bounded per-client channel instead of waiting, so one
+  stuck client cannot stall the others; the client then resolves the id from its
+  own replay, per the retry rules.
 - **No UI.** v1 is the transport; the TUI/Web client is the next increment, and
   the retry rules above are its contract.
 
@@ -181,10 +211,18 @@ client server on a loopback port, and WebSocket clients:
 - a reserved type is refused without approvals and never appended;
 - a decision with approvals enabled reaches the log with the authority token's
   provenance;
-- a retried id is answered from the verdict map and appended only once.
+- a retried id is answered from the remembered verdict and appended only once;
+- an unresolved publish is reported as `unknown` and re-attempted on a resend,
+  rather than answered from a stale failure;
+- a malformed frame is answered with a null `event_id`, and an event that fails
+  local validation with its own id;
+- a browser `Origin` is refused unless `--allow-origin` lists it;
+- an absent daemon is reported as `client.upstream_lost`;
+- shutdown closes an open connection, so the graceful shutdown returns;
+- no client is served on a non-loopback address.
 
-`policy.rs` unit-tests the route table, and `relay.rs` also covers the
-non-loopback bind refusal.
+`policy.rs` unit-tests the route table, including that every decision is matched
+and that a `*.requested` is refused.
 
 ## Open questions
 
