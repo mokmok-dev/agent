@@ -6,7 +6,10 @@
 //! the public API against real files and a real sandbox, so the security
 //! properties (the agent can read its own token but not the daemon's others, and
 //! its shell tool cannot escape the workspace) are checked against the OS
-//! backends rather than only the policy shape.
+//! backends rather than only the policy shape. The `agentd-agent` binary the
+//! command names is a placeholder: what runs under the policy is the shell
+//! command each test supplies, so the file does not depend on another package's
+//! binary being built beside the test.
 //!
 //! The helpers use `expect` like the other integration tests; the workspace
 //! `allow-*-in-tests` clippy configuration does not see integration test files,
@@ -33,6 +36,7 @@ fn args(
     workdir: &Path,
     agent_token: &Path,
     session_db: &Path,
+    agent: &Path,
 ) -> UpArgs {
     UpArgs {
         workdir: workdir.to_path_buf(),
@@ -41,7 +45,7 @@ fn args(
         token_file: None,
         providers_config: None,
         agent_token_file: Some(agent_token.to_path_buf()),
-        agent: None,
+        agent: Some(agent.to_path_buf()),
         model: None,
         resume: false,
         session_id: String::from("test"),
@@ -49,6 +53,23 @@ fn args(
         session_max_restarts: 0,
         session_lifetime_secs: None,
     }
+}
+
+/// An executable placeholder for the `agentd-agent` binary.
+///
+/// These tests exercise the derivation — the policy and the command line — not
+/// the agent itself, so they must not depend on `agentd-agent` having been
+/// built beside the test binary: `cargo test` does not build another package's
+/// binaries. An explicit path keeps `UpPaths::resolve` from reaching for a real
+/// one.
+fn fake_agent(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let path = dir.join("agentd-agent");
+    std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("fake agent");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the fake agent is executable");
+    path
 }
 
 /// A workspace, a session directory, and a token file, wired into a `UpPaths`.
@@ -60,7 +81,8 @@ fn fixture(dir: &Path) -> UpPaths {
     let token = dir.join("agent.token");
     std::fs::write(&token, "agent-secret").expect("token");
 
-    UpPaths::resolve(&args(&workdir, &token, &session_db)).expect("layout should resolve")
+    UpPaths::resolve(&args(&workdir, &token, &session_db, &fake_agent(dir)))
+        .expect("layout should resolve")
 }
 
 /// A `UpPaths` whose daemon capability files sit beside the agent's token, so the
@@ -77,7 +99,7 @@ fn fixture_with_daemon_capabilities(dir: &Path) -> (UpPaths, PathBuf) {
     let admin_token = dir.join("admin.token");
     std::fs::write(&admin_token, "admin-secret").expect("admin token");
 
-    let mut args = args(&workdir, &agent_token, &session_db);
+    let mut args = args(&workdir, &agent_token, &session_db, &fake_agent(dir));
     args.token_file = Some(daemon_token.clone());
     (
         UpPaths::resolve(&args).expect("layout should resolve"),
@@ -246,6 +268,7 @@ fn a_missing_token_file_is_reported_before_anything_starts() {
         &workdir,
         &dir.path().join("absent.token"),
         &dir.path().join("session").join("agent.db"),
+        &fake_agent(dir.path()),
     ))
     .expect_err("a missing agent token must fail");
 
