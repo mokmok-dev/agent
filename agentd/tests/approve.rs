@@ -24,6 +24,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tokio::net::UnixListener;
 
 /// The token the approver reads with: read only.
@@ -51,9 +52,16 @@ fn tokens() -> TokenStore {
 /// A workspace binary from this crate's build output.
 ///
 /// A test runs from `target/<profile>/deps`, so the binary is two directories
-/// up. `cargo test --workspace` builds it; a narrower test run may not, which
-/// the assertion says rather than failing obscurely.
+/// up. It belongs to another package, and `cargo test` builds only the package
+/// under test, so the workspace binaries are built once per test process.
+///
+/// The build is unconditional: a target directory prepared by a
+/// dependency-only build (as the flake's checks do) already contains a file at
+/// this path, but it is a stub that exits without doing anything, so the file's
+/// existence cannot be trusted.
 fn binary(name: &str) -> PathBuf {
+    static BUILD: OnceLock<()> = OnceLock::new();
+    BUILD.get_or_init(build_workspace_binaries);
     let exe = std::env::current_exe().expect("the test's own path");
     let candidate = exe
         .parent()
@@ -62,10 +70,33 @@ fn binary(name: &str) -> PathBuf {
         .join(name);
     assert!(
         candidate.is_file(),
-        "{} is missing; build the workspace binaries first (cargo build --workspace)",
+        "{} is missing even after building the workspace binaries",
         candidate.display()
     );
     candidate
+}
+
+/// Builds every workspace binary, so a test can run one from another package.
+///
+/// `CARGO` is set by cargo for the tests it runs, so the child build uses the
+/// same toolchain and target directory as the test run. The profile is taken
+/// from the test binary's own path, because a release test needs a release
+/// binary in the directory [`binary`] resolves.
+fn build_workspace_binaries() {
+    let Ok(cargo) = std::env::var("CARGO") else {
+        return;
+    };
+    let release = std::env::current_exe().is_ok_and(|exe| {
+        exe.components()
+            .any(|part| part.as_os_str() == std::ffi::OsStr::new("release"))
+    });
+    let mut command = std::process::Command::new(cargo);
+    command.args(["build", "--workspace", "--bins"]);
+    if release {
+        command.arg("--release");
+    }
+    let status = command.status().expect("cargo should run");
+    assert!(status.success(), "building the workspace binaries failed");
 }
 
 /// Runs `agentd-approve` with `args` to completion.
@@ -85,6 +116,18 @@ fn succeeded(output: &Output) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The `request_id`s `agentd-approve pending` printed, in order.
+fn parse_pending(printed: &str) -> Vec<String> {
+    printed
+        .lines()
+        .filter_map(|line| {
+            line.split_whitespace()
+                .find_map(|field| field.strip_prefix("request_id="))
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 /// A live daemon, the log it serves, and the two token files it accepts.
@@ -135,17 +178,33 @@ impl Fixture {
         ]
     }
 
-    /// The request ids `agentd-approve pending` reports.
-    fn pending(&self) -> Vec<String> {
+    /// Asserts the approver lists exactly `expected`.
+    ///
+    /// A failure quotes what the approver printed, the binary it ran, and the
+    /// log it should have replayed, so the cause is visible without a rebuild.
+    fn assert_pending(
+        &self,
+        expected: &[&str],
+    ) {
         let output = approve(&[&["pending"][..], &self.connection()].concat());
-        succeeded(&output)
-            .lines()
-            .filter_map(|line| {
-                line.split_whitespace()
-                    .find_map(|field| field.strip_prefix("request_id="))
-                    .map(str::to_string)
-            })
-            .collect()
+        let printed = succeeded(&output);
+        let approver = binary("agentd-approve");
+        let logged = std::fs::read_to_string(&self.log_path).unwrap_or_default();
+        assert_eq!(
+            parse_pending(&printed),
+            expected
+                .iter()
+                .copied()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            "the approver printed {printed:?} (stderr {:?}) from {} ({} bytes); \
+             the log holds {} lines, first {:?}",
+            String::from_utf8_lossy(&output.stderr),
+            approver.display(),
+            std::fs::metadata(&approver).map_or(0, |meta| meta.len()),
+            logged.lines().count(),
+            logged.lines().next(),
+        );
     }
 
     /// The stdout of `agentd-approve decide` with `args`.
@@ -246,7 +305,7 @@ async fn the_approver_lists_pending_requests_and_answers_them() {
     }
 
     // The first launch: every unanswered request is reported, in log order.
-    assert_eq!(fixture.pending(), ["4", "5", "9"]);
+    fixture.assert_pending(&["4", "5", "9"]);
 
     // A session permission is granted by naming one of the options the agent
     // offered, and the decision is published with the authority token.
@@ -270,7 +329,7 @@ async fn the_approver_lists_pending_requests_and_answers_them() {
     assert_eq!(recorded[0]["subject"], "session:agent");
 
     // The second launch: the answered request is gone, the others remain.
-    assert_eq!(fixture.pending(), ["4", "9"]);
+    fixture.assert_pending(&["4", "9"]);
 
     // The two other kinds are answered under their own ids.
     let decided = fixture.decide(&fixture.authority_token, &["--request-id", "9", "--denied"]);
@@ -304,7 +363,7 @@ async fn the_approver_lists_pending_requests_and_answers_them() {
     ))
     .await
     .expect("publish a request");
-    assert_eq!(fixture.pending(), ["11"]);
+    fixture.assert_pending(&["11"]);
     let cancelled = fixture.decide(
         &fixture.authority_token,
         &["--request-id", "11", "--cancelled"],
@@ -318,7 +377,7 @@ async fn the_approver_lists_pending_requests_and_answers_them() {
     assert_eq!(recorded[0]["data"]["decision"], "cancelled");
 
     // Nothing awaits a decision any more.
-    assert!(fixture.pending().is_empty());
+    fixture.assert_pending(&[]);
 
     // The listing is not the decision: a read token cannot publish one, because
     // every request and decision type is reserved to an authority publisher.
@@ -353,7 +412,7 @@ async fn two_sessions_asking_under_one_request_id_are_told_apart() {
     ] {
         log.publish(event).await.expect("publish a request");
     }
-    assert_eq!(fixture.pending(), ["7", "7"]);
+    fixture.assert_pending(&["7", "7"]);
 
     // Answering the id alone would leave the other session waiting, so the
     // approver refuses rather than guessing.
@@ -385,5 +444,5 @@ async fn two_sessions_asking_under_one_request_id_are_told_apart() {
     let recorded = fixture.decisions("7");
     assert_eq!(recorded.len(), 1, "{recorded:?}");
     assert_eq!(recorded[0]["subject"], "session:second");
-    assert_eq!(fixture.pending(), ["7"], "the other session still waits");
+    fixture.assert_pending(&["7"]);
 }
