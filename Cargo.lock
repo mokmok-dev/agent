@@ -30,6 +30,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentd-client"
+version = "0.0.0"
+dependencies = [
+ "agentd",
+ "agentd-events",
+ "agentd-inference",
+ "agentd-node",
+ "agentd-telemetry",
+ "axum",
+ "clap",
+ "futures-util",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+]
+
+[[package]]
 name = "agentd-events"
 version = "0.0.0"
 dependencies = [

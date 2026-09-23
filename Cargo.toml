@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "agentd",
+  "agentd-client",
   "agentd-events",
   "agentd-inference",
   "agentd-node",
