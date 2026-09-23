@@ -92,8 +92,10 @@
               # of the running binary, so all three must land in the same
               # `bin/`. `agentd up` likewise runs `agentd-agent` as its confined
               # session, resolved as a sibling, so the node binaries ship too.
+              # `agentd-client` is the operator's out-of-process relay to a TUI
+              # or browser, so it ships beside them.
               # `agentd/sandbox` is what lets `agentd` supervise at all.
-              cargoBuildExtraArgs = "--bins --package agentd --package agentd-sandbox --package agentd-node --features agentd/sandbox";
+              cargoBuildExtraArgs = "--bins --package agentd --package agentd-client --package agentd-sandbox --package agentd-node --features agentd/sandbox";
               # The package is named `agent` (from `workspace.metadata.crane`)
               # while its entry binary is `agentd`, so `nix run` must be told
               # which program to execute: without this it assumes `bin/agent`.
