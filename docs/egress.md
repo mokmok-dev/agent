@@ -364,9 +364,12 @@ recording a cancellation); and the
 **Transport selection** is one decision in one place,
 `Proxy::start_for_policy`: a host that can give the child a private network
 namespace (`agentd_sandbox::bubblewrap_available`, i.e. a bubblewrap that
-resolves outside the policy's write roots) uses the Unix-socket form, and a host
-with no namespace at all (macOS Seatbelt) uses loopback TCP, which the profile
-grants by port. On Linux the second case fails closed rather than downgrading.
+resolves outside the policy's write roots and can actually build a namespace
+here — the probe runs it once, so a host that installs bubblewrap but forbids
+unprivileged user namespaces counts as having none) uses the Unix-socket form,
+and a host with no namespace at all (macOS Seatbelt) uses loopback TCP, which
+the profile grants by port. On Linux the second case fails closed rather than
+downgrading.
 The session manager and the ACP example both call it, so the loopback-TCP form is
 reachable in production and not only from tests.
 

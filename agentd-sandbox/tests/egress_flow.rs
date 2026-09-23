@@ -26,7 +26,7 @@ use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -68,6 +68,32 @@ fn bwrap() -> Option<PathBuf> {
     std::env::split_paths(&path)
         .map(|dir| dir.join("bwrap"))
         .find(|candidate| is_executable(candidate))
+}
+
+/// Whether this host lets `bwrap` build the namespace the executor requests,
+/// mirroring the executor's probe so the test checks that the two agree rather
+/// than restating the result.
+fn namespace_can_be_built(bwrap: &Path) -> bool {
+    Command::new(bwrap)
+        .args([
+            "--unshare-all",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--",
+            "/bin/sh",
+            "-c",
+            "true",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// A forwarder process killed when the guard drops, so a panic between spawn and
@@ -259,12 +285,17 @@ fn namespace_probe(port: u16) -> String {
 
 #[test]
 fn the_host_reports_whether_a_namespace_is_available() {
-    // The probe the transport choice is built on: it must agree with whether
-    // bubblewrap resolves outside the policy's write roots.
-    assert_eq!(
-        bubblewrap_available(&agentd_sandbox::FsPolicy::default()),
-        bwrap().is_some()
-    );
+    // The probe the transport choice is built on: it must agree with whether a
+    // trusted bubblewrap resolves *and* can build a namespace here. A host that
+    // installs bubblewrap but forbids unprivileged user namespaces reports
+    // `false`, so the executor falls back to Landlock instead of committing to
+    // a namespace it cannot build.
+    let host = agentd_sandbox::FsPolicy::default();
+    let Some(bwrap) = bwrap() else {
+        assert!(!bubblewrap_available(&host));
+        return;
+    };
+    assert_eq!(bubblewrap_available(&host), namespace_can_be_built(&bwrap),);
 }
 
 #[test]
@@ -291,10 +322,12 @@ fn a_bubblewrap_inside_a_write_root_is_not_a_private_namespace() {
         ..agentd_sandbox::FsPolicy::default()
     };
 
-    assert!(
-        bubblewrap_available(&agentd_sandbox::FsPolicy::default()),
-        "the host's own bubblewrap must count as a namespace"
-    );
+    if namespace_can_be_built(&real) {
+        assert!(
+            bubblewrap_available(&agentd_sandbox::FsPolicy::default()),
+            "the host's own working bubblewrap must count as a namespace"
+        );
+    }
     assert!(
         !bubblewrap_available(&policy),
         "a bubblewrap inside a write root must not count as a namespace"

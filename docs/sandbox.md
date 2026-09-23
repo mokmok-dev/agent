@@ -322,9 +322,15 @@ session. The daemon binary starts the manager when `--session-command` (with
 **bubblewrap is preferred over Landlock** because it gives a read-only host root,
 a private `/dev`, namespaces, and network isolation in one mechanism, whereas
 Landlock confines paths only and cannot subtract a nested denial. The binary is
-looked up on `PATH` and a `bwrap` inside a policy `write` root is rejected, so a
-repository cannot supply the very binary that builds the boundary. Reads are
-broad (the whole host root is bound read-only), matching macOS; write entries are
+looked up on `PATH`, a `bwrap` inside a policy `write` root is rejected, and it
+is only chosen when it can actually build a namespace on this host: the
+executor probes it once by running a throwaway `--unshare-all`, because a host
+that installs bubblewrap but forbids unprivileged user namespaces (a nested
+container, or a daemon under `no_new_privs`) would otherwise fail at spawn after
+a session was announced. A host without a working bubblewrap falls back to the
+Landlock helper instead. A repository cannot supply the very binary that builds
+the boundary. Reads are broad (the whole host root is bound read-only), matching
+macOS; write entries are
 bound read-write; an existing protected name (`.git`, `.agents`) inside a write
 root is re-bound read-only; a `deny` nested in a write root is masked after the
 binds, so a later mount overrides the earlier grant. Unlike macOS, that mask
@@ -337,7 +343,8 @@ host directory like any other: read-only through the broad read grant, readable
 unless a `deny` names it, and writable only through a `write` entry or the
 scratch directory a command gets as its `TMPDIR`.
 
-**When bubblewrap is absent**, the [`agentd-sandbox-helper`](#the-landlock-helper)
+**When bubblewrap is absent, or present but unable to build a namespace**, the
+[`agentd-sandbox-helper`](#the-landlock-helper)
 binary applies a Landlock allowlist and a seccomp deny-list before `exec`. The
 executor renders the policy into the path allowlist (system roots read-execute,
 read entries read-only, write roots read-write), writes it to the scratch
@@ -498,8 +505,10 @@ Modeled on Sheena's methodology and codex's, adapted to Rust:
   a timeout killing the process group; the Landlock spec, and a real Landlock
   process that confines the filesystem, refuses a denied read, denies TCP, and
   reports seccomp active through `/proc/self/status`; and that a nested `deny`
-  rejects the Landlock fallback. The Nix build sandbox
-  cannot nest bubblewrap, so those spawn tests skip there as on macOS.
+  rejects the Landlock fallback. A host whose bubblewrap cannot build a
+  namespace (the Nix build sandbox, or a container that forbids unprivileged
+  user namespaces) skips those spawn tests, because the probe the executor uses
+  would not select bubblewrap there either.
 - **Differential tests**: golden files recorded from real bash + coreutils for
   layer 1 behavior, replayed in CI without the recorded host.
 - **Benchmarks**: sandbox construction, trivial `exec` overhead, parallel

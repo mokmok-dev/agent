@@ -22,6 +22,7 @@
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::error::SandboxError;
@@ -64,26 +65,73 @@ const SYSTEM_ROOTS: &[&str] = &[
     "/run/current-system",
 ];
 
-/// Whether bubblewrap is installed and trusted, so a private network namespace
-/// can be requested.
+/// Whether bubblewrap is installed, trusted, and able to build a namespace
+/// here, so a private network namespace can be requested.
 ///
 /// The egress model depends on it: a namespace gives the child a real boundary
 /// (loopback and no IP route) and lets a Unix-socket proxy cross it, which is
 /// what the proxy transport is chosen from (see `docs/egress.md`). True when
-/// bubblewrap is `PATH`-resolvable and trusted; a repository cannot supply the
-/// binary that builds the boundary, so this applies the same write-root rule as
-/// the executor. Taking the policy is what keeps the two probes from disagreeing:
-/// a `bwrap` inside a write root is unusable here *and* rejected by
-/// [`select_backend`], so the transport choice cannot pick a namespace the
-/// executor then refuses.
+/// bubblewrap is `PATH`-resolvable, trusted, and [`bubblewrap_runs`]; a
+/// repository cannot supply the binary that builds the boundary, so this
+/// applies the same write-root rule as the executor. Taking the policy is what
+/// keeps the two probes from disagreeing: a `bwrap` inside a write root is
+/// unusable here *and* rejected by [`select_backend`], so the transport choice
+/// cannot pick a namespace the executor then refuses.
 ///
-/// This is a *presence* probe, not a capability test: it does not try to build a
-/// namespace, so a host that has bubblewrap but forbids unprivileged user
-/// namespaces still reports `true`, and the failure surfaces when the command
-/// runs. Probing for real would mean executing `bwrap` on every construction.
+/// Capability, not presence: a host that installs bubblewrap but forbids
+/// unprivileged user namespaces (a nested container, or a daemon under
+/// `no_new_privs`) reports `false`, so the executor falls back to Landlock
+/// instead of committing to a namespace it cannot build. The probe runs once
+/// per process.
 #[must_use]
 pub fn bubblewrap_available(fs_policy: &FsPolicy) -> bool {
-    find_on_path(BWRAP, Some(fs_policy)).is_some()
+    find_bubblewrap(fs_policy).is_some()
+}
+
+/// The bubblewrap binary to use: `PATH`-resolvable, trusted, and able to build
+/// a namespace on this host.
+fn find_bubblewrap(fs_policy: &FsPolicy) -> Option<PathBuf> {
+    let bwrap = find_on_path(BWRAP, Some(fs_policy))?;
+    bubblewrap_runs(&bwrap).then_some(bwrap)
+}
+
+/// Whether `bwrap` can actually build the namespace the executor renders.
+///
+/// Presence is not capability. A host may install bubblewrap yet deny the
+/// unprivileged user namespace it needs — a container, or a daemon whose
+/// parent set `no_new_privs` — and then every spawn fails at `setting up uid
+/// map`, after the session manager has already announced a session. Since the
+/// executor always requests `--unshare-all` and the egress transport depends on
+/// the same namespace, the answer is probed here once, by building a throwaway
+/// namespace, and cached for the life of the process; it cannot change while
+/// the process lives.
+///
+/// `/bin/sh` is resolved inside the bind-mounted host root; a host without one
+/// is reported unusable, which merely selects the Landlock fallback.
+fn bubblewrap_runs(bwrap: &Path) -> bool {
+    static RUNS: OnceLock<bool> = OnceLock::new();
+    *RUNS.get_or_init(|| {
+        std::process::Command::new(bwrap)
+            .args([
+                "--unshare-all",
+                "--ro-bind",
+                "/",
+                "/",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--",
+                "/bin/sh",
+                "-c",
+                "true",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    })
 }
 
 /// Character devices a command commonly needs, granted read-write.
@@ -479,12 +527,13 @@ fn select_backend(
             let private_namespace =
                 (policy.network.loopback && policy.network.proxy.is_none()) || unix_proxy;
             if private_namespace {
-                return find_on_path(BWRAP, Some(&policy.fs))
+                return find_bubblewrap(&policy.fs)
                     .map(Backend::Bubblewrap)
                     .ok_or_else(|| {
                         SandboxError::InvalidPolicy(String::from(
-                            "the policy needs a private network namespace, which requires \
-                             bubblewrap; bubblewrap is unavailable",
+                            "the policy needs a private network namespace, which requires a \
+                             bubblewrap that can build one; bubblewrap is unavailable or \
+                             cannot create a namespace on this host",
                         ))
                     });
             }
@@ -499,7 +548,7 @@ fn select_backend(
                 })?;
                 return landlock_backend(policy, &helper, resolved, scratch, shell);
             }
-            if let Some(bwrap) = find_on_path(BWRAP, Some(&policy.fs)) {
+            if let Some(bwrap) = find_bubblewrap(&policy.fs) {
                 return Ok(Backend::Bubblewrap(bwrap));
             }
             let helper = find_helper(&policy.fs)?;
@@ -966,7 +1015,7 @@ fn resolve_entries(
 
 #[cfg(test)]
 mod tests {
-    use super::{BWRAP, Backend, ConfinedProcessExecutor, find_on_path};
+    use super::{BWRAP, Backend, ConfinedProcessExecutor, bubblewrap_runs, find_on_path};
     use crate::executor::Executor;
     use crate::helper::{PathAccess, Spec};
     use crate::policy::{
@@ -1014,18 +1063,13 @@ mod tests {
 
     /// Whether bubblewrap can actually build a namespace here. The Nix build
     /// sandbox (and an unprivileged host with user namespaces disabled) cannot,
-    /// so the spawn tests skip rather than fail there.
+    /// so the spawn tests skip rather than fail there. This is the executor's
+    /// own capability probe, so a test cannot run where the backend would not.
     fn spawn_tests_supported() -> bool {
         if std::env::var_os("NIX_BUILD_TOP").is_some() {
             return false;
         }
-        let Some(bwrap) = find_on_path(BWRAP, None) else {
-            return false;
-        };
-        std::process::Command::new(bwrap)
-            .args(["--ro-bind", "/", "/", "--", "/bin/true"])
-            .status()
-            .is_ok_and(|status| status.success())
+        find_on_path(BWRAP, None).is_some_and(|bwrap| bubblewrap_runs(&bwrap))
     }
 
     /// A Landlock executor, or `None` when the helper cannot confine here.
