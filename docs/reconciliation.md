@@ -76,7 +76,7 @@ These are not simple gaps; each conflicts with a deliberate decision.
 | ACID and reversible state | **Reject OverlayFS, adopt a patcher** | OverlayFS contradicts the deleted VFS layer (`docs/sandbox.md`, "What was deleted"); the unified-diff patcher with inverse application was built instead (`agentd-node/src/patch.rs`). |
 | Zero-dependency plugin DX | **Reject the engine as specified** | Extensions are out-of-process by design (`docs/architecture.md`, "Extension model") and `Bridge` already covers stdio JSON-RPC tools. |
 | Observability and HitL | **Adopted** | `traceparent` propagation and OTLP export are implemented (`docs/telemetry.md`); the approval wait is bounded (`--session-permission-approval-secs`) and the operator has a client (`agentd-approve`). |
-| One-command dev experience | **Already met; reframe** | `agentd up` is the one command. `process-compose` is deferred until a second resident component exists. |
+| One-command dev experience | **Already met; reframe** | `agentd up` is the one command. `agentd-client` is opt-in and is the second resident component `process-compose` was deferred for (see [client-server](client-server.md)); adopting the orchestrator for that pair is the open decision, not a gap. |
 | `PROCESS_PAUSED` | **Reframe** | A child awaiting approval is blocked on a socket or stdio read and consumes no CPU, so a freeze buys nothing; what matters is that the wait always ends. |
 
 ## Rejected requirements
@@ -93,9 +93,10 @@ These are recorded so they are not re-proposed as gaps.
 | Generic in-process plugin engine | Extensions are out-of-process by design (`docs/architecture.md`, "Extension model"). |
 | `PROCESS_PAUSED` as `SIGSTOP` | The wait is already idle, so a freeze only adds signal races against the lifetime kill, the restart budget, and the timeout. |
 | "A partial restart must preserve session state" | A daemon restart *cannot* re-adopt a child it did not spawn (the manager's startup reconciliation, `agentd/src/session.rs`), so this reading is unsatisfiable. The satisfiable reading — restart a child while the daemon and the log live on — is the restart budget, which exists. |
-| `process-compose` for a single-process daemon | **Deferred, not rejected**: there is no second resident component to orchestrate. Revisit when one exists. |
+| `process-compose` for a single-process daemon | **Deferred, not rejected**: `agentd` alone needs no orchestrator. The client server (`agentd-client`) is a second resident component, so the trigger is met; whether one command for the pair is worth the tool is still open. |
 
 ## Open question
 
-- What concrete trigger ends the `process-compose` deferral — a second resident
-  component, a second plugin, or a second host platform?
+- Whether `agentd` and `agentd-client` as two resident components justify
+  `process-compose` now that the stated trigger — a second resident component —
+  is met, or whether a supervisor is a later answer to a different problem.

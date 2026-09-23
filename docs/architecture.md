@@ -52,6 +52,7 @@ flowchart LR
 | JSONL log          | `agentd-events` | Append-only source of truth; one CloudEvents envelope per line, position = one-based line number (`Seq`).          |
 | Projections        | `agentd-events` | Read models derived from the log, resuming from an `applied_seq` checkpoint (`agentd_events::projection`).          |
 | Node               | `agentd-node`   | Long-lived client that consumes `/events` and keeps a SQLite projection current (see [node](node.md)).               |
+| Client server      | `agentd-client` | Out-of-process actor that relays the event API to a TUI or browser over a loopback WebSocket, holding no state of its own (see [client-server](client-server.md)). |
 | Inference endpoint | `agentd`        | Model gateway on the same Unix socket, behind the `infer` claim; streams transient deltas that are never logged (see [inference](inference.md)). |
 | `Provider`         | `agentd-inference` | Provider-neutral completion trait; the daemon ships a deterministic `FakeProvider`.                              |
 | Agent node         | `agentd-node`   | Node specialization that runs the agent loop: reacts to `agent.inbox`, infers, runs the shell tool, publishes (see [inference](inference.md)). |
@@ -340,6 +341,11 @@ The current structure follows these rules:
   node-side client; the real provider adapters sit behind its optional
   `providers` feature, so the daemon — which owns the credentials — is the only
   crate that pulls an HTTP client.
+- `agentd-client` is the out-of-process actor that relays the event API to a
+  client which cannot reach the Unix socket (a TUI, a browser). It is stateless
+  and is not an extension in the sense above: it holds a token and publishes on
+  a client's behalf, where an extension holds its own (see
+  [client-server](client-server.md)).
 - First-class crates document their deviations from their design docs next to
   the code that embodies them, so a reader never has to reconcile two sources of
   truth from memory.

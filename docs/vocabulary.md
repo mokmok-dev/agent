@@ -120,6 +120,9 @@ Two kinds of name sit outside the rule, and neither may be extended casually:
 
 - **Notices** — `error.*` and `daemon.*` are transient wire messages, not
   recorded events, and name a condition (`error.lagged`) rather than a verb.
+  `client.*` is the same kind of thing on the client server's downstream socket
+  (`client.publish_committed`, `client.publish_failed`,
+  `client.upstream_lost`): it never reaches the log and is not a daemon notice.
 - **Noun-only types** — `agent.inbox`, `agent.message`, `agent.tool_result`,
   `agent.patch.applied`, `session.status`, and `sandbox.violation.*` name what
   the event *is*; there is one event per thing, so no verb is needed.
