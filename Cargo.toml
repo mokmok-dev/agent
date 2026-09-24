@@ -42,7 +42,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151" }
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 thiserror = { version = "2.0.20" }
 time = { version = "0.3.55", features = ["formatting", "parsing"] }
 tokio = { version = "1.53.1" }
