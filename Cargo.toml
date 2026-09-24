@@ -19,7 +19,7 @@ agentd-telemetry = { path = "agentd-telemetry" }
 async-stream = "0.3"
 async-trait = "0.1.89"
 axum = { version = "0.8.9" }
-base64 = "0.22"
+base64 = "0.23"
 clap = { version = "4.6.6" }
 futures-util = { version = "0.3.34", features = ["sink"] }
 opentelemetry = "0.32"
