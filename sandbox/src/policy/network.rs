@@ -67,6 +67,20 @@ impl HostPort {
             port,
         }
     }
+
+    /// Whether this rule names exactly `host` and `port`.
+    ///
+    /// The host is compared case-insensitively; the port exactly. A rule never
+    /// matches more than its own `host:port`, so a shared prefix or a different
+    /// port is a different destination.
+    #[must_use]
+    pub fn matches(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> bool {
+        self.port == port && self.host.eq_ignore_ascii_case(host)
+    }
 }
 
 impl NetworkPolicy {

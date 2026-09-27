@@ -202,7 +202,6 @@ A command inside a private namespace has no IP route, so it cannot reach a proxy
 on the host's loopback. The **forwarder** (`egress-forward`) listens on loopback
 inside the namespace and pipes every connection to the mounted socket, so the
 command's `HTTP_PROXY` can point at `127.0.0.1` as usual.
-
 It is deliberately **dumb**: it knows exactly one destination (the socket) and
 carries no allowlist or decision. The proxy on the other end of the socket is
 the trust boundary. It never parses the payload beyond copying bytes, so the

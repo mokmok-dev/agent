@@ -49,6 +49,14 @@ The allowlist is a set of destination rules the proxy owns per sandboxed
 process. A rule is added or revoked by publishing a control event on the
 [event bus](../event-bus/README.md); the proxy subscribes and applies it.
 
+The allowlist is implemented as `egress::Allowlist`: one `Mutex` guards both the
+rules and the registry of currently-open tunnels, so a revoke removes the rule and
+closes the tunnels it granted in one critical section. The closers are invoked
+**after** the guard is released, so a closer cannot deadlock against the
+allowlist; a poisoned lock denies. The pure decision logic and the revoke policy
+are unit-tested with counter closers, and the proxy integration test drives a real
+tunnel.
+
 | Direction | Event | Payload | Effect |
 | --- | --- | --- | --- |
 | add | `agent.sandbox.egress.rule_added` | `host`, `port` | Subsequent connections to that destination are allowed. |
