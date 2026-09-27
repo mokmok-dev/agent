@@ -227,7 +227,24 @@ impl Bus {
         Ok(())
     }
 
+    /// Remove a subscriber, for example when its connection closes.
+    ///
+    /// Returns whether a subscriber with that identity was registered.
+    pub fn unsubscribe(
+        &mut self,
+        uid: u32,
+        subscriber_id: &str,
+    ) -> bool {
+        self.broker
+            .unsubscribe(&Self::broker_id(&CursorKey::new(uid, subscriber_id)))
+    }
+
     /// Replay committed envelopes from `from_seq`, in sequence order.
+    ///
+    /// The returned iterator is owned: it does not borrow the bus, so a caller
+    /// can hold it while another task publishes. New records appended during a
+    /// replay are not seen by that replay; a subscriber receives them live from
+    /// its [`Subscription`] instead.
     ///
     /// # Errors
     ///
@@ -236,7 +253,7 @@ impl Bus {
     pub fn replay(
         &self,
         from_seq: u64,
-    ) -> Result<impl Iterator<Item = Result<Event, BusError>>, BusError> {
+    ) -> Result<impl Iterator<Item = Result<Event, BusError>> + use<>, BusError> {
         let records = self.store.replay(from_seq)?;
         Ok(records.map(|record| {
             let record = record?;

@@ -31,12 +31,12 @@ use tokio_tungstenite::tungstenite::handshake::server::{
     Callback, ErrorResponse, Request, Response,
 };
 use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode, header};
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 mod allowlist;
 
 pub use allowlist::{Allowlist, PeerCredential};
 pub use tokio_tungstenite::tungstenite::Message;
+pub use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 /// The WebSocket subprotocol this build speaks.
 pub const SUBPROTOCOL: &str = "agent.eventbus.v1";

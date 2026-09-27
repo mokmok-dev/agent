@@ -36,8 +36,14 @@ Control messages, client to server:
 | `type` | Fields | Meaning |
 | --- | --- | --- |
 | `publish` | `id`, `event` (a CloudEvent), optional `idempotency_key` | Append the event to the log. |
-| `subscribe` | `from_seq` (integer), optional `filter` | Begin delivery at `from_seq` (or the stored cursor if greater). |
+| `subscribe` | `subscriber_id` (string), `from_seq` (integer), optional `filter` | Begin delivery at `from_seq` (or the stored cursor if greater). |
 | `ack` | `cursor` (integer) | Durably record delivery progress. |
+
+The `subscriber_id` on `subscribe` is the stable identity the durable cursor is
+keyed on, namespaced by peer UID (see
+[delivery.md](./delivery.md#durable-cursor)). It is where a client declares who
+it is; a later `ack` on the same connection refers to it. An earlier draft of
+this table omitted it, which left the cursor with nothing to key on.
 
 Control messages, server to client:
 
@@ -79,7 +85,7 @@ Server commits and replies:
 Client subscribes:
 
 ```json
-{"type":"subscribe","from_seq":1000}
+{"type":"subscribe","subscriber_id":"audit-log","from_seq":1000}
 ```
 
 Server replays and streams events, then live events:
