@@ -49,7 +49,7 @@ pub use approval::{
     await_outcome, consult,
 };
 pub use destinations::DestinationSet;
-pub use env::{NO_PROXY, inject_proxy_env};
+pub use env::{NO_PROXY, inject_proxy_env, inject_proxy_env_for_config};
 pub use forwarder::{ForwardConfig, ForwardError, Forwarder};
 pub use request::{Connect, ParseError};
 pub use transport::{HostCapability, TransportError, select_transport};
