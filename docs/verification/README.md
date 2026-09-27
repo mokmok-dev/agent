@@ -96,9 +96,12 @@ Handling survivors:
 ### Gotchas
 
 - A `#[cfg(kani)]` harness is not compiled by `cargo test`, so a mutant inside
-  one always survives. `.cargo/mutants.toml` excludes `proofs::`; harness
-  strength is checked by the harness-mutation derivations in `flake.nix`
+  one always survives. `.cargo/mutants.toml` excludes `src/wal/proofs.rs`;
+  harness strength is checked by the harness-mutation derivations in `flake.nix`
   instead.
+- The two `recover_from` loop guards only run once, from `position == 0`, so
+  `<` → `<=` is unobservable there. `.cargo/mutants.toml` records that
+  equivalence as an exclusion.
 - Mutants in code excluded by a `#[cfg(feature = "...")]` also survive, because
   it does not compile under the measured build.
 - cargo-mutants tests only the mutated package by default. A library function
@@ -115,11 +118,17 @@ fail instead of passing quietly.
 
 | File | Injected mutation | Harness that must fail |
 | --- | --- | --- |
-| `src/wal/scan.rs` | `len > remaining` becomes `len >= remaining` | `a_single_genesis_record_recovers_cleanly` |
+| `src/wal/scan.rs` | `len > remaining` becomes `len >= remaining` | `a_single_record_recovers_cleanly` |
 
 The mutation makes an exactly-fitting final record look torn, which the harness
 that recovers a single whole record catches. Reproduce locally by applying the
 same edit and running `nix develop -c cargo kani --lib --harness <name>`.
+
+Note that Kani does not run `blake3`: the crate reaches `cpuid` inline assembly
+for runtime CPU feature detection, which Kani cannot model. The frame harnesses
+therefore pass a fixed starting hash to `recover_from` instead of calling
+`genesis_hash`, and the Kani crate list is confined to `src/wal`. Do not add a
+harness that hashes unless the hashing crate stops emitting that asm.
 
 ## CI Policy
 
