@@ -16,10 +16,15 @@ serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
+tokio-tungstenite.workspace = true
 ulid.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# The runtime and macros are test-only: the transport's `accept` is async, so
+# its tests drive it on a runtime, but the library itself never spawns one.
+# `time` lets a test bound an `accept` so a regression fails instead of hanging.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true
