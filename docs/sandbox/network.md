@@ -208,8 +208,10 @@ the trust boundary. It never parses the payload beyond copying bytes, so the
 decision cannot be bypassed by confusing the forwarder.
 
 The forwarder binary itself is `sandbox/bins/egress-forward.rs`; it binds and
-bridges, and does nothing else. **Starting it alongside the command inside the
-namespace is the supervisor's job** (milestone 6, long-lived processes): the
+bridges, and does nothing else. The bubblewrap renderer mounts the proxy's socket
+into the command's namespace (`--dir` the parent, then bind the socket
+read-write, which `connect` requires). **Starting the forwarder alongside the
+command inside the namespace is the supervisor's job** (milestone 6b): the
 supervisor is what runs both the forwarder and the command in one namespace and
 waits for them, so the forwarder stays a pure bridge rather than growing a
 process launcher. Until then the forwarder is proven on the host, over a real
