@@ -4,23 +4,28 @@
 //! A torn trailing record is reported as truncation to the caller rather than a
 //! failure, matching `docs/event-bus/wal.md`'s crash-recovery rule.
 
-use std::env;
 use std::fs;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use agent::wal::{Error, recover};
+use clap::Parser;
+
+/// Verify a WAL file's record framing, `crc32c`, and BLAKE3 hash chain.
+#[derive(Debug, Parser)]
+#[command(name = "verify", version, about)]
+struct Cli {
+    /// The log file to verify.
+    log: PathBuf,
+}
 
 fn main() -> ExitCode {
-    let mut args = env::args().skip(1);
-    let (Some(path), None) = (args.next(), args.next()) else {
-        eprintln!("usage: verify <log-file>");
-        return ExitCode::FAILURE;
-    };
+    let cli = Cli::parse();
 
-    let bytes = match fs::read(&path) {
+    let bytes = match fs::read(&cli.log) {
         Ok(bytes) => bytes,
         Err(error) => {
-            eprintln!("verify: cannot read {path}: {error}");
+            eprintln!("verify: cannot read {}: {error}", cli.log.display());
             return ExitCode::FAILURE;
         },
     };

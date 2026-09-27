@@ -7,6 +7,7 @@ resolver = "3"
 # Kani's compiler cannot model (runtime CPU feature detection) or link.
 # Revisit if the hashing cost matters.
 blake3 = { version = "1.8.2", default-features = false, features = ["pure"] }
+clap = { version = "4.6.6", features = ["derive"] }
 proptest = "1.11.0"
 thiserror = "2.0.20"
 

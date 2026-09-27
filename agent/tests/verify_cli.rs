@@ -68,7 +68,7 @@ fn the_verify_binary_rejects_a_missing_argument() {
     let output = Command::new(env!("CARGO_BIN_EXE_verify")).output().unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("usage"), "stderr was: {stderr}");
+    assert!(stderr.contains("Usage"), "stderr was: {stderr}");
 }
 
 #[test]
