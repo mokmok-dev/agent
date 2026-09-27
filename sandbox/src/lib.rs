@@ -51,6 +51,7 @@
 //! # Ok::<(), sandbox::policy::InvalidPolicy>(())
 //! ```
 
+pub mod egress;
 pub mod events;
 pub mod executor;
 pub mod filesystem;

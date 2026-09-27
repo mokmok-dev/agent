@@ -42,8 +42,9 @@ fan-out broker in `agent/src/broker.rs`, the UDS/WebSocket transport in
 durable cursor store in `agent/src/cursor.rs`, the wired state machine in
 `agent/src/bus.rs`, the authority claim in `agent/src/authority.rs`, the
 async connection loop in `agent/src/server.rs`, the sandbox policy core in
-`sandbox/src/policy/`, and the sandbox filesystem layer in
-`sandbox/src/filesystem.rs` and `sandbox/src/executor.rs`:
+`sandbox/src/policy/`, the sandbox filesystem layer in
+`sandbox/src/filesystem.rs` and `sandbox/src/executor.rs`, and the sandbox
+egress proxy in `sandbox/src/egress/`:
 
 | Module | Property |
 | --- | --- |
@@ -69,14 +70,19 @@ async connection loop in `agent/src/server.rs`, the sandbox policy core in
 | `filesystem` | Backend detection is by capability: a `bwrap` that cannot build a namespace is not selected, a `bwrap` inside a write root is refused, and an empty `PATH` selects nothing. |
 | `executor` | The scratch directory is created and removed with its guard. Over a real `bwrap`: a write inside a write root reaches the host; a write outside, a `../` traversal, and a symlink out of the root are all `Read-only file system`; a `deny`d file is unreadable; an existing protected name is read-only; the host environment is scrubbed; the output is capped at the policy limit; and a timed-out command is killed with its process group, leaving no marker. |
 | `events` | The classifier recognises the kernel's exact denial messages: `Read-only file system` is a filesystem violation naming the path, `Permission denied` and `Operation not permitted` likewise, and `Network is unreachable` / `No route to host` a network violation with no path. An unrelated non-zero exit yields none; distinct denials are kept and repeats collapse. `exec.completed` carries the exit code, duration, output sizes, and timeout flag; a violation carries the reason, the path, and a bounded output snippet; the `traceparent` reaches every event. |
+| `egress::destinations` | Match is exact on `host:port`: the host case-insensitively, the port exactly; the empty set permits nothing; a shared prefix and a different port are not matches. |
+| `egress::request` | The `CONNECT` head parses for a plain, bare-LF, IPv6-bracketed, and header-bearing request; the head length excludes tunnelled bytes; an oversized, incomplete, non-`CONNECT`, malformed, non-UTF-8, portless, zero-port, or headerless request is rejected with the right error. |
+| `egress` | Over a real socket: a permitted destination tunnels bytes end to end; a missing or wrong token is `407` without revealing the allowlist; an unlisted destination is `403` and an empty set forbids all; a malformed head is `400` and a failed upstream `502`; the socket is created `0600` and removed on drop. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
 hold the reference-model proptests; `agent/tests/verify_cli.rs` and
 `agent/tests/agent_cli.rs` drive the binaries end to end;
-`sandbox/tests/policy.rs` holds the policy precedence proptests; and
-`sandbox/tests/executor.rs` and `sandbox/tests/events.rs` spawn a real confined
-command through bubblewrap, skipping when the host cannot build a namespace (the
-condition under which the daemon refuses to spawn). The `test` flake check puts
+`sandbox/tests/policy.rs` holds the policy precedence proptests;
+`sandbox/tests/egress.rs` drives the proxy over a real socket with a throwaway
+TCP upstream, so it needs no confinement; and `sandbox/tests/executor.rs` and
+`sandbox/tests/events.rs` spawn a real confined command through bubblewrap,
+skipping when the host cannot build a namespace (the condition under which the
+daemon refuses to spawn). The `test` flake check puts
 `bubblewrap` on `PATH` so those spawn tests run in CI. A GitHub Actions runner
 forbids unprivileged user namespaces, so the *spawn* tests skip there even with
 bubblewrap present; any logic they would cover has a unit test with a plain
