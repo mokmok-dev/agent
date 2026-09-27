@@ -36,8 +36,9 @@ uninspected. Do not compare them on one metric.
 ## Current Scope
 
 The implemented subsystems are the WAL record frame and store in `agent/src/wal/`,
-the `CloudEvents` envelope in `agent/src/cloudevent.rs`, and the fan-out broker
-in `agent/src/broker.rs`:
+the `CloudEvents` envelope in `agent/src/cloudevent.rs`, the fan-out broker in
+`agent/src/broker.rs`, and the UDS/WebSocket transport in
+`agent/src/transport.rs`:
 
 | Module | Property |
 | --- | --- |
@@ -48,6 +49,8 @@ in `agent/src/broker.rs`:
 | `store` | A reopen reproduces the written payloads and head; rotation preserves the chain across segments; only a torn final segment is truncated; `verify_dir` reports the first failure. |
 | `cloudevent` | The `CloudEvents` envelope round-trips; the bus-owned attributes are assigned at commit and a producer-set `source`/`sequence` is rejected; the fixed-width `sequence` encoding preserves numeric order. |
 | `broker` | Fan-out reaches every subscriber in order and never blocks; a full queue evicts the slow subscriber with `SlowConsumer`; a dropped or replaced receiver is reaped on the next publish. |
+| `transport::allowlist` | A credential is permitted when its UID or its GID is listed; an empty allowlist permits nobody. |
+| `transport` | Binding creates a `0700` directory and `0600` socket; a live socket is not stolen but a stale one is reclaimed; the `agent.eventbus.v1` subprotocol is negotiated and an unsupported one is refused; the peer credential is captured. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
 hold the reference-model proptests; `agent/src/wal/proofs.rs` holds the Kani
