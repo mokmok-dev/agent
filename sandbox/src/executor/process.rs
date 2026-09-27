@@ -7,32 +7,19 @@
 //! [`Process`], and the lifecycle events are `process.started` and
 //! `process.exited` (see [`crate::events`]).
 //!
-//! The confinement is the same [`Backend`] the one-shot executor uses, so a
-//! long-lived process runs under exactly the same kernel policy. Its children
-//! inherit that policy, and a kill reaches the whole tree: the backend runs the
-//! command as its PID namespace's init, so a `SIGKILL` to it brings down every
-//! descendant.
+//! The confinement is the same [`Backend`] the one-shot executor uses, and the same
+//! [`ExecRequest`], so a long-lived process is launched identically — including the
+//! egress supervisor when one is granted. Its children inherit the policy, and a
+//! kill reaches the whole tree: the backend runs the command as its PID
+//! namespace's init, so a `SIGKILL` to it brings down every descendant.
 
-use std::ffi::OsString;
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus};
 use std::time::{Duration, Instant};
 
 use crate::filesystem::Backend;
-use crate::policy::Policy;
 
-use super::ExecError;
-
-/// What to spawn as a long-lived process.
-#[derive(Debug, Clone)]
-pub struct ProcessRequest {
-    /// The program to run, as resolved by the backend inside the sandbox.
-    pub program: OsString,
-    /// The program's arguments.
-    pub args: Vec<OsString>,
-    /// The confinement policy.
-    pub policy: Policy,
-}
+use super::{ExecError, ExecRequest, Output, start_confined};
 
 /// The terminal state of a long-lived process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +51,10 @@ pub struct Process {
 impl Process {
     /// Spawn `request` under `backend`.
     ///
+    /// The request is the same [`ExecRequest`] a one-shot command uses, so a
+    /// long-lived process with an egress grant is launched through the same
+    /// supervisor and proxy injection.
+    ///
     /// # Errors
     ///
     /// Returns [`ExecError::NoBackend`] when `backend` cannot confine a command,
@@ -71,28 +62,11 @@ impl Process {
     /// [`ExecError::Spawn`] when the backend cannot be started.
     pub fn spawn(
         backend: &Backend,
-        request: &ProcessRequest,
+        request: &ExecRequest,
         scratch: &Path,
     ) -> Result<Self, ExecError> {
-        let (program, args) = match (backend, backend.render(&request.policy, scratch)?) {
-            (Backend::Bubblewrap { program }, Some(args)) => (program.clone(), args),
-            // An unsupported backend renders nothing; running is refused.
-            _ => return Err(ExecError::NoBackend),
-        };
-
-        let child = Command::new(program)
-            .args(args)
-            .arg("--")
-            .arg(&request.program)
-            .args(&request.args)
-            // The backend sets the confined environment from the policy; its own
-            // environment is cleared too, so no host variable reaches the command.
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(ExecError::Spawn)?;
+        let request = super::with_proxy_env(request);
+        let child = start_confined(backend, &request, scratch, Output::Inherited)?;
 
         Ok(Self {
             child,
@@ -166,6 +140,7 @@ mod tests {
     // namespace, matching the rule for the executor's timeout tests.
 
     use std::path::Path;
+    use std::process::{Command, Stdio};
 
     use super::*;
 

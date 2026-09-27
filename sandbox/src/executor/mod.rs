@@ -27,7 +27,7 @@ use crate::policy::Policy;
 
 mod process;
 
-pub use process::{Process, ProcessOutcome, ProcessRequest};
+pub use process::{Process, ProcessOutcome};
 
 /// A command to run under a policy.
 #[derive(Debug, Clone)]
@@ -152,7 +152,7 @@ pub fn run(
     // request is untouched and the environment the command receives names the
     // forwarder on loopback.
     let request = with_proxy_env(request);
-    let mut child = start_confined(backend, &request, scratch.path())?;
+    let mut child = start_confined(backend, &request, scratch.path(), Output::Piped)?;
 
     // Drain both pipes on their own threads, so a command that writes more than
     // the pipe buffer holds cannot block the process that is waiting for it. The
@@ -175,17 +175,29 @@ pub fn run(
     })
 }
 
-/// Build and start the confined process under `backend`, with piped output.
+/// The confined command's standard streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Output {
+    /// Capture stdout and stderr on pipes, for a one-shot command whose output is
+    /// returned.
+    Piped,
+    /// Inherit the daemon's streams, for a long-lived process whose output is not
+    /// captured.
+    Inherited,
+}
+
+/// Build and start the confined process under `backend`.
 ///
 /// When `request.egress` is set, the backend runs the egress **supervisor** as
 /// the sandbox's init instead of the command, and the proxy variables are injected
 /// into the policy's environment first. The supervisor then starts the forwarder
 /// and the command in the same namespace. Otherwise the backend runs the command
 /// directly.
-fn start_confined(
+pub(super) fn start_confined(
     backend: &Backend,
     request: &ExecRequest,
     scratch: &Path,
+    output: Output,
 ) -> Result<Child, ExecError> {
     let (program, args) = match (backend, backend.render(&request.policy, scratch)?) {
         (Backend::Bubblewrap { program }, Some(args)) => (program.clone(), args),
@@ -203,8 +215,14 @@ fn start_confined(
     builder
         .env_clear()
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(match output {
+            Output::Piped => Stdio::piped(),
+            Output::Inherited => Stdio::inherit(),
+        })
+        .stderr(match output {
+            Output::Piped => Stdio::piped(),
+            Output::Inherited => Stdio::inherit(),
+        })
         .spawn()
         .map_err(ExecError::Spawn)
 }
@@ -252,18 +270,20 @@ fn init_args(request: &ExecRequest) -> Vec<OsString> {
 /// `ProxyGrant` already carries. Applying them here, rather than having the
 /// renderer emit `--setenv` for them, keeps the environment a policy concern and
 /// the launch an executor concern.
-fn with_proxy_env(request: &ExecRequest) -> ExecRequest {
+pub(super) fn with_proxy_env(request: &ExecRequest) -> ExecRequest {
+    // The common case has no egress, so return a clone without touching the
+    // environment rather than cloning-then-checking.
+    let Some(egress) = &request.egress else {
+        return request.clone();
+    };
+    let port = request
+        .policy
+        .network
+        .proxy
+        .as_ref()
+        .map_or(0, |grant| grant.port);
     let mut request = request.clone();
-    if let Some(egress) = &request.egress {
-        let port = request
-            .policy
-            .network
-            .proxy
-            .as_ref()
-            .map_or(0, |grant| grant.port);
-        let token = egress.token.clone();
-        crate::egress::inject_proxy_env(port, &token, &mut request.policy.shell.env);
-    }
+    crate::egress::inject_proxy_env(port, &egress.token, &mut request.policy.shell.env);
     request
 }
 
