@@ -233,8 +233,10 @@ fn join_reader(handle: std::thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     // Tests for the executor's non-spawning parts: the scratch directory's
-    // lifecycle. The spawn tests are integration tests, because they need a real
-    // bubblewrap.
+    // lifecycle and the timeout loop. The loop is tested with a plain child, not
+    // a confined one, so it is covered even on a host that cannot build a
+    // namespace (a CI runner, for instance); the bubblewrap spawn tests are
+    // integration tests.
 
     use super::*;
 
@@ -256,5 +258,46 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Spawn `/bin/sh -c <script>`, or `None` when there is no `/bin/sh`.
+    fn shell(script: &str) -> Option<Child> {
+        if !Path::new("/bin/sh").exists() {
+            return None;
+        }
+        Command::new("/bin/sh")
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()
+    }
+
+    #[test]
+    fn a_command_that_finishes_before_the_timeout_is_not_killed() {
+        // The child is still running at the first `try_wait`, so a deadline
+        // computed in the past, or an inverted comparison, would kill it early
+        // and report `timed_out`.
+        let Some(mut child) = shell("sleep 0.3") else {
+            return;
+        };
+        let (status, timed_out) =
+            wait_with_timeout(&mut child, Duration::from_secs(30)).expect("waits");
+        assert!(status.success(), "the command should exit cleanly");
+        assert!(
+            !timed_out,
+            "a command within the timeout must not be killed"
+        );
+    }
+
+    #[test]
+    fn a_command_that_exceeds_the_timeout_is_killed() {
+        let Some(mut child) = shell("sleep 30") else {
+            return;
+        };
+        let (_, timed_out) =
+            wait_with_timeout(&mut child, Duration::from_millis(100)).expect("waits");
+        assert!(timed_out, "a command past the timeout must be killed");
     }
 }

@@ -59,6 +59,14 @@
               && !(pkgs.lib.hasPrefix "result" base);
           };
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+          # The sandbox's spawn tests confine a real command with bubblewrap and
+          # skip themselves when it cannot build a namespace. bubblewrap is
+          # Linux-only, so it is added only there; on macOS the tests skip, and
+          # referencing the package unconditionally would break the flake's
+          # evaluation for aarch64-darwin.
+          bubblewrapPackages = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            pkgs.bubblewrap
+          ];
           commonArgs = {
             inherit src;
             strictDeps = true;
@@ -123,17 +131,12 @@
             # per-test process isolation, but it deliberately never runs
             # doctests. The `doctest` check below covers those with
             # `cargo test --doc`; keep both, or a doctest can rot unnoticed.
-            #
-            # The sandbox spawn tests confine a real command with bubblewrap and
-            # skip themselves when it cannot build a namespace. Putting
-            # `bubblewrap` on this check's PATH is what makes them actually run in
-            # CI rather than skip everywhere.
             test = craneLib.cargoNextest (
               commonArgs
               // {
                 inherit cargoArtifacts;
                 cargoExtraArgs = "--locked";
-                nativeBuildInputs = [ pkgs.bubblewrap ];
+                nativeBuildInputs = bubblewrapPackages;
               }
             );
             doctest = craneLib.cargoDocTest (
@@ -199,11 +202,8 @@
                 skills
                 kaniVerifier
                 cargo-mutants
-                # The sandbox spawn tests confine a real command with bubblewrap
-                # and detect its capability, so it must be on the dev PATH for
-                # them to run locally.
-                bubblewrap
               ]
+              ++ bubblewrapPackages
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 mold
               ];
