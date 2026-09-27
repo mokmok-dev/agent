@@ -53,6 +53,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::wal::chain::{HASH_LEN, genesis_hash, hash_record};
 use crate::wal::error::Error;
 use crate::wal::frame::Record;
+use crate::wal::replay::Replay;
 use crate::wal::scan::recover_from;
 
 /// Default target size of a segment file: 64 MiB.
@@ -337,6 +338,28 @@ impl Store {
         Ok(())
     }
 
+    /// Replay committed records from `from_seq`, in sequence order.
+    ///
+    /// The returned iterator reads one segment at a time, so it does not hold
+    /// more than one segment in memory. Records with a sequence below
+    /// `from_seq` are skipped, including those in the segment that contains it.
+    ///
+    /// Replay is for delivery, not recovery: the store validated the log at
+    /// [`Store::open`], and the caller decodes each payload as a `CloudEvents`
+    /// envelope. The `from_seq` of a subscriber is `max(requested, cursor)`; see
+    /// [`crate::cursor::CursorStore::resolve`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`StoreError`] if the directory cannot be listed. Errors while
+    /// reading an individual segment are yielded from the iterator.
+    pub fn replay(
+        &self,
+        from_seq: u64,
+    ) -> Result<Replay, StoreError> {
+        Replay::new(&self.dir, from_seq)
+    }
+
     /// The sequence number of the last committed record, if any.
     ///
     /// Sequence numbers are assigned contiguously from zero, so this is
@@ -511,7 +534,7 @@ fn scan_dir(dir: &Path) -> Result<Scan, StoreError> {
 
 /// List the segment files in `dir`, excluding anything that is not named as a
 /// segment.
-fn segment_files(dir: &Path) -> Result<Vec<(u64, PathBuf)>, StoreError> {
+pub(super) fn segment_files(dir: &Path) -> Result<Vec<(u64, PathBuf)>, StoreError> {
     let mut files = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;

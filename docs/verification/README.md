@@ -35,11 +35,11 @@ uninspected. Do not compare them on one metric.
 
 ## Current Scope
 
-The implemented subsystems are the WAL record frame and store in `agent/src/wal/`,
-the `CloudEvents` envelope in `agent/src/cloudevent.rs`, the fan-out broker in
-`agent/src/broker.rs`, the UDS/WebSocket transport in `agent/src/transport.rs`,
-the wire messages in `agent/src/protocol.rs`, and the durable cursor store in
-`agent/src/cursor.rs`:
+The implemented subsystems are the WAL record frame, store, and replay in
+`agent/src/wal/`, the `CloudEvents` envelope in `agent/src/cloudevent.rs`, the
+fan-out broker in `agent/src/broker.rs`, the UDS/WebSocket transport in
+`agent/src/transport.rs`, the wire messages in `agent/src/protocol.rs`, and the
+durable cursor store in `agent/src/cursor.rs`:
 
 | Module | Property |
 | --- | --- |
@@ -54,6 +54,7 @@ the wire messages in `agent/src/protocol.rs`, and the durable cursor store in
 | `transport` | Binding creates a `0700` directory and `0600` socket; a live socket is not stolen but a stale one is reclaimed; the `agent.eventbus.v1` subprotocol is negotiated and an unsupported one is refused; the peer credential is captured. |
 | `protocol` | A message is classified as an event by `specversion` and as a control message otherwise; every control message round-trips; an unknown type or a non-object is rejected. |
 | `cursor` | A cursor survives a reopen as the atomically replaced latest value; cursors are isolated by UID and subscriber ID; `resolve` is `max(requested, stored)`; an unsafe or overlong subscriber ID is rejected; a corrupt file is reported. |
+| `replay` | Replay yields records in order from a start sequence, skips earlier records within the starting segment, spans segments, and reports a corrupt segment. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
 hold the reference-model proptests; `agent/src/wal/proofs.rs` holds the Kani
