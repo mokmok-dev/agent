@@ -2,7 +2,9 @@
 //!
 //! The executor is the only part of the crate that spawns a process. It renders
 //! the [`Policy`](crate::policy::Policy) through a [`Backend`], runs the result,
-//! and reports the exit code, duration, and output.
+//! and reports the exit code, duration, and output. A one-shot command is [`run`];
+//! a long-lived process is [`Process`], which holds a handle the daemon can
+//! observe and stop.
 //!
 //! Two properties are enforced here, not left to the policy:
 //!
@@ -22,6 +24,10 @@ use std::time::{Duration, Instant};
 
 use crate::filesystem::{Backend, RenderError};
 use crate::policy::Policy;
+
+mod process;
+
+pub use process::{Process, ProcessOutcome, ProcessRequest};
 
 /// A command to run under a policy.
 #[derive(Debug, Clone)]
