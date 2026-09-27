@@ -40,8 +40,9 @@ The implemented subsystems are the WAL record frame, store, and replay in
 fan-out broker in `agent/src/broker.rs`, the UDS/WebSocket transport in
 `agent/src/transport.rs`, the wire messages in `agent/src/protocol.rs`, the
 durable cursor store in `agent/src/cursor.rs`, the wired state machine in
-`agent/src/bus.rs`, the authority claim in `agent/src/authority.rs`, and the
-async connection loop in `agent/src/server.rs`:
+`agent/src/bus.rs`, the authority claim in `agent/src/authority.rs`, the
+async connection loop in `agent/src/server.rs`, and the sandbox policy core in
+`sandbox/src/policy/`:
 
 | Module | Property |
 | --- | --- |
@@ -61,13 +62,16 @@ async connection loop in `agent/src/server.rs`:
 | `server` | Over a real UDS: publish is committed and acknowledged; subscribe replays history then streams live events; ack persists and the next subscribe resumes; a reserved attribute, a malformed frame, and an ack before subscribe each produce the right error; a disallowed peer is closed; a slow subscriber is closed. |
 | `authority` | The decision and rule-change event types require the claim; the `requested` ask and unrelated types do not; a lookalike type is not privileged; only an authority-listener connection may publish a gated type. |
 | `server` (close-code) | Every internal disconnect reason maps to exactly one RFC 6455 close frame in one place. |
+| `policy::fs` | `deny > write > read` holds: a `deny` inside a broader `write` root wins, an unmatched path keeps the broad read grant, coverage is component-wise, and a `deny` over a write root is a construction error. A `protected` name (`<write-root>/<name>`, default `.git`/`.agents`) is never writable, even with an explicit `write` entry, and an empty `protected` list lifts the cap. |
+| `policy` | Every domain rejects its invalid shape (a relative path, a `..` component, a non-component protected name, an empty or whitespace host, a zero port, a zero limit); the workdir must be **effectively writable** (no covering `deny`, not inside a protected name); a policy round-trips through JSON. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
 hold the reference-model proptests; `agent/tests/verify_cli.rs` and
-`agent/tests/agent_cli.rs` drive the binaries end to end; `agent/src/wal/proofs.rs`
-holds the Kani harnesses. A machine-checked obligation catalog is deferred until
-the verified scope spans more than one crate; the tables above are the record for
-now.
+`agent/tests/agent_cli.rs` drive the binaries end to end;
+`sandbox/tests/policy.rs` holds the policy precedence proptests;
+`agent/src/wal/proofs.rs` holds the Kani harnesses. A machine-checked obligation
+catalog is deferred until the verified scope spans more than one crate; the
+tables above are the record for now.
 
 Kani is expensive, so its harnesses are kept to the properties only it can
 establish: exhaustive bounds safety over attacker-controlled bytes. A property
