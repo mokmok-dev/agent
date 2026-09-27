@@ -35,8 +35,9 @@ uninspected. Do not compare them on one metric.
 
 ## Current Scope
 
-The implemented subsystems are the WAL record frame and store in `agent/src/wal/`
-and the `CloudEvents` envelope in `agent/src/cloudevent.rs`:
+The implemented subsystems are the WAL record frame and store in `agent/src/wal/`,
+the `CloudEvents` envelope in `agent/src/cloudevent.rs`, and the fan-out broker
+in `agent/src/broker.rs`:
 
 | Module | Property |
 | --- | --- |
@@ -46,6 +47,7 @@ and the `CloudEvents` envelope in `agent/src/cloudevent.rs`:
 | `scan` | Recovery reproduces a written log, truncates only a torn trailing record, and treats any other checksum or chain failure as fatal. |
 | `store` | A reopen reproduces the written payloads and head; rotation preserves the chain across segments; only a torn final segment is truncated; `verify_dir` reports the first failure. |
 | `cloudevent` | The `CloudEvents` envelope round-trips; the bus-owned attributes are assigned at commit and a producer-set `source`/`sequence` is rejected; the fixed-width `sequence` encoding preserves numeric order. |
+| `broker` | Fan-out reaches every subscriber in order and never blocks; a full queue evicts the slow subscriber with `SlowConsumer`; a dropped or replaced receiver is reaped on the next publish. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
 hold the reference-model proptests; `agent/src/wal/proofs.rs` holds the Kani
