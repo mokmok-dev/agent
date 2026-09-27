@@ -44,7 +44,10 @@ use std::time::Duration;
 use crate::policy::HostPort;
 
 pub use allowlist::{Allowlist, TunnelCloser};
-pub use approval::{Approval, Consultation, Pending, RequestId, await_decision, consult};
+pub use approval::{
+    Approval, Approver, Consultation, Desk, Outcome, Pending, Publisher, RequestId, await_decision,
+    await_outcome, consult,
+};
 pub use destinations::DestinationSet;
 pub use env::{NO_PROXY, inject_proxy_env};
 pub use forwarder::{ForwardConfig, ForwardError, Forwarder};
@@ -83,7 +86,8 @@ pub enum Transport {
     Loopback(u16),
 }
 
-/// The configuration of one proxy: its transport, its token, and its allowlist.
+/// The configuration of one proxy: its transport, its token, its allowlist, and
+/// its approver.
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
     /// Where the proxy listens, and where a command reaches it.
@@ -93,6 +97,10 @@ pub struct ProxyConfig {
     /// The destinations the proxy permits, mutable while it runs. Shared with the
     /// authority that adds and revokes rules.
     pub rules: Arc<Allowlist>,
+    /// The approver consulted for an unlisted destination. `None` means an
+    /// unlisted destination is refused outright, the default that avoids prompt
+    /// fatigue.
+    pub approver: Option<Arc<dyn Approver>>,
 }
 
 /// What the proxy decided about a request.
@@ -286,12 +294,16 @@ fn finish_tunnel(
 }
 
 /// The authorization and destination decision for a parsed request.
+///
+/// The token is checked first, so a client that cannot authenticate learns
+/// nothing about the allowlist. A listed destination is tunnelled without
+/// consulting anyone; an unlisted destination is refused when no approver is
+/// configured, or put to the approver when one is. A refusal and a cancellation
+/// both answer `403`, but the approver has already recorded which it was.
 fn authorize_and_decide(
     connect: &Connect,
     config: &ProxyConfig,
 ) -> Decision {
-    // The token is checked before the destination, so a client that cannot
-    // authenticate learns nothing about the allowlist.
     let expected = format!("Bearer {}", config.token);
     let authorized = connect
         .authorization
@@ -300,10 +312,25 @@ fn authorize_and_decide(
     if !authorized {
         return Decision::Unauthorized;
     }
-    if config.rules.permits(&connect.host, connect.port) {
-        Decision::Tunnelled
-    } else {
-        Decision::Forbidden
+
+    let listed = config.rules.permits(&connect.host, connect.port);
+    match consult(listed, config.approver.is_some()) {
+        Consultation::Tunnel => Decision::Tunnelled,
+        Consultation::Refuse => Decision::Forbidden,
+        Consultation::Ask => {
+            // `is_some` held for `Approver` above, so this cannot be `None`.
+            let Some(approver) = &config.approver else {
+                return Decision::Forbidden;
+            };
+            let destination = HostPort::new(connect.host.clone(), connect.port);
+            match approver.ask(&destination, None) {
+                Approval::Granted => Decision::Tunnelled,
+                // A refusal and a cancellation both answer `403`; the approver
+                // recorded which, so the log never claims a person refused what
+                // they never saw.
+                Approval::Denied | Approval::Cancelled => Decision::Forbidden,
+            }
+        },
     }
 }
 
@@ -532,6 +559,7 @@ mod tests {
             },
             token: "t".to_owned(),
             rules: Arc::new(Allowlist::empty()),
+            approver: None,
         };
 
         let path;
@@ -632,6 +660,7 @@ mod tests {
             },
             token: "t".to_owned(),
             rules: Arc::new(Allowlist::empty()),
+            approver: None,
         };
         let proxy = UnixProxy::bind(config).expect("binds");
 
