@@ -16,3 +16,24 @@ jobs:
     permissions:
       id-token: write
       contents: read
+  # Run only the mutants that the changed lines produce, so a newly written
+  # test is measured against the branches it claims to cover. The full suite is
+  # too slow and its pass/fail needs an equivalent-mutant classification, so it
+  # stays out of the flake check.
+  mutants:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge base has to be reachable to diff against it.
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-nix
+      - name: Measure mutation detection on the changed lines
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          git diff "origin/${{ github.base_ref }}...HEAD" > /tmp/pr.diff
+          # A failed base fetch leaves an empty diff that would silently pass.
+          test -s /tmp/pr.diff
+          nix develop -c cargo mutants --in-diff /tmp/pr.diff -j 4 --no-times

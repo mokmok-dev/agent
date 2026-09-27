@@ -1,8 +1,27 @@
 [workspace]
-members = []
+members = ["agent"]
 resolver = "3"
 
 [workspace.dependencies]
+# `pure` forces the portable Rust implementation and avoids all C code, which
+# Kani's compiler cannot model (runtime CPU feature detection) or link.
+# Revisit if the hashing cost matters.
+blake3 = { version = "1.8.2", default-features = false, features = ["pure"] }
+clap = { version = "4.6.6", features = ["derive"] }
+proptest = "1.11.0"
+thiserror = "2.0.20"
+
+[workspace.metadata.crane]
+name = "agent"
+
+# `cargo-kani` reads its flags from the workspace root manifest, not the member,
+# so this must stay here or the unwind bound is silently ignored and CBMC runs
+# effectively unbounded. The CRC table loop runs once per hashed byte (up to
+# ~68 for the largest record the harnesses build), so the bound has to exceed
+# that.
+[workspace.metadata.kani.flags]
+default-unwind = "80"
+output-format = "terse"
 
 [workspace.lints.clippy]
 all = "deny"
@@ -15,12 +34,14 @@ unimplemented = "deny"
 unwrap_used = "deny"
 
 [workspace.lints.rust]
-future_incompatible = "deny"
+future_incompatible = { level = "deny", priority = -1 }
+missing_docs = "deny"
+# `#[cfg(kani)]` harnesses are compiled by `cargo kani`, not `cargo test` or
+# `cargo clippy`, so the cfg needs to be declared or every check warns. The
+# group above has to sit at a lower priority so this specific lint wins.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
 unsafe_code = "deny"
-unused = "deny"
-
-[workspace.metadata.crane]
-name = "agent"
+unused = { level = "deny", priority = -1 }
 
 [workspace.package]
 edition = "2024"
