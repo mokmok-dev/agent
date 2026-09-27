@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use sandbox::executor::{ExecError, ExecRequest, Scratch, run};
+use sandbox::executor::{ExecError, ExecRequest, Process, ProcessRequest, Scratch, run};
 use sandbox::filesystem::{Backend, RenderError};
 use sandbox::policy::{EnvVar, FsEntry, FsPolicy, Limits, Policy, ShellPolicy};
 
@@ -387,4 +387,52 @@ fn a_protected_name_that_exists_cannot_be_modified() {
     assert_ne!(outcome.code, Some(0), "a protected name must be read-only");
     let config = fs::read(tree.work().join(".git/config")).expect("the file is intact");
     assert_eq!(config, b"orig", "the protected file was not modified");
+}
+
+#[test]
+fn a_long_lived_process_runs_and_is_killed_with_its_descendants() {
+    let Some(backend) = backend_or_skip() else {
+        return;
+    };
+    let tree = Tree::new("long-lived");
+    let scratch = Scratch::new(&tree.work()).expect("scratch");
+    let policy = policy(&tree);
+
+    // The process starts a background sleep and a late write, then sleeps. It is
+    // long-lived, so it must still be running after we observe it.
+    let marker = tree.work().join("late.txt");
+    let request = ProcessRequest {
+        program: OsString::from("/bin/sh"),
+        args: vec![
+            OsString::from("-c"),
+            OsString::from(format!(
+                "(sleep 2; echo late > {}) & sleep 30",
+                marker.display()
+            )),
+        ],
+        policy,
+    };
+    let mut process = Process::spawn(&backend, &request, scratch.path()).expect("spawns");
+
+    assert!(process.pid() > 0);
+    assert!(
+        process.is_running().expect("checks"),
+        "the long-lived process should still be running"
+    );
+
+    process.kill().expect("kills");
+    assert!(
+        process.was_killed(),
+        "kill marks the process before the wait"
+    );
+    let outcome = process.wait().expect("waits");
+    assert!(outcome.killed, "the handle records the kill");
+
+    // Give a surviving descendant a moment to write, then assert none did: the
+    // kill reaches the whole tree through the PID namespace's init.
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(
+        !marker.exists(),
+        "a killed process must not leave a descendant's marker"
+    );
 }

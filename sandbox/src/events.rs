@@ -26,11 +26,15 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 
 use crate::egress::RequestId;
-use crate::executor::ExecOutcome;
+use crate::executor::{ExecOutcome, ProcessOutcome};
 use crate::policy::HostPort;
 
 /// The terminal state of a one-shot execution.
 pub const EXEC_COMPLETED: &str = "agent.sandbox.exec.completed";
+/// A long-lived confined process was spawned.
+pub const PROCESS_STARTED: &str = "agent.sandbox.process.started";
+/// The terminal state of a long-lived process: exit code and duration.
+pub const PROCESS_EXITED: &str = "agent.sandbox.process.exited";
 /// The kernel refused a filesystem operation.
 pub const VIOLATION_FILESYSTEM: &str = "agent.sandbox.violation.filesystem";
 /// The kernel refused a network operation.
@@ -121,6 +125,49 @@ impl Event {
                 "stdout_bytes": outcome.stdout.len(),
                 "stderr_bytes": outcome.stderr.len(),
                 "timed_out": outcome.timed_out,
+            }),
+            traceparent: context.traceparent.clone(),
+        }
+    }
+
+    /// The `process.started` event for a long-lived process `pid`.
+    ///
+    /// A long-lived process is confined by one policy and its children inherit
+    /// it, so there are no per-command permission events for it; its lifecycle
+    /// events are the audit trail. The `pid` is the daemon-side process id, for
+    /// correlating the started and exited events.
+    #[must_use]
+    pub fn process_started(
+        context: &SandboxContext,
+        pid: u32,
+    ) -> Self {
+        Self {
+            ty: PROCESS_STARTED,
+            subject: context.sandbox_id.clone(),
+            data: json!({
+                "sandbox_id": context.sandbox_id,
+                "command": context.command,
+                "pid": pid,
+            }),
+            traceparent: context.traceparent.clone(),
+        }
+    }
+
+    /// The `process.exited` event for a long-lived process.
+    #[must_use]
+    pub fn process_exited(
+        outcome: &ProcessOutcome,
+        context: &SandboxContext,
+    ) -> Self {
+        Self {
+            ty: PROCESS_EXITED,
+            subject: context.sandbox_id.clone(),
+            data: json!({
+                "sandbox_id": context.sandbox_id,
+                "command": context.command,
+                "exit_code": outcome.code,
+                "duration_ms": u64::try_from(outcome.duration.as_millis()).unwrap_or(u64::MAX),
+                "killed": outcome.killed,
             }),
             traceparent: context.traceparent.clone(),
         }
@@ -466,6 +513,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::executor::ProcessOutcome;
 
     fn context() -> SandboxContext {
         SandboxContext::new("sbx-7", "cat /work/secret")
@@ -681,6 +729,42 @@ mod tests {
                 .as_deref(),
             context.traceparent.as_deref()
         );
+    }
+
+    #[test]
+    fn a_process_started_event_names_the_command_and_pid() {
+        let event = Event::process_started(&context(), 4242);
+        assert_eq!(event.ty, PROCESS_STARTED);
+        assert_eq!(event.subject, "sbx-7");
+        assert_eq!(event.data["sandbox_id"], json!("sbx-7"));
+        assert_eq!(event.data["command"], json!("cat /work/secret"));
+        assert_eq!(event.data["pid"], json!(4242));
+    }
+
+    #[test]
+    fn a_process_exited_event_carries_the_terminal_state() {
+        let outcome = ProcessOutcome {
+            code: Some(0),
+            duration: Duration::from_millis(250),
+            killed: false,
+        };
+        let event = Event::process_exited(&outcome, &context());
+        assert_eq!(event.ty, PROCESS_EXITED);
+        assert_eq!(event.data["exit_code"], json!(0));
+        assert_eq!(event.data["duration_ms"], json!(250));
+        assert_eq!(event.data["killed"], json!(false));
+    }
+
+    #[test]
+    fn a_killed_process_records_that_it_was_killed() {
+        let outcome = ProcessOutcome {
+            code: None,
+            duration: Duration::from_millis(10),
+            killed: true,
+        };
+        let event = Event::process_exited(&outcome, &context());
+        assert_eq!(event.data["exit_code"], Value::Null);
+        assert_eq!(event.data["killed"], json!(true));
     }
 
     #[test]
