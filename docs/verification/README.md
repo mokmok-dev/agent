@@ -53,7 +53,7 @@ now.
 
 ```sh
 nix develop -c cargo test                       # unit + proptest
-nix develop -c cargo kani --lib                 # Kani harnesses
+nix develop -c cargo kani -p agent --lib        # Kani harnesses
 nix develop -c cargo mutants -j 8 --no-times    # mutation measurement
 nix flake check                                 # clippy, test, kani, harness mutation
 ```
@@ -122,7 +122,7 @@ fail instead of passing quietly.
 
 The mutation makes an exactly-fitting final record look torn, which the harness
 that recovers a single whole record catches. Reproduce locally by applying the
-same edit and running `nix develop -c cargo kani --lib --harness <name>`.
+same edit and running `nix develop -c cargo kani -p agent --lib --harness <name>`.
 
 Note that Kani does not run `blake3`: the crate reaches `cpuid` inline assembly
 for runtime CPU feature detection, which Kani cannot model. The frame harnesses
