@@ -142,6 +142,33 @@ identity. If it does not, an agent on the same UID could publish its own
 not a property the sandbox can enforce by itself; it is recorded in
 [README Open Questions](./README.md#open-questions).
 
+### How the claim is conveyed
+
+The claim is the **channel**, not a token. The bus listens on a second UDS whose
+path the sandbox does **not** expose to the confined command. A connection on
+that listener holds the authority capability; a connection on the ordinary
+listener does not. Publishing a decision or a rule change with no claim is
+refused with `forbidden`, before the event reaches the log.
+
+Why a socket rather than a bearer token in the handshake: a token must be kept
+secret from a same-UID process, and on Linux a same-UID process can `ptrace`
+another by default, so the secret is only as strong as the sandbox's ability to
+hide it. The socket has no secret to leak, sniff, or replay — the confined
+process never has the path — so the guarantee reduces to the same file-hiding the
+sandbox already relies on for the ordinary socket, applied to one more path.
+
+The residual assumption is therefore explicit: the sandbox must mount a separate
+filesystem view that omits the authority socket's directory from the confined
+command. That is the same mechanism that already hides everything else, and it is
+recorded in [README Open Questions](./README.md#open-questions).
+
+Only the **state-changing** event types are gated: the decisions
+(`granted` / `denied` / `cancelled`) and the allowlist mutations
+(`rule_added` / `rule_revoked`). The `requested` events are the *ask*, which is
+the one capability the boundary grants the agent, and the proxy ignores a
+decision whose `request_id` it did not open, so a forged `requested` releases
+nothing.
+
 ## Example Exchange
 
 A confined agent reaches an unlisted host; an approver grants it.

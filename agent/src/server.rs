@@ -31,6 +31,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 
+use crate::authority::{self, Authority};
 use crate::broker::Subscription;
 use crate::bus::{Bus, BusError};
 use crate::cloudevent::Event;
@@ -47,52 +48,103 @@ type Socket = WebSocketStream<UnixStream>;
 #[derive(Debug)]
 pub struct Server {
     listener: Listener,
+    /// A listener whose connections hold the authority claim.
+    ///
+    /// The path of this socket is what the sandbox withholds from the confined
+    /// command, so a connection here is the capability itself. When `None`, no
+    /// connection can publish a privileged event: the gate fails closed.
+    authority_listener: Option<Listener>,
     bus: SharedBus,
     allowlist: Allowlist,
 }
 
 impl Server {
     /// Build a server over `listener`, with `allowlist` gating every connection.
+    ///
+    /// No connection holds the authority claim, so privileged event types cannot
+    /// be published. Use [`Server::with_authority_listener`] to enable them.
     #[must_use]
     pub fn new(
         listener: Listener,
         bus: Bus,
         allowlist: Allowlist,
     ) -> Self {
+        Self::with_authority_listener(listener, None, bus, allowlist)
+    }
+
+    /// Build a server that grants the authority claim to connections on
+    /// `authority_listener`.
+    ///
+    /// The caller is responsible for the socket's path being reachable only by
+    /// principals that should hold authority; the sandbox must not expose it to
+    /// the confined command. See [`crate::authority`].
+    #[must_use]
+    pub fn with_authority_listener(
+        listener: Listener,
+        authority_listener: Option<Listener>,
+        bus: Bus,
+        allowlist: Allowlist,
+    ) -> Self {
         Self {
             listener,
+            authority_listener,
             bus: Arc::new(Mutex::new(bus)),
             allowlist,
         }
     }
 
-    /// Accept connections until the listener fails.
+    /// Accept connections until a listener fails.
     ///
     /// Each accepted connection is served on its own task. A connection from a
     /// peer outside the allowlist is refused before any message is read.
+    /// Connections on the authority listener hold the authority claim.
     ///
     /// # Errors
     ///
-    /// Returns the [`std::io::Error`] if accepting from the listener fails. The
+    /// Returns the [`std::io::Error`] if accepting from a listener fails. The
     /// accept loop does not stop for a single connection's failure.
     pub async fn run(self) -> std::io::Result<()> {
-        loop {
-            let connection = self.listener.accept().await?;
-            let bus = Arc::clone(&self.bus);
-            let allowlist = self.allowlist.clone();
-            tokio::spawn(async move {
-                if !allowlist.permits(&connection.credential()) {
-                    refuse(connection).await;
-                    return;
-                }
-                if let Err(error) = serve(bus, connection).await {
-                    // A connection error is local; the accept loop keeps
-                    // serving. The error is dropped until the observability
-                    // milestone exists.
-                    let _ = error;
-                }
-            });
+        let Self {
+            listener,
+            authority_listener,
+            bus,
+            allowlist,
+        } = self;
+        match authority_listener {
+            Some(authority_listener) => {
+                tokio::try_join!(
+                    accept_loop(&listener, Authority::None, &bus, &allowlist),
+                    accept_loop(&authority_listener, Authority::Granted, &bus, &allowlist),
+                )?;
+            },
+            None => accept_loop(&listener, Authority::None, &bus, &allowlist).await?,
         }
+        Ok(())
+    }
+}
+
+/// Accept and serve connections on one listener with a fixed authority.
+async fn accept_loop(
+    listener: &Listener,
+    claim: Authority,
+    bus: &SharedBus,
+    allowlist: &Allowlist,
+) -> std::io::Result<()> {
+    loop {
+        let connection = listener.accept().await?;
+        let bus = Arc::clone(bus);
+        let allowlist = allowlist.clone();
+        tokio::spawn(async move {
+            if !allowlist.permits(&connection.credential()) {
+                refuse(connection).await;
+                return;
+            }
+            if let Err(error) = serve(bus, claim, connection).await {
+                // A connection error is local; the accept loop keeps serving.
+                // The error is dropped until the observability milestone exists.
+                let _ = error;
+            }
+        });
     }
 }
 
@@ -133,6 +185,7 @@ struct Session {
 /// Serve one authenticated connection.
 async fn serve(
     bus: SharedBus,
+    claim: Authority,
     connection: Connection,
 ) -> Result<(), ConnectionError> {
     let (credential, mut socket) = connection.into_parts();
@@ -146,7 +199,7 @@ async fn serve(
                     break;
                 };
                 let message = incoming?;
-                if !handle_message(&bus, uid, &mut socket, &mut session, message).await? {
+                if !handle_message(&bus, uid, claim, &mut socket, &mut session, message).await? {
                     break;
                 }
             }
@@ -189,6 +242,7 @@ async fn next_live(subscription: &mut Option<Subscription>) -> Option<crate::bro
 async fn handle_message(
     bus: &SharedBus,
     uid: u32,
+    claim: Authority,
     socket: &mut Socket,
     session: &mut Session,
     message: Message,
@@ -220,7 +274,7 @@ async fn handle_message(
 
     match message {
         ClientMessage::Publish { id, event, .. } => {
-            publish(bus, socket, id, *event).await?;
+            publish(bus, claim, socket, id, *event).await?;
         },
         ClientMessage::Subscribe {
             subscriber_id,
@@ -248,13 +302,31 @@ fn text_frame(message: &Message) -> Result<String, ServerMessage> {
         .map_err(|error| malformed(&error.to_string()))
 }
 
-/// Handle a `publish`: commit, then reply `published`.
+/// Handle a `publish`: enforce authority, commit, then reply `published`.
+///
+/// A privileged event type (see [`crate::authority::requires_authority`]) is
+/// refused with `forbidden` unless the connection holds the claim, before the
+/// event reaches the bus.
 async fn publish(
     bus: &SharedBus,
+    claim: Authority,
     socket: &mut Socket,
     id: String,
     incoming: crate::cloudevent::Incoming,
 ) -> Result<(), ConnectionError> {
+    if authority::requires_authority(&incoming.ty) && !claim.is_granted() {
+        send(
+            socket,
+            &ServerMessage::Error {
+                code: ErrorCode::Forbidden,
+                message: format!("publishing `{}` requires the authority claim", incoming.ty),
+                id: Some(id),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
+
     let result = {
         let mut bus = bus.lock().map_err(|_| ConnectionError::Poisoned)?;
         bus.publish(incoming)
@@ -537,7 +609,7 @@ mod tests {
 
     /// Start a server on a fresh socket with a permissive allowlist.
     fn start(dir: &SocketDir) -> PathBuf {
-        start_with(dir, Allowlist::new().allow_uid(self_uid()), 16)
+        start_full(dir, Allowlist::new().allow_uid(self_uid()), 16, false)
     }
 
     fn start_with(
@@ -545,10 +617,46 @@ mod tests {
         allowlist: Allowlist,
         capacity: usize,
     ) -> PathBuf {
+        start_full(dir, allowlist, capacity, false)
+    }
+
+    /// Start a server with an authority listener; returns `(bus, authority)`.
+    fn start_with_authority(dir: &SocketDir) -> (PathBuf, PathBuf) {
+        let socket = dir.socket();
+        let authority_socket = dir.0.join("authority.sock");
+        let listener = Listener::bind(&socket, WebSocketConfig::default()).expect("binds");
+        let authority_listener = Listener::bind(&authority_socket, WebSocketConfig::default())
+            .expect("binds the authority socket");
+        let bus = Bus::open(dir.0.join("data"), 16).expect("opens the bus");
+        let server = Server::with_authority_listener(
+            listener,
+            Some(authority_listener),
+            bus,
+            Allowlist::new().allow_uid(self_uid()),
+        );
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        (socket, authority_socket)
+    }
+
+    fn start_full(
+        dir: &SocketDir,
+        allowlist: Allowlist,
+        capacity: usize,
+        with_authority: bool,
+    ) -> PathBuf {
         let socket = dir.socket();
         let listener = Listener::bind(&socket, WebSocketConfig::default()).expect("binds");
         let bus = Bus::open(dir.0.join("data"), capacity).expect("opens the bus");
-        let server = Server::new(listener, bus, allowlist);
+        let server = if with_authority {
+            let authority_socket = dir.0.join("authority.sock");
+            let authority_listener =
+                Listener::bind(&authority_socket, WebSocketConfig::default()).expect("binds");
+            Server::with_authority_listener(listener, Some(authority_listener), bus, allowlist)
+        } else {
+            Server::new(listener, bus, allowlist)
+        };
         tokio::spawn(async move {
             let _ = server.run().await;
         });
@@ -564,10 +672,17 @@ mod tests {
     }
 
     fn publish(id: &str) -> String {
+        publish_type(id, "e")
+    }
+
+    fn publish_type(
+        id: &str,
+        ty: &str,
+    ) -> String {
         serde_json::json!({
             "type": "publish",
             "id": id,
-            "event": {"specversion": "1.0", "type": "e"},
+            "event": {"specversion": "1.0", "type": ty},
         })
         .to_string()
     }
@@ -847,5 +962,98 @@ mod tests {
         // was dropped.
         let event = client.expect().await;
         assert_eq!(event["type"], "e");
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_connection_cannot_publish_a_privileged_event() {
+        let dir = SocketDir::new("no-authority");
+        // A server with no authority listener: every connection lacks the claim.
+        let socket = start(&dir);
+        let mut client = Client::connect(&socket).await;
+
+        client
+            .send(&publish_type("req-1", "agent.sandbox.egress.granted"))
+            .await;
+        let reply = client.expect().await;
+        assert_eq!(reply["type"], "error");
+        assert_eq!(reply["code"], "forbidden");
+        assert_eq!(reply["id"], "req-1");
+    }
+
+    #[tokio::test]
+    async fn a_privileged_event_is_refused_before_it_is_committed() {
+        let dir = SocketDir::new("not-committed");
+        let socket = start(&dir);
+        let mut client = Client::connect(&socket).await;
+
+        client
+            .send(&publish_type("req-1", "agent.sandbox.permission.granted"))
+            .await;
+        assert_eq!(client.expect().await["type"], "error");
+
+        // Nothing was written: replaying from the start yields no events.
+        client.send(&subscribe("audit", 0)).await;
+        assert_eq!(client.expect().await["type"], "subscribed");
+        // The only frame that can follow is a live event; a short timeout is
+        // enough to show the log is empty.
+        let next = tokio::time::timeout(Duration::from_millis(200), client.recv()).await;
+        assert!(next.is_err(), "no event was committed, got {next:?}");
+    }
+
+    #[tokio::test]
+    async fn an_authority_connection_can_publish_a_privileged_event() {
+        let dir = SocketDir::new("authority");
+        let (_socket, authority_socket) = start_with_authority(&dir);
+        let mut client = Client::connect(&authority_socket).await;
+
+        client
+            .send(&publish_type("req-1", "agent.sandbox.egress.granted"))
+            .await;
+        let reply = client.expect().await;
+        assert_eq!(reply["type"], "published");
+        assert_eq!(reply["seq"], 0);
+    }
+
+    #[tokio::test]
+    async fn an_authority_connection_may_also_publish_an_ordinary_event() {
+        let dir = SocketDir::new("authority-ordinary");
+        let (_socket, authority_socket) = start_with_authority(&dir);
+        let mut client = Client::connect(&authority_socket).await;
+
+        client.send(&publish("req-1")).await;
+        assert_eq!(client.expect().await["type"], "published");
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_connection_may_still_ask() {
+        // `requested` is the one capability the boundary grants the agent, so an
+        // ungated connection can publish it.
+        let dir = SocketDir::new("asking");
+        let socket = start(&dir);
+        let mut client = Client::connect(&socket).await;
+
+        client
+            .send(&publish_type("req-1", "agent.sandbox.egress.requested"))
+            .await;
+        assert_eq!(client.expect().await["type"], "published");
+    }
+
+    #[tokio::test]
+    async fn a_privileged_event_on_the_authority_socket_reaches_a_subscriber() {
+        let dir = SocketDir::new("authority-delivers");
+        let (socket, authority_socket) = start_with_authority(&dir);
+
+        let mut subscriber = Client::connect(&socket).await;
+        subscriber.send(&subscribe("audit", 0)).await;
+        assert_eq!(subscriber.expect().await["type"], "subscribed");
+
+        let mut authority = Client::connect(&authority_socket).await;
+        authority
+            .send(&publish_type("req-1", "agent.sandbox.egress.rule_added"))
+            .await;
+        assert_eq!(authority.expect().await["type"], "published");
+
+        let event = subscriber.expect().await;
+        assert_eq!(event["type"], "agent.sandbox.egress.rule_added");
     }
 }

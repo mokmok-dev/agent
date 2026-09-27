@@ -223,10 +223,15 @@ reuse is real.
   permission plus a `SO_PEERCRED` UID/GID allowlist
   ([event-bus security](../event-bus/security.md)). A confined agent runs as the
   daemon's user and therefore shares that identity, so the **authority** that
-  separates an approver from an agent cannot come from the peer UID. It must be a
-  token or claim conveyed over the bus (or a second socket with different
-  permissions). How is it conveyed and verified, and how does it survive an
-  external proxy? See [events.md](./events.md).
+  separates an approver from an agent cannot come from the peer UID. The bus now
+  conveys it as a **second UDS listener** whose path the sandbox withholds from
+  the confined command: a connection on it holds the claim, and the gated event
+  types are refused with `forbidden` otherwise. See
+  [events.md](./events.md#how-the-claim-is-conveyed). The remaining decision is
+  how the sandbox guarantees that the authority socket's directory is absent from
+  the confined command's filesystem view (the same hiding it already applies to
+  the ordinary socket) — and how a remote approver arriving through an external
+  proxy obtains the claim.
 - Is the mutable egress allowlist durable across a daemon restart, or is it
   rebuilt by replaying `agent.sandbox.egress.rule_*` events from the log? If it
   is replayed, from which sequence, and how does the rebuild know a later

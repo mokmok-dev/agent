@@ -81,13 +81,20 @@ sandbox cannot add a rule for itself, cannot approve its own request, and cannot
 revoke a denial. The agent's only egress capability is to *ask* — by opening a
 connection the proxy turns into a `requested` event.
 
-The bus does **not** yet provide this claim: its access control is a UDS pathname
-permission plus a `SO_PEERCRED` UID/GID allowlist, and a confined agent shares
-the daemon's UID, so peer identity cannot distinguish an approver from an agent.
-The authority must be a publisher-supplied token or a separate socket; see
-[events.md](./events.md#authority) and
-[README Open Questions](./README.md#open-questions). Until it exists, the
-approval flow is only as strong as that claim.
+The bus does **not** yet provide this claim as part of the wire protocol: its
+access control is a UDS pathname permission plus a `SO_PEERCRED` UID/GID
+allowlist, and a confined agent shares the daemon's UID, so peer identity cannot
+distinguish an approver from an agent.
+
+The bus now provides the claim **as a second listener** whose socket path the
+sandbox withholds from the confined command. A connection on that listener holds
+the authority capability; a connection on the ordinary listener does not. There
+is no token to leak, sniff, or replay — the confined process never has the path,
+and a process that never has it cannot obtain the claim. The bus gates the
+decision and rule-change event types on it and refuses the rest with `forbidden`.
+See [events.md](./events.md#authority) and
+[README Open Questions](./README.md#open-questions) for the mechanism choice and
+its residual assumptions.
 
 ## Per-Connection Approval
 

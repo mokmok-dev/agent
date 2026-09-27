@@ -6,8 +6,10 @@
 //! The event envelope is modeled in [`cloudevent`], the in-process fan-out in
 //! [`broker`], the UDS/WebSocket transport in [`transport`], the wire messages
 //! in [`protocol`], durable subscriber progress in [`cursor`], the wired state
-//! machine in [`bus`], and the async connection loop in [`server`].
+//! machine in [`bus`], the authority claim in [`authority`], and the async
+//! connection loop in [`server`].
 
+pub mod authority;
 pub mod broker;
 pub mod bus;
 pub mod cloudevent;
