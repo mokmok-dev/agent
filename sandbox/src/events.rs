@@ -26,6 +26,7 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 
 use crate::executor::ExecOutcome;
+use crate::policy::HostPort;
 
 /// The terminal state of a one-shot execution.
 pub const EXEC_COMPLETED: &str = "agent.sandbox.exec.completed";
@@ -33,6 +34,10 @@ pub const EXEC_COMPLETED: &str = "agent.sandbox.exec.completed";
 pub const VIOLATION_FILESYSTEM: &str = "agent.sandbox.violation.filesystem";
 /// The kernel refused a network operation.
 pub const VIOLATION_NETWORK: &str = "agent.sandbox.violation.network";
+/// An authority added a destination to the mutable egress allowlist.
+pub const EGRESS_RULE_ADDED: &str = "agent.sandbox.egress.rule_added";
+/// An authority removed a destination from the mutable egress allowlist.
+pub const EGRESS_RULE_REVOKED: &str = "agent.sandbox.egress.rule_revoked";
 
 /// How much of the command's `stderr` a violation event carries.
 const OUTPUT_SNIPPET_BYTES: usize = 4096;
@@ -145,6 +150,52 @@ impl Event {
                 }
             })
             .collect()
+    }
+
+    /// The `egress.rule_added` event for `destination` in `sandbox_id`.
+    ///
+    /// An authority publishes this to widen the mutable allowlist; the proxy
+    /// applies it so subsequent connections to `host:port` are allowed. The
+    /// payload is `host`, `port`, and the `sandbox_id` whose proxy owns the set,
+    /// per `docs/sandbox/events.md`.
+    #[must_use]
+    pub fn egress_rule_added(
+        sandbox_id: impl Into<String>,
+        destination: &HostPort,
+    ) -> Self {
+        Self::rule(EGRESS_RULE_ADDED, sandbox_id, destination)
+    }
+
+    /// The `egress.rule_revoked` event for `destination` in `sandbox_id`.
+    ///
+    /// An authority publishes this to narrow the mutable allowlist; the proxy
+    /// applies it so subsequent connections are no longer allowed by the rule,
+    /// and closes any established tunnel the rule granted.
+    #[must_use]
+    pub fn egress_rule_revoked(
+        sandbox_id: impl Into<String>,
+        destination: &HostPort,
+    ) -> Self {
+        Self::rule(EGRESS_RULE_REVOKED, sandbox_id, destination)
+    }
+
+    /// A `rule_added` / `rule_revoked` event, whose payloads are identical.
+    fn rule(
+        ty: &'static str,
+        sandbox_id: impl Into<String>,
+        destination: &HostPort,
+    ) -> Self {
+        let sandbox_id = sandbox_id.into();
+        Self {
+            ty,
+            subject: sandbox_id.clone(),
+            data: json!({
+                "sandbox_id": sandbox_id,
+                "host": &destination.host,
+                "port": destination.port,
+            }),
+            traceparent: None,
+        }
     }
 }
 
@@ -523,6 +574,28 @@ mod tests {
                 .traceparent
                 .as_deref(),
             context.traceparent.as_deref()
+        );
+    }
+
+    #[test]
+    fn a_rule_added_event_names_the_sandbox_host_and_port() {
+        let event = Event::egress_rule_added("sbx-7", &HostPort::new("api.example.com", 443));
+        assert_eq!(event.ty, EGRESS_RULE_ADDED);
+        assert_eq!(event.subject, "sbx-7");
+        assert_eq!(event.data["sandbox_id"], json!("sbx-7"));
+        assert_eq!(event.data["host"], json!("api.example.com"));
+        assert_eq!(event.data["port"], json!(443));
+    }
+
+    #[test]
+    fn a_rule_revoked_event_has_the_same_payload_shape() {
+        let event = Event::egress_rule_revoked("sbx-7", &HostPort::new("api.example.com", 443));
+        assert_eq!(event.ty, EGRESS_RULE_REVOKED);
+        assert_eq!(event.data["host"], json!("api.example.com"));
+        assert_eq!(event.data["port"], json!(443));
+        assert_eq!(
+            event.traceparent, None,
+            "a rule change carries no traceparent"
         );
     }
 }

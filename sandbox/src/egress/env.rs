@@ -88,7 +88,7 @@ mod tests {
                 forward_port: 8080,
             },
             token: "tok".to_owned(),
-            destinations: super::super::DestinationSet::empty(),
+            rules: std::sync::Arc::new(crate::egress::Allowlist::empty()),
         }
     }
 

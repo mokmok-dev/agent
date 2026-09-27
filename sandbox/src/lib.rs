@@ -19,6 +19,12 @@
 //! sandbox authors only `type`, `subject`, `data`, and `traceparent`; the daemon
 //! joins them to the bus envelope.
 //!
+//! Milestone 4 adds the **egress transport**: the [`egress`] `CONNECT` proxy, the
+//! child-side forwarder, the proxy environment injection, and transport selection.
+//! Milestone 5 adds **runtime permissions**: [`egress::Allowlist`] is mutable while
+//! a sandbox runs, so an authority can add and revoke destinations and a revoke
+//! closes the tunnels its rule granted.
+//!
 //! # The precedence rule
 //!
 //! A path is writable only inside a `write` entry, and a `deny` nested in a

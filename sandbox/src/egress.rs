@@ -19,10 +19,13 @@
 //! loopback port, and [`select_transport`] refuses egress on a host that cannot
 //! make the proxy the only route.
 //!
-//! Approval for an unlisted destination is milestone 5. Today an unlisted
+//! Approval for an unlisted destination is milestone 5b. Today an unlisted
 //! destination is refused with `403`, which the design calls the behaviour with
-//! no approver configured.
+//! no approver configured. The destination set itself is already mutable at
+//! runtime: an authority adds and revokes [`Allowlist`] rules, and a revoke closes
+//! the tunnels its rule granted.
 
+mod allowlist;
 mod destinations;
 mod env;
 mod forwarder;
@@ -34,8 +37,12 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::policy::HostPort;
+
+pub use allowlist::{Allowlist, TunnelCloser};
 pub use destinations::DestinationSet;
 pub use env::{NO_PROXY, inject_proxy_env};
 pub use forwarder::{ForwardConfig, ForwardError, Forwarder};
@@ -81,8 +88,9 @@ pub struct ProxyConfig {
     pub transport: Transport,
     /// The token a client must present. Generated per proxy and dies with it.
     pub token: String,
-    /// The destinations the proxy permits.
-    pub destinations: DestinationSet,
+    /// The destinations the proxy permits, mutable while it runs. Shared with the
+    /// authority that adds and revokes rules.
+    pub rules: Arc<Allowlist>,
 }
 
 /// What the proxy decided about a request.
@@ -227,6 +235,39 @@ pub fn serve(
         },
     };
 
+    // Register the tunnel before answering, so a revoke that lands after the
+    // client sees `200` still finds and closes it. The closer shuts both ends,
+    // which ends the copy threads below: the `upstream` write half and the client
+    // socket. The client fd is a dup of the caller's, so shutting it here is a
+    // `shutdown`, not a close of the caller's descriptor.
+    let upstream_shutdown = upstream.try_clone()?;
+    let client_shutdown = stream.try_clone()?;
+    let closer: TunnelCloser = Box::new(move || {
+        let _ = upstream_shutdown.shutdown(std::net::Shutdown::Both);
+        let _ = client_shutdown.shutdown(std::net::Shutdown::Both);
+    });
+    let tunnel_id = config
+        .rules
+        .register(HostPort::new(connect.host.clone(), connect.port), closer);
+
+    // Everything after registration runs in one closure so the tunnel is
+    // deregistered whatever the outcome: a `write_response` or a `set_read_timeout`
+    // that fails must not leave a stale entry a later revoke would call.
+    let result = finish_tunnel(reader, &mut upstream);
+    if let Some(id) = tunnel_id {
+        config.rules.deregister(id);
+    }
+    result?;
+    Ok(Decision::Tunnelled)
+}
+
+/// Answer `200` and copy bytes until the tunnel ends.
+///
+/// Split out so [`serve`] can deregister the tunnel once, on every path.
+fn finish_tunnel(
+    mut reader: BufReader<UnixStream>,
+    upstream: &mut TcpStream,
+) -> std::io::Result<()> {
     write_response(reader.get_mut(), &Decision::Tunnelled)?;
 
     // The head deadline was for the handshake only; a long-lived tunnel must not
@@ -239,8 +280,7 @@ pub fn serve(
     // they are lost. Writing an empty slice is a no-op, so this is unconditional.
     upstream.write_all(reader.buffer())?;
     let client = reader.into_inner();
-    tunnel(&client, &upstream)?;
-    Ok(Decision::Tunnelled)
+    tunnel(&client, upstream)
 }
 
 /// The authorization and destination decision for a parsed request.
@@ -258,7 +298,7 @@ fn authorize_and_decide(
     if !authorized {
         return Decision::Unauthorized;
     }
-    if config.destinations.permits(&connect.host, connect.port) {
+    if config.rules.permits(&connect.host, connect.port) {
         Decision::Tunnelled
     } else {
         Decision::Forbidden
@@ -489,7 +529,7 @@ mod tests {
                 forward_port: 8080,
             },
             token: "t".to_owned(),
-            destinations: DestinationSet::empty(),
+            rules: Arc::new(Allowlist::empty()),
         };
 
         let path;
@@ -589,7 +629,7 @@ mod tests {
                 forward_port: 8080,
             },
             token: "t".to_owned(),
-            destinations: DestinationSet::empty(),
+            rules: Arc::new(Allowlist::empty()),
         };
         let proxy = UnixProxy::bind(config).expect("binds");
 

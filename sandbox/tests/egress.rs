@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
-use sandbox::egress::{DestinationSet, ProxyConfig, Transport, UnixProxy, bearer};
+use sandbox::egress::{Allowlist, DestinationSet, ProxyConfig, Transport, UnixProxy, bearer};
 use sandbox::policy::HostPort;
 
 /// A throwaway TCP server that echoes a fixed banner and returns one line.
@@ -47,6 +47,34 @@ impl Upstream {
         }
     }
 
+    /// Start a server that echoes every line and stays open until the client
+    /// closes, so a tunnel to it outlives the `CONNECT` handshake.
+    fn start_persistent(banner: &'static str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("binds an ephemeral port");
+        let port = listener.local_addr().expect("has an address").port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.write_all(banner.as_bytes());
+                let _ = stream.flush();
+                let mut reader = BufReader::new(stream.try_clone().expect("clones"));
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            let _ = stream.write_all(line.as_bytes());
+                            let _ = stream.flush();
+                        },
+                    }
+                }
+            }
+        });
+        Self {
+            port,
+            handle: Some(handle),
+        }
+    }
+
     fn join(mut self) {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -55,9 +83,11 @@ impl Upstream {
 }
 
 /// A proxy over a fresh Unix socket with a background accept loop, removed on
-/// drop.
+/// drop. The allowlist is shared with the test, so a test can add or revoke a
+/// rule while the proxy serves.
 struct Proxy {
     inner: Arc<UnixProxy>,
+    rules: Arc<Allowlist>,
     root: PathBuf,
     stop: Arc<AtomicBool>,
     accept: Option<std::thread::JoinHandle<()>>,
@@ -77,13 +107,14 @@ impl Proxy {
         ));
         let _ = std::fs::remove_dir_all(&root);
         let socket = root.join("egress.sock");
+        let rules = Arc::new(Allowlist::new(destinations));
         let config = ProxyConfig {
             transport: Transport::UnixSocket {
                 socket,
                 forward_port: 8080,
             },
             token: token.to_owned(),
-            destinations,
+            rules: Arc::clone(&rules),
         };
         let proxy = Arc::new(UnixProxy::bind(config).expect("binds the proxy"));
 
@@ -109,6 +140,7 @@ impl Proxy {
         });
         Self {
             inner: proxy,
+            rules,
             root,
             stop,
             accept: Some(accept),
@@ -117,6 +149,11 @@ impl Proxy {
 
     fn path(&self) -> &std::path::Path {
         self.inner.path()
+    }
+
+    /// The shared allowlist, so a test can change rules at runtime.
+    fn rules(&self) -> &Allowlist {
+        &self.rules
     }
 }
 
@@ -286,4 +323,97 @@ fn the_socket_is_removed_when_the_proxy_drops() {
         assert!(path.exists(), "the socket exists while the proxy is alive");
     }
     assert!(!path.exists(), "the socket is removed on drop");
+}
+
+#[test]
+fn a_rule_added_at_runtime_permits_a_new_connection() {
+    // The proxy starts with an empty allowlist, so the first connection is 403.
+    // Adding the rule at runtime must permit the next one, without a restart.
+    let upstream = Upstream::start("HELLO\n");
+    let proxy = Proxy::start("add", "tok", DestinationSet::empty());
+
+    let request = format!(
+        "CONNECT 127.0.0.1:{} HTTP/1.1\r\nProxy-Authorization: {}\r\n\r\n",
+        upstream.port,
+        bearer("tok")
+    );
+    let (denied, _) = exchange(proxy.path(), request.as_bytes());
+    assert!(denied.starts_with("HTTP/1.1 403"), "status was: {denied}");
+
+    proxy.rules().add(HostPort::new("127.0.0.1", upstream.port));
+
+    let (allowed, _) = exchange(proxy.path(), request.as_bytes());
+    assert!(allowed.starts_with("HTTP/1.1 200"), "status was: {allowed}");
+    std::mem::forget(upstream);
+}
+
+#[test]
+fn a_rule_revoked_at_runtime_denies_a_new_connection() {
+    let upstream = Upstream::start("HELLO\n");
+    let port = upstream.port;
+    let proxy = Proxy::start(
+        "revoke",
+        "tok",
+        DestinationSet::of([HostPort::new("127.0.0.1", port)]),
+    );
+
+    let request = format!(
+        "CONNECT 127.0.0.1:{port} HTTP/1.1\r\nProxy-Authorization: {}\r\n\r\n",
+        bearer("tok")
+    );
+    let (allowed, _) = exchange(proxy.path(), request.as_bytes());
+    assert!(allowed.starts_with("HTTP/1.1 200"), "status was: {allowed}");
+    // The upstream served one connection; leak its handle rather than join, and
+    // let the process end it.
+    std::mem::forget(upstream);
+
+    proxy.rules().revoke(&HostPort::new("127.0.0.1", port));
+    let (denied, _) = exchange(proxy.path(), request.as_bytes());
+    assert!(denied.starts_with("HTTP/1.1 403"), "status was: {denied}");
+}
+
+#[test]
+fn revoking_a_rule_closes_an_established_tunnel() {
+    // A tunnel is open and passing bytes; revoking its rule must close it, so the
+    // client sees EOF rather than a still-live pipe.
+    let upstream = Upstream::start_persistent("HELLO\n");
+    let port = upstream.port;
+    let proxy = Proxy::start(
+        "revoke-open",
+        "tok",
+        DestinationSet::of([HostPort::new("127.0.0.1", port)]),
+    );
+
+    let request = format!(
+        "CONNECT 127.0.0.1:{port} HTTP/1.1\r\nProxy-Authorization: {}\r\n\r\n",
+        bearer("tok")
+    );
+    let (status, mut stream) = exchange(proxy.path(), request.as_bytes());
+    assert!(status.starts_with("HTTP/1.1 200"), "status was: {status}");
+
+    // The connection is live: a byte round-trips.
+    let mut reader = BufReader::new(stream.try_clone().expect("clones"));
+    let mut banner = String::new();
+    reader.read_line(&mut banner).expect("reads the banner");
+    assert_eq!(banner, "HELLO\n");
+    stream.write_all(b"ping\n").expect("writes");
+    stream.flush().expect("flushes");
+    let mut echo = String::new();
+    reader.read_line(&mut echo).expect("reads the echo");
+    assert_eq!(echo, "ping\n");
+
+    // Revoke while the tunnel is open; it must close, so the next read is EOF.
+    let closed = proxy.rules().revoke(&HostPort::new("127.0.0.1", port));
+    assert_eq!(closed, 1, "the open tunnel was closed");
+    reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("sets a read deadline");
+    let mut tail = String::new();
+    assert_eq!(
+        reader.read_line(&mut tail).expect("reads after revoke"),
+        0,
+        "the revoked tunnel must reach EOF, not stay open"
+    );
+    std::mem::forget(upstream);
 }
