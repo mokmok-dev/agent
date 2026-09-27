@@ -369,6 +369,17 @@ impl Store {
         self.next_seq.checked_sub(1)
     }
 
+    /// The sequence number the next [`Store::append`] will assign.
+    ///
+    /// A caller that must embed its sequence in the payload, as a `CloudEvents`
+    /// envelope does, reads this before appending. It is only valid until the
+    /// next append, so the read and the append must not be interleaved by
+    /// another writer; the store is single-writer by design.
+    #[must_use]
+    pub const fn next_seq(&self) -> u64 {
+        self.next_seq
+    }
+
     /// The chain hash of the last committed record, or the genesis hash when
     /// the log is empty.
     ///
