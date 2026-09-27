@@ -8,7 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use agent::wal::{HASH_LEN, Record, genesis_hash, hash_record};
+use agent::wal::{HASH_LEN, Record, Store, genesis_hash, hash_record};
 
 /// Write a chained log of `count` records to a unique temp path.
 fn write_log(
@@ -83,4 +83,69 @@ fn a_chained_record_carries_the_previous_hash() {
     let decoded = Record::decode(&second).unwrap();
     assert_eq!(decoded.prev_hash(), &first_hash);
     assert_eq!(HASH_LEN, first_hash.len());
+}
+
+/// A unique, empty store directory removed on drop.
+struct StoreDir(PathBuf);
+
+impl StoreDir {
+    fn new(tag: &str) -> Self {
+        let dir =
+            std::env::temp_dir().join(format!("agent-verify-store-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+}
+
+impl Drop for StoreDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn the_verify_binary_reports_an_intact_store_directory() {
+    let dir = StoreDir::new("clean");
+    let mut store = Store::with_segment_size(&dir.0, 1).unwrap();
+    for _ in 0..6 {
+        store.append(b"payload").unwrap();
+    }
+    drop(store);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_verify"))
+        .arg(&dir.0)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("6 records"), "stdout was: {stdout}");
+    assert!(stdout.contains("chain intact"), "stdout was: {stdout}");
+}
+
+#[test]
+fn the_verify_binary_fails_on_a_tampered_store_directory() {
+    let dir = StoreDir::new("tampered");
+    let mut store = Store::open(&dir.0).unwrap();
+    store.append(b"one").unwrap();
+    store.append(b"two").unwrap();
+    drop(store);
+
+    let segment = std::fs::read_dir(&dir.0)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "log"))
+        .unwrap();
+    let mut bytes = fs::read(&segment).unwrap();
+    bytes[30] ^= 0xFF;
+    fs::write(&segment, &bytes).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_verify"))
+        .arg(&dir.0)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
 }

@@ -35,8 +35,8 @@ uninspected. Do not compare them on one metric.
 
 ## Current Scope
 
-The implemented subsystems are the WAL record frame in `agent/src/wal/` and the
-`CloudEvents` envelope in `agent/src/cloudevent.rs`:
+The implemented subsystems are the WAL record frame and store in `agent/src/wal/`
+and the `CloudEvents` envelope in `agent/src/cloudevent.rs`:
 
 | Module | Property |
 | --- | --- |
@@ -44,12 +44,13 @@ The implemented subsystems are the WAL record frame in `agent/src/wal/` and the
 | `crc` | The `crc32c` check value matches the Castagnoli vector. |
 | `chain` | Records link to the previous record's BLAKE3 hash, from the domain-separated genesis. |
 | `scan` | Recovery reproduces a written log, truncates only a torn trailing record, and treats any other checksum or chain failure as fatal. |
+| `store` | A reopen reproduces the written payloads and head; rotation preserves the chain across segments; only a torn final segment is truncated; `verify_dir` reports the first failure. |
 | `cloudevent` | The `CloudEvents` envelope round-trips; the bus-owned attributes are assigned at commit and a producer-set `source`/`sequence` is rejected; the fixed-width `sequence` encoding preserves numeric order. |
 
-`agent/tests/wal.rs` and `agent/tests/cloudevent.rs` hold the reference-model
-proptests; `agent/src/wal/proofs.rs` holds the Kani harnesses. A machine-checked
-obligation catalog is deferred until the verified scope spans more than one
-crate; the tables above are the record for now.
+`agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
+hold the reference-model proptests; `agent/src/wal/proofs.rs` holds the Kani
+harnesses. A machine-checked obligation catalog is deferred until the verified
+scope spans more than one crate; the tables above are the record for now.
 
 Kani is expensive, so its harnesses are kept to the properties only it can
 establish: exhaustive bounds safety over attacker-controlled bytes. A property

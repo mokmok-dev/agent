@@ -12,4 +12,13 @@ exclude_globs = ["agent/src/wal/proofs.rs"]
 # so `position < bytes.len()` and `bytes.len() - position < HEADER_LEN` are both
 # vacuously true on entry and never reached again. Changing `<` to any other
 # operator on those two guards cannot change an outcome.
-exclude_re = ["replace < with .* in recover_from"]
+#
+# The `effective > 0` guard in `Store::write_batch` skips a rotation when the
+# open segment is empty. At `effective == 0` the store has just opened the
+# segment for the record about to be written, so rotating would close and reopen
+# the same `segment-{seq:020}.log` name; the guard's presence or absence is
+# unobservable. The oversized-first-record test pins the intended layout anyway.
+exclude_re = [
+  "replace < with .* in recover_from",
+  "replace > with >= in .*write_batch",
+]
