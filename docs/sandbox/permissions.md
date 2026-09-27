@@ -109,6 +109,17 @@ its residual assumptions.
 When a connection arrives for a destination not in the allowlist and an approver
 is configured, the proxy asks instead of refusing.
 
+The approval core is `egress::approval`: `RequestId`, a `Pending` registry that
+correlates a decision to the request that asked (`resolve` removes the entry, so
+a second or unknown decision is ignored), and `await_decision`, the one place a
+deadline is turned into a `Cancelled` rather than a fabricated `Denied`. The
+consultation rule (`consult`) is a pure function of "listed" and "an approver is
+configured": a listed destination never consults an approver, an unlisted one
+with no approver is refused, and an unlisted one with an approver is asked.
+
+Wiring the proxy to publish `requested` and wait is the daemon's, which owns both
+the sandbox and the bus.
+
 ```
 confined command
   │  CONNECT host:port
