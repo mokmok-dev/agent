@@ -38,6 +38,15 @@ pub enum RenderError {
         /// The missing path.
         path: PathBuf,
     },
+    /// The egress proxy's socket does not exist.
+    ///
+    /// A missing socket cannot be bound into the command's namespace, and
+    /// skipping it would silently grant no egress where the policy asked for it.
+    #[error("egress socket `{path}` does not exist")]
+    MissingEgressSocket {
+        /// The missing path.
+        path: PathBuf,
+    },
     /// The scratch directory lies inside a `deny` entry.
     ///
     /// The scratch is the command's `TMPDIR`, so a `deny` over it would remove
@@ -47,6 +56,19 @@ pub enum RenderError {
     ScratchDenied {
         /// The scratch directory.
         scratch: PathBuf,
+        /// The `deny` entry that covers it.
+        deny: PathBuf,
+    },
+    /// The egress proxy's socket lies inside a `deny` entry.
+    ///
+    /// The socket must be mounted into the command's namespace for egress to
+    /// work; a `deny` over it (or its parent directory) would make bubblewrap
+    /// unable to create the mountpoint, so the policy is rejected rather than run
+    /// with a broken egress grant.
+    #[error("the egress socket `{socket}` is inside a `deny` entry `{deny}`")]
+    SocketDenied {
+        /// The proxy's socket path.
+        socket: PathBuf,
         /// The `deny` entry that covers it.
         deny: PathBuf,
     },

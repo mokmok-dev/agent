@@ -436,3 +436,48 @@ fn a_long_lived_process_runs_and_is_killed_with_its_descendants() {
         "a killed process must not leave a descendant's marker"
     );
 }
+
+#[test]
+fn an_egress_socket_is_mounted_into_the_command_view() {
+    let Some(backend) = backend_or_skip() else {
+        return;
+    };
+    let tree = Tree::new("egress-mount");
+    let scratch = Scratch::new(&tree.work()).expect("scratch");
+
+    // A real Unix socket on the host, held open for the test's duration so the
+    // socket file exists while the command runs.
+    let egress = tree.0.join("egress");
+    fs::create_dir_all(&egress).expect("creates the egress dir");
+    let socket = egress.join("proxy.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("binds the socket");
+
+    let mut policy = policy(&tree);
+    policy.network.proxy = Some(sandbox::policy::ProxyGrant {
+        port: 8080,
+        socket: Some(socket.clone()),
+        egress: Vec::new(),
+    });
+
+    // The command checks that the socket is present at its path inside the
+    // sandbox. `-S` is dash's socket test, so this works with `sh` on every host.
+    let outcome = sh(
+        &backend,
+        &policy,
+        &scratch,
+        &format!("[ -S {0} ] && echo MOUNTED {0}", socket.display()),
+    );
+
+    assert_eq!(
+        outcome.code,
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&outcome.stdout);
+    assert!(
+        stdout.contains("MOUNTED"),
+        "the egress socket should be visible inside the sandbox, got: {stdout}"
+    );
+    drop(listener);
+}
