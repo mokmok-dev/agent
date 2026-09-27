@@ -59,6 +59,14 @@
               && !(pkgs.lib.hasPrefix "result" base);
           };
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+          # The sandbox's spawn tests confine a real command with bubblewrap and
+          # skip themselves when it cannot build a namespace. bubblewrap is
+          # Linux-only, so it is added only there; on macOS the tests skip, and
+          # referencing the package unconditionally would break the flake's
+          # evaluation for aarch64-darwin.
+          bubblewrapPackages = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            pkgs.bubblewrap
+          ];
           commonArgs = {
             inherit src;
             strictDeps = true;
@@ -128,6 +136,7 @@
               // {
                 inherit cargoArtifacts;
                 cargoExtraArgs = "--locked";
+                nativeBuildInputs = bubblewrapPackages;
               }
             );
             doctest = craneLib.cargoDocTest (
@@ -194,6 +203,7 @@
                 kaniVerifier
                 cargo-mutants
               ]
+              ++ bubblewrapPackages
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 mold
               ];
