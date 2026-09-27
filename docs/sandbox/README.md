@@ -220,6 +220,31 @@ reuse is real.
 7. Observability: proxy metrics, verification reporting, and benchmarks for the
    "lighter than a container" claim.
 
+### Status
+
+Milestones 1–6 are implemented in the `sandbox` crate (bubblewrap on Linux; the
+Landlock fallback and the macOS Seatbelt profile remain deferred, because no host
+or CI here can spawn-verify them). Milestone 7 was **questioned and deliberately
+deferred**, on three grounds:
+
+- **Proxy metrics have no sink.** The project deferred o11y Phase B/C (the OTLP
+  exporter and metrics) pending a collector and a sampling policy, and no daemon
+  owns the proxy yet. Counters read by nobody are the "field with no consumer"
+  [security.md](./security.md) rejects; the sandbox's observability today is its
+  **CloudEvents** — `exec.completed`, the violation events, and the egress
+  decision and rule events — which are durable and replayable on the bus.
+- **Verification reporting already exists.** It is
+  [docs/verification/README.md](../verification/README.md), kept current as each
+  milestone lands rather than as a separate deliverable.
+- **A container-comparison benchmark would not drive a decision.** The "lighter
+  than a container" claim concerns container startup and memory, which this host
+  and CI cannot compare meaningfully, and criterion would add a build target that
+  earns no feedback.
+
+Metrics and benchmarks are therefore not built until a real consumer needs them
+(the daemon exporting the proxy's counters, or a decision gated on a
+measurement), which is the point at which they can be judged.
+
 ## Open Questions
 
 - The bus gates privileged events on peer identity only: a UDS pathname
