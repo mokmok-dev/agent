@@ -26,6 +26,7 @@
 //! the tunnels its rule granted.
 
 mod allowlist;
+mod approval;
 mod destinations;
 mod env;
 mod forwarder;
@@ -43,6 +44,7 @@ use std::time::Duration;
 use crate::policy::HostPort;
 
 pub use allowlist::{Allowlist, TunnelCloser};
+pub use approval::{Approval, Consultation, Pending, RequestId, await_decision, consult};
 pub use destinations::DestinationSet;
 pub use env::{NO_PROXY, inject_proxy_env};
 pub use forwarder::{ForwardConfig, ForwardError, Forwarder};

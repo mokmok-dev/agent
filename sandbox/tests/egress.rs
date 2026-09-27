@@ -175,35 +175,39 @@ impl Drop for Proxy {
 /// response, and a server that never answers (a mutation of the head terminator,
 /// say) should fail in a moment rather than block on the proxy's own, longer
 /// timeout.
+///
+/// The head is read one byte at a time, with no `BufReader`. A buffered read can
+/// pull tunnel bytes (the upstream's banner) into the buffer along with the head,
+/// and those bytes are lost when the reader is dropped, so the caller's own read
+/// of the tunnel then misses them. Reading exactly to the blank line leaves the
+/// tunnel bytes in the socket for the caller.
 fn exchange(
     socket: &std::path::Path,
     request: &[u8],
 ) -> (String, UnixStream) {
+    use std::io::Read;
+
     let mut stream = UnixStream::connect(socket).expect("connects to the proxy");
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("sets a read timeout");
     stream.write_all(request).expect("writes the request");
     stream.flush().expect("flushes");
-    let mut reader = BufReader::new(stream.try_clone().expect("clones"));
-    let mut status = String::new();
-    // Read the blank line that ends the response head.
+
+    let mut status = Vec::new();
     loop {
-        let mut line = String::new();
-        if reader
-            .read_line(&mut line)
-            .expect("reads the response head")
-            == 0
-        {
+        let mut byte = [0_u8; 1];
+        let read = stream.read(&mut byte).expect("reads the response head");
+        if read == 0 {
             break;
         }
-        let done = line == "\r\n" || line == "\n";
-        status.push_str(&line);
-        if done {
+        status.push(byte[0]);
+        // The blank line ends the head; stop before any tunnel byte.
+        if status.ends_with(b"\n\n") || status.ends_with(b"\n\r\n") {
             break;
         }
     }
-    (status, stream)
+    (String::from_utf8_lossy(&status).into_owned(), stream)
 }
 
 #[test]

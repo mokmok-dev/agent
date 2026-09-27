@@ -25,6 +25,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
+use crate::egress::RequestId;
 use crate::executor::ExecOutcome;
 use crate::policy::HostPort;
 
@@ -38,6 +39,15 @@ pub const VIOLATION_NETWORK: &str = "agent.sandbox.violation.network";
 pub const EGRESS_RULE_ADDED: &str = "agent.sandbox.egress.rule_added";
 /// An authority removed a destination from the mutable egress allowlist.
 pub const EGRESS_RULE_REVOKED: &str = "agent.sandbox.egress.rule_revoked";
+/// A connection arrived for an unlisted destination and an approver is configured.
+pub const EGRESS_REQUESTED: &str = "agent.sandbox.egress.requested";
+/// An approver allowed the destination; the proxy opens the tunnel.
+pub const EGRESS_GRANTED: &str = "agent.sandbox.egress.granted";
+/// An approver refused the destination; the proxy answers `403`.
+pub const EGRESS_DENIED: &str = "agent.sandbox.egress.denied";
+/// The deadline passed with no decision, or an approver withdrew it; the proxy
+/// answers `403`, but the recorded reason is a cancellation.
+pub const EGRESS_CANCELLED: &str = "agent.sandbox.egress.cancelled";
 
 /// How much of the command's `stderr` a violation event carries.
 const OUTPUT_SNIPPET_BYTES: usize = 4096;
@@ -177,6 +187,102 @@ impl Event {
         destination: &HostPort,
     ) -> Self {
         Self::rule(EGRESS_RULE_REVOKED, sandbox_id, destination)
+    }
+
+    /// The `egress.requested` event for `destination`, carrying `request_id`.
+    ///
+    /// The proxy publishes this as the trusted daemon when an unlisted
+    /// destination has an approver. The id correlates the request with the one
+    /// decision that answers it.
+    #[must_use]
+    pub fn egress_requested(
+        sandbox_id: impl Into<String>,
+        request_id: &RequestId,
+        destination: &HostPort,
+        traceparent: Option<String>,
+    ) -> Self {
+        Self::decision(
+            EGRESS_REQUESTED,
+            sandbox_id,
+            request_id,
+            destination,
+            traceparent,
+        )
+    }
+
+    /// The `egress.granted` event: an approver allowed the destination.
+    #[must_use]
+    pub fn egress_granted(
+        sandbox_id: impl Into<String>,
+        request_id: &RequestId,
+        destination: &HostPort,
+        traceparent: Option<String>,
+    ) -> Self {
+        Self::decision(
+            EGRESS_GRANTED,
+            sandbox_id,
+            request_id,
+            destination,
+            traceparent,
+        )
+    }
+
+    /// The `egress.denied` event: an approver refused the destination.
+    #[must_use]
+    pub fn egress_denied(
+        sandbox_id: impl Into<String>,
+        request_id: &RequestId,
+        destination: &HostPort,
+        traceparent: Option<String>,
+    ) -> Self {
+        Self::decision(
+            EGRESS_DENIED,
+            sandbox_id,
+            request_id,
+            destination,
+            traceparent,
+        )
+    }
+
+    /// The `egress.cancelled` event: the deadline passed, or an approver withdrew
+    /// the request. Never a fabrication of a denial.
+    #[must_use]
+    pub fn egress_cancelled(
+        sandbox_id: impl Into<String>,
+        request_id: &RequestId,
+        destination: &HostPort,
+        traceparent: Option<String>,
+    ) -> Self {
+        Self::decision(
+            EGRESS_CANCELLED,
+            sandbox_id,
+            request_id,
+            destination,
+            traceparent,
+        )
+    }
+
+    /// A destination-decision event: `request_id`, `host`, `port`, and the
+    /// optional `traceparent`, per `docs/sandbox/events.md`.
+    fn decision(
+        ty: &'static str,
+        sandbox_id: impl Into<String>,
+        request_id: &RequestId,
+        destination: &HostPort,
+        traceparent: Option<String>,
+    ) -> Self {
+        let sandbox_id = sandbox_id.into();
+        Self {
+            ty,
+            subject: sandbox_id.clone(),
+            data: json!({
+                "sandbox_id": sandbox_id,
+                "request_id": request_id.as_str(),
+                "host": &destination.host,
+                "port": destination.port,
+            }),
+            traceparent,
+        }
     }
 
     /// A `rule_added` / `rule_revoked` event, whose payloads are identical.
@@ -597,5 +703,40 @@ mod tests {
             event.traceparent, None,
             "a rule change carries no traceparent"
         );
+    }
+
+    #[test]
+    fn the_decision_events_name_the_request_and_destination() {
+        let id = RequestId::new("req-9");
+        let destination = HostPort::new("api.example.com", 443);
+        let trace = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned();
+
+        let requested = Event::egress_requested("sbx-7", &id, &destination, Some(trace.clone()));
+        assert_eq!(requested.ty, EGRESS_REQUESTED);
+        assert_eq!(requested.subject, "sbx-7");
+        assert_eq!(requested.data["sandbox_id"], json!("sbx-7"));
+        assert_eq!(requested.data["request_id"], json!("req-9"));
+        assert_eq!(requested.data["host"], json!("api.example.com"));
+        assert_eq!(requested.data["port"], json!(443));
+        assert_eq!(requested.traceparent.as_deref(), Some(trace.as_str()));
+
+        for (event, ty) in [
+            (
+                Event::egress_granted("sbx-7", &id, &destination, None),
+                EGRESS_GRANTED,
+            ),
+            (
+                Event::egress_denied("sbx-7", &id, &destination, None),
+                EGRESS_DENIED,
+            ),
+            (
+                Event::egress_cancelled("sbx-7", &id, &destination, None),
+                EGRESS_CANCELLED,
+            ),
+        ] {
+            assert_eq!(event.ty, ty);
+            assert_eq!(event.data["request_id"], json!("req-9"));
+            assert_eq!(event.data["host"], json!("api.example.com"));
+        }
     }
 }
