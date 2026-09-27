@@ -38,8 +38,9 @@ uninspected. Do not compare them on one metric.
 The implemented subsystems are the WAL record frame, store, and replay in
 `agent/src/wal/`, the `CloudEvents` envelope in `agent/src/cloudevent.rs`, the
 fan-out broker in `agent/src/broker.rs`, the UDS/WebSocket transport in
-`agent/src/transport.rs`, the wire messages in `agent/src/protocol.rs`, and the
-durable cursor store in `agent/src/cursor.rs`:
+`agent/src/transport.rs`, the wire messages in `agent/src/protocol.rs`, the
+durable cursor store in `agent/src/cursor.rs`, and the wired state machine in
+`agent/src/bus.rs`:
 
 | Module | Property |
 | --- | --- |
@@ -55,6 +56,7 @@ durable cursor store in `agent/src/cursor.rs`:
 | `protocol` | A message is classified as an event by `specversion` and as a control message otherwise; every control message round-trips; an unknown type or a non-object is rejected. |
 | `cursor` | A cursor survives a reopen as the atomically replaced latest value; cursors are isolated by UID and subscriber ID; `resolve` is `max(requested, stored)`; an unsafe or overlong subscriber ID is rejected; a corrupt file is reported. |
 | `replay` | Replay yields records in order from a start sequence, skips earlier records within the starting segment, spans segments, and reports a corrupt segment. |
+| `bus` | Publish assigns the bus-owned attributes, commits durably, then fans out; nothing is committed when an envelope is rejected; ack is durable and makes a resume start from `max(requested, stored)`; subscribers of one ID on different UIDs are distinct; a slow subscriber is evicted without blocking publish. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
 hold the reference-model proptests; `agent/src/wal/proofs.rs` holds the Kani
