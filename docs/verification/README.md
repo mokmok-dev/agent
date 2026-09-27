@@ -35,7 +35,7 @@ uninspected. Do not compare them on one metric.
 
 ## Current Scope
 
-The implemented subsystem is the WAL record frame in `src/wal/`:
+The implemented subsystem is the WAL record frame in `agent/src/wal/`:
 
 | Module | Property |
 | --- | --- |
@@ -44,7 +44,7 @@ The implemented subsystem is the WAL record frame in `src/wal/`:
 | `chain` | Records link to the previous record's BLAKE3 hash, from the domain-separated genesis. |
 | `scan` | Recovery reproduces a written log, truncates only a torn trailing record, and treats any other checksum or chain failure as fatal. |
 
-`tests/wal.rs` holds the reference-model proptest; `src/wal/proofs.rs` holds the
+`agent/tests/wal.rs` holds the reference-model proptest; `agent/src/wal/proofs.rs` holds the
 Kani harnesses. A machine-checked obligation catalog is deferred until the
 verified scope spans more than one crate; the tables above are the record for
 now.
@@ -86,7 +86,7 @@ Handling survivors:
    no observable effect). A 100% kill rate is not the goal.
 2. Where survivors cluster on a branch, write one property test against a
    reference model — an implementation known to be correct for other reasons,
-   such as the in-memory record list in `tests/wal.rs`. One such test can cover
+   such as the in-memory record list in `agent/tests/wal.rs`. One such test can cover
    branches no hand-written case reaches.
 3. Do not drop boundary values from a generator. A guard like `if len > 0`
    changes the result only at zero, so a generator that omits zero lets that
@@ -96,7 +96,7 @@ Handling survivors:
 ### Gotchas
 
 - A `#[cfg(kani)]` harness is not compiled by `cargo test`, so a mutant inside
-  one always survives. `.cargo/mutants.toml` excludes `src/wal/proofs.rs`;
+  one always survives. `.cargo/mutants.toml` excludes `agent/src/wal/proofs.rs`;
   harness strength is checked by the harness-mutation derivations in `flake.nix`
   instead.
 - The two `recover_from` loop guards only run once, from `position == 0`, so
@@ -118,7 +118,7 @@ fail instead of passing quietly.
 
 | File | Injected mutation | Harness that must fail |
 | --- | --- | --- |
-| `src/wal/scan.rs` | `len > remaining` becomes `len >= remaining` | `a_single_record_recovers_cleanly` |
+| `agent/src/wal/scan.rs` | `len > remaining` becomes `len >= remaining` | `a_single_record_recovers_cleanly` |
 
 The mutation makes an exactly-fitting final record look torn, which the harness
 that recovers a single whole record catches. Reproduce locally by applying the
@@ -127,7 +127,7 @@ same edit and running `nix develop -c cargo kani --lib --harness <name>`.
 Note that Kani does not run `blake3`: the crate reaches `cpuid` inline assembly
 for runtime CPU feature detection, which Kani cannot model. The frame harnesses
 therefore pass a fixed starting hash to `recover_from` instead of calling
-`genesis_hash`, and the Kani crate list is confined to `src/wal`. Do not add a
+`genesis_hash`, and the Kani crate list is confined to `agent/src/wal`. Do not add a
 harness that hashes unless the hashing crate stops emitting that asm.
 
 ## CI Policy

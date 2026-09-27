@@ -68,12 +68,25 @@
           # installed as a standalone Nix package rather than through the
           # workspace toolchain.
           kaniVerifier = import ./nix/kani-package.nix { inherit pkgs system; };
+          # The crates whose production harnesses Kani verifies. The single
+          # source of truth for the verified scope; keep it in step with
+          # docs/verification/README.md.
+          kaniCrates = [ "agent" ];
           kaniArgs = commonArgs // {
             cargoArtifacts = null;
             nativeBuildInputs = [ kaniVerifier ];
             doInstallCargoArtifacts = false;
             installPhaseCommand = "mkdir -p $out";
           };
+          kaniCheckFor =
+            crate:
+            craneLib.mkCargoDerivation (
+              kaniArgs
+              // {
+                pname = "agent-kani-${crate}";
+                buildPhaseCargoCommand = "cargo-kani -p ${crate} --lib";
+              }
+            );
           # A harness proves only what it asserts, so one that stopped asserting
           # the property still reports SUCCESSFUL. Each entry injects one
           # mutation that must break the property its harness states, and the
@@ -84,7 +97,7 @@
               name = "wal-recovery-keeps-a-full-record";
               # A record that exactly fills the remaining bytes is committed, not
               # a torn trailing write; `>` must not become `>=`.
-              file = "src/wal/scan.rs";
+              file = "agent/src/wal/scan.rs";
               find = "if len > bytes.len() - position {";
               replace = "if len >= bytes.len() - position {";
               harness = "a_single_record_recovers_cleanly";
@@ -111,14 +124,13 @@
                 inherit cargoArtifacts;
               }
             );
-            kani = craneLib.mkCargoDerivation (
-              kaniArgs
-              // {
-                pname = "agent-kani";
-                buildPhaseCargoCommand = "cargo-kani --lib";
-              }
-            );
           }
+          // builtins.listToAttrs (
+            map (crate: {
+              name = "kani-${crate}";
+              value = kaniCheckFor crate;
+            }) kaniCrates
+          )
           // builtins.listToAttrs (
             map (
               entry:

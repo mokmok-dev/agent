@@ -6,7 +6,7 @@
 # the harness-mutation derivations in flake.nix instead. The file is excluded
 # rather than a regex on the function name, because a mutant's name is
 # unqualified and would not carry the `proofs::` path.
-exclude_globs = ["src/wal/proofs.rs"]
+exclude_globs = ["agent/src/wal/proofs.rs"]
 
 # `recover_from` only ever compares from `position == 0` before incrementing it,
 # so `position < bytes.len()` and `bytes.len() - position < HEADER_LEN` are both
