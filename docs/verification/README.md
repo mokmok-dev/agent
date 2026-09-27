@@ -148,6 +148,13 @@ therefore pass a fixed starting hash to `recover_from` instead of calling
 `genesis_hash`, and the Kani crate list is confined to `agent/src/wal`. Do not add a
 harness that hashes unless the hashing crate stops emitting that asm.
 
+The unwind bound lives in `[workspace.metadata.kani.flags]` in the **root**
+`Cargo.toml`, because `cargo-kani` reads flags from the workspace root, not from
+the member manifest. Put it in `agent/Cargo.toml` and it is silently ignored:
+CBMC runs unbounded, prints thousands of `Unwinding loop ... crc32c` lines, and
+eventually reports `VERIFICATION:- FAILED` on an unwinding assertion after tens
+of minutes. If a run behaves that way, check where the flags are declared first.
+
 ## CI Policy
 
 `nix flake check` (run by the `nix` workflow for every PR and main push)

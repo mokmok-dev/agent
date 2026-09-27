@@ -16,12 +16,5 @@ thiserror.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 
-[package.metadata.kani.flags]
-# The CRC table loop runs once per byte, and a harness hashes a record of up to
-# ~68 bytes, so the bound has to exceed that. Individual harnesses raise it
-# further when they need to.
-default-unwind = "80"
-output-format = "terse"
-
 [lints]
 workspace = true

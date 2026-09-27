@@ -14,6 +14,15 @@ thiserror = "2.0.20"
 [workspace.metadata.crane]
 name = "agent"
 
+# `cargo-kani` reads its flags from the workspace root manifest, not the member,
+# so this must stay here or the unwind bound is silently ignored and CBMC runs
+# effectively unbounded. The CRC table loop runs once per hashed byte (up to
+# ~68 for the largest record the harnesses build), so the bound has to exceed
+# that.
+[workspace.metadata.kani.flags]
+default-unwind = "80"
+output-format = "terse"
+
 [workspace.lints.clippy]
 all = "deny"
 expect_used = "deny"
