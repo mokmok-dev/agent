@@ -8,6 +8,10 @@ version.workspace = true
 name = "egress-forward"
 path = "bins/egress-forward.rs"
 
+[[bin]]
+name = "sandbox-supervisor"
+path = "bins/sandbox-supervisor.rs"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

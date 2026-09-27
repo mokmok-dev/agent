@@ -62,3 +62,4 @@ pub mod events;
 pub mod executor;
 pub mod filesystem;
 pub mod policy;
+pub mod supervisor;

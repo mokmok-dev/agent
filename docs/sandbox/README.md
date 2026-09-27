@@ -36,6 +36,7 @@ sandbox runs**.
 | --- | --- |
 | [filesystem.md](./filesystem.md) | The path policy and its bubblewrap / Landlock / Seatbelt rendering. |
 | [network.md](./network.md) | Egress denial by default, the UDS `HTTP_PROXY`, the forwarder, and transport selection. |
+| [supervisor.md](./supervisor.md) | The in-namespace init that runs the forwarder and the confined command together. |
 | [permissions.md](./permissions.md) | Runtime permission changes: the mutable egress allowlist and per-connection approval. |
 | [events.md](./events.md) | The CloudEvents written to the event bus for decisions and violations. |
 | [security.md](./security.md) | Trust boundaries, guarantees, and stated gaps. |
@@ -160,6 +161,7 @@ built at spawn, and the egress proxy the command talks to at run time.
 | `filesystem` | Renders the path policy into bubblewrap / Landlock / Seatbelt. | [filesystem.md](./filesystem.md) |
 | `executor` | Spawns a confined one-shot command or long-lived process. | [filesystem.md](./filesystem.md) |
 | `egress` | The CONNECT proxy, the child-side forwarder, and the mutable allowlist. | [network.md](./network.md) |
+| `supervisor` | Runs the forwarder and the confined command in one network namespace. | [supervisor.md](./supervisor.md) |
 | `permission` | Runtime allowlist mutation and per-connection approval. | [permissions.md](./permissions.md) |
 | `events` | Decision and violation CloudEvents on the bus. | [events.md](./events.md) |
 
@@ -194,6 +196,7 @@ sandbox/src/
   events/         decision and violation event emission
 sandbox/bins/
   sandbox-helper        applies Landlock + seccomp before exec
+  sandbox-supervisor    runs the forwarder and the command in one namespace
   egress-forward        bridges loopback to the mounted proxy socket
 ```
 
