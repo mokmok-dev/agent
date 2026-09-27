@@ -98,6 +98,7 @@ fn sh(
         program: OsString::from("/bin/sh"),
         args: vec![OsString::from("-c"), OsString::from(script)],
         policy: policy.clone(),
+        egress: None,
     };
     run(backend, &request, scratch).expect("the confined command runs")
 }
@@ -253,6 +254,7 @@ fn a_policy_naming_a_missing_write_root_is_a_render_error() {
         program: OsString::from("/bin/true"),
         args: Vec::new(),
         policy,
+        egress: None,
     };
     let result = run(&backend, &request, &scratch);
     assert!(matches!(

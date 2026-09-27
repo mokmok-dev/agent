@@ -23,41 +23,42 @@ pub const NO_PROXY: &str = "127.0.0.1,localhost,::1";
 /// Inject the proxy variables into `env`, replacing any of the same name.
 ///
 /// The value names the loopback address the command can actually reach: the
-/// forwarder's port in the Unix-socket transport (the forwarder binds loopback
+/// forwarder's `port` in the Unix-socket transport (the forwarder binds loopback
 /// inside the namespace), or the proxy's own port in the loopback transport. The
-/// URL carries the per-proxy token, so another process of the same user cannot
+/// URL carries the per-proxy `token`, so another process of the same user cannot
 /// reuse the tunnel.
 ///
 /// Injection is a replacement, not an append: every name in
 /// [`PROXY_ENV_NAMES`] and `NO_PROXY` is removed from `env` before the daemon's
 /// value is added, so a stale operator value can never win.
 pub fn inject_proxy_env(
-    config: &ProxyConfig,
-    env: &mut Vec<EnvVar>,
-) {
-    let port = match &config.transport {
-        // On Linux the command reaches the forwarder on loopback; the forwarder
-        // carries the bytes to the socket.
-        Transport::UnixSocket { forward_port, .. } => *forward_port,
-        // A host without a namespace reaches the proxy's own loopback port.
-        Transport::Loopback(port) => *port,
-    };
-    install(config, port, env);
-}
-
-/// Install the four variables for `port`, replacing any existing ones.
-fn install(
-    config: &ProxyConfig,
     port: u16,
+    token: &str,
     env: &mut Vec<EnvVar>,
 ) {
     // Drop every name the daemon owns, so the result is deterministic.
     env.retain(|var| !owns(&var.name));
-    let url = proxy_url(port, &config.token);
+    let url = proxy_url(port, token);
     for name in PROXY_ENV_NAMES {
         env.push(EnvVar::new(name, &url));
     }
     env.push(EnvVar::new("NO_PROXY", NO_PROXY));
+}
+
+/// Inject the proxy variables for `config`'s transport into `env`.
+///
+/// A thin wrapper over [`inject_proxy_env`] that reads the reachable port from the
+/// transport: the forwarder's in the Unix-socket transport, the proxy's own in
+/// the loopback transport.
+pub fn inject_proxy_env_for_config(
+    config: &ProxyConfig,
+    env: &mut Vec<EnvVar>,
+) {
+    let port = match &config.transport {
+        Transport::UnixSocket { forward_port, .. } => *forward_port,
+        Transport::Loopback(port) => *port,
+    };
+    inject_proxy_env(port, &config.token, env);
 }
 
 /// Whether the daemon owns `name`.
@@ -116,7 +117,7 @@ mod tests {
     #[test]
     fn the_unix_socket_transport_names_the_forward_port() {
         let mut env = Vec::new();
-        inject_proxy_env(&config(), &mut env);
+        inject_proxy_env_for_config(&config(), &mut env);
         assert_eq!(
             value(&env, "HTTP_PROXY"),
             Some("http://agent:tok@127.0.0.1:8080")
@@ -128,7 +129,7 @@ mod tests {
         let mut config = config();
         config.transport = Transport::Loopback(9999);
         let mut env = Vec::new();
-        inject_proxy_env(&config, &mut env);
+        inject_proxy_env_for_config(&config, &mut env);
         assert_eq!(
             value(&env, "HTTP_PROXY"),
             Some("http://agent:tok@127.0.0.1:9999")
@@ -138,7 +139,7 @@ mod tests {
     #[test]
     fn all_three_proxy_names_and_no_proxy_are_set() {
         let mut env = Vec::new();
-        inject_proxy_env(&config(), &mut env);
+        inject_proxy_env_for_config(&config(), &mut env);
         assert_eq!(count(&env, "HTTP_PROXY"), 1);
         assert_eq!(count(&env, "HTTPS_PROXY"), 1);
         assert_eq!(count(&env, "ALL_PROXY"), 1);
@@ -151,7 +152,7 @@ mod tests {
             EnvVar::new("HTTP_PROXY", "http://evil.example:1"),
             EnvVar::new("HTTPS_PROXY", "http://evil.example:1"),
         ];
-        inject_proxy_env(&config(), &mut env);
+        inject_proxy_env_for_config(&config(), &mut env);
         assert_eq!(count(&env, "HTTP_PROXY"), 1);
         assert_eq!(count(&env, "HTTPS_PROXY"), 1);
         assert_eq!(
@@ -164,7 +165,7 @@ mod tests {
     #[test]
     fn the_replacement_is_case_insensitive() {
         let mut env = vec![EnvVar::new("http_proxy", "http://evil.example:1")];
-        inject_proxy_env(&config(), &mut env);
+        inject_proxy_env_for_config(&config(), &mut env);
         assert!(
             !env.iter().any(|var| var.value.contains("evil.example")),
             "a lower-case operator value must be dropped too"
@@ -174,14 +175,14 @@ mod tests {
     #[test]
     fn an_unrelated_variable_is_left_alone() {
         let mut env = vec![EnvVar::new("PATH", "/usr/bin")];
-        inject_proxy_env(&config(), &mut env);
+        inject_proxy_env_for_config(&config(), &mut env);
         assert_eq!(value(&env, "PATH"), Some("/usr/bin"));
     }
 
     #[test]
     fn no_proxy_keeps_the_command_loopback_off_the_tunnel() {
         let mut env = Vec::new();
-        inject_proxy_env(&config(), &mut env);
+        inject_proxy_env_for_config(&config(), &mut env);
         let value = value(&env, "NO_PROXY").expect("NO_PROXY is set");
         assert!(value.contains("127.0.0.1"));
         assert!(value.contains("localhost"));
@@ -192,7 +193,7 @@ mod tests {
     fn the_url_carries_the_bearer_token() {
         // The `UserInfo` the proxy expects as `Proxy-Authorization`.
         let mut env = Vec::new();
-        inject_proxy_env(&config(), &mut env);
+        inject_proxy_env_for_config(&config(), &mut env);
         let url = value(&env, "HTTP_PROXY").expect("HTTP_PROXY is set");
         assert!(url.contains(&format!("agent:{}@", config().token)));
         // `bearer` is the form the proxy compares against.

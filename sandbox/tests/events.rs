@@ -87,6 +87,7 @@ fn sh(
         program: OsString::from("/bin/sh"),
         args: vec![OsString::from("-c"), OsString::from(script)],
         policy: policy.clone(),
+        egress: None,
     };
     run(backend, &request, scratch).expect("the confined command runs")
 }
@@ -179,6 +180,7 @@ fn a_real_network_attempt_classifies_as_network_unreachable() {
             OsString::from("cat < /dev/tcp/1.1.1.1/443"),
         ],
         policy,
+        egress: None,
     };
     let outcome = run(&backend, &request, &scratch).expect("the confined command runs");
 

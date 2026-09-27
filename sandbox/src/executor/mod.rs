@@ -38,6 +38,26 @@ pub struct ExecRequest {
     pub args: Vec<OsString>,
     /// The confinement policy.
     pub policy: Policy,
+    /// The egress launch, when the policy grants egress over a Unix socket. The
+    /// daemon resolves the binaries and supplies the per-proxy token; the
+    /// executor then runs the supervisor as the sandbox's init and injects
+    /// `HTTP_PROXY`.
+    pub egress: Option<EgressLaunch>,
+}
+
+/// The daemon-resolved binary paths and token for an egress grant.
+///
+/// The daemon resolves these on the **trusted** side, applying the same rule as
+/// the backend: a binary inside a policy write root is rejected. The executor does
+/// not search. See `docs/sandbox/supervisor.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgressLaunch {
+    /// The `sandbox-supervisor` binary that runs as the sandbox's init.
+    pub supervisor: PathBuf,
+    /// The `egress-forward` binary the supervisor starts.
+    pub forwarder: PathBuf,
+    /// The per-proxy token, for the `HTTP_PROXY` URL.
+    pub token: String,
 }
 
 /// The terminal state of a confined command.
@@ -127,14 +147,12 @@ pub fn run(
     request: &ExecRequest,
     scratch: &Scratch,
 ) -> Result<ExecOutcome, ExecError> {
-    let (program, args) = match (backend, backend.render(&request.policy, scratch.path())?) {
-        (Backend::Bubblewrap { program }, Some(args)) => (program.clone(), args),
-        // An unsupported backend renders nothing; running is refused.
-        _ => return Err(ExecError::NoBackend),
-    };
-
     let started = Instant::now();
-    let mut child = spawn(&program, &args, request)?;
+    // The proxy variables are injected into a clone of the policy, so the caller's
+    // request is untouched and the environment the command receives names the
+    // forwarder on loopback.
+    let request = with_proxy_env(request);
+    let mut child = start_confined(backend, &request, scratch.path())?;
 
     // Drain both pipes on their own threads, so a command that writes more than
     // the pipe buffer holds cannot block the process that is waiting for it. The
@@ -157,26 +175,96 @@ pub fn run(
     })
 }
 
-/// Build and start the confined process, with piped output.
-fn spawn(
-    program: &Path,
-    args: &[OsString],
+/// Build and start the confined process under `backend`, with piped output.
+///
+/// When `request.egress` is set, the backend runs the egress **supervisor** as
+/// the sandbox's init instead of the command, and the proxy variables are injected
+/// into the policy's environment first. The supervisor then starts the forwarder
+/// and the command in the same namespace. Otherwise the backend runs the command
+/// directly.
+fn start_confined(
+    backend: &Backend,
     request: &ExecRequest,
+    scratch: &Path,
 ) -> Result<Child, ExecError> {
-    Command::new(program)
-        .args(args)
-        .arg("--")
-        .arg(&request.program)
-        .args(&request.args)
-        // The backend sets the confined environment from the policy. Its own
-        // environment is cleared too, so no host variable can reach the command
-        // through the backend.
+    let (program, args) = match (backend, backend.render(&request.policy, scratch)?) {
+        (Backend::Bubblewrap { program }, Some(args)) => (program.clone(), args),
+        // An unsupported backend renders nothing; running is refused.
+        _ => return Err(ExecError::NoBackend),
+    };
+
+    let mut builder = Command::new(&program);
+    let init = init_args(request);
+    builder.args(&args).arg("--");
+    builder.args(&init);
+
+    // The backend sets the confined environment from the policy; its own
+    // environment is cleared too, so no host variable reaches the command.
+    builder
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(ExecError::Spawn)
+}
+
+/// The program `bwrap` runs as the sandbox's init and its arguments.
+///
+/// Without egress this is the command itself. With egress it is the **supervisor**,
+/// which starts the forwarder and the command in the same namespace:
+/// `<supervisor> --forward <f> --socket <s> --port <n> -- <cmd> <args>`. The argv
+/// is built here, not by the renderer, because it is an executor concern, not a
+/// filesystem one.
+fn init_args(request: &ExecRequest) -> Vec<OsString> {
+    request.egress.as_ref().map_or_else(
+        || {
+            std::iter::once(request.program.clone())
+                .chain(request.args.iter().cloned())
+                .collect()
+        },
+        |egress| {
+            let grant = request.policy.network.proxy.as_ref();
+            let socket = grant
+                .and_then(|grant| grant.socket.as_deref())
+                .map_or_else(OsString::new, |path| path.as_os_str().to_os_string());
+            let port = grant.map_or(0, |grant| grant.port);
+            let mut args = vec![
+                egress.supervisor.clone().into_os_string(),
+                OsString::from("--forward"),
+                egress.forwarder.clone().into_os_string(),
+                OsString::from("--socket"),
+                socket,
+                OsString::from("--port"),
+                OsString::from(port.to_string()),
+                OsString::from("--"),
+                request.program.clone(),
+            ];
+            args.extend(request.args.iter().cloned());
+            args
+        },
+    )
+}
+
+/// Clone `request`, injecting the proxy environment when egress is granted.
+///
+/// The variables name the forwarder's loopback port, which the policy's
+/// `ProxyGrant` already carries. Applying them here, rather than having the
+/// renderer emit `--setenv` for them, keeps the environment a policy concern and
+/// the launch an executor concern.
+fn with_proxy_env(request: &ExecRequest) -> ExecRequest {
+    let mut request = request.clone();
+    if let Some(egress) = &request.egress {
+        let port = request
+            .policy
+            .network
+            .proxy
+            .as_ref()
+            .map_or(0, |grant| grant.port);
+        let token = egress.token.clone();
+        crate::egress::inject_proxy_env(port, &token, &mut request.policy.shell.env);
+    }
+    request
 }
 
 /// Wait for `child`, killing it if it exceeds `timeout`.
@@ -245,6 +333,101 @@ mod tests {
     // integration tests.
 
     use super::*;
+
+    /// A minimal request running `/bin/echo hi`.
+    fn request(
+        egress: Option<EgressLaunch>,
+        proxy: Option<crate::policy::ProxyGrant>,
+    ) -> ExecRequest {
+        use crate::policy::{FsEntry, FsPolicy, ShellPolicy};
+        ExecRequest {
+            program: OsString::from("/bin/echo"),
+            args: vec![OsString::from("hi")],
+            policy: Policy {
+                fs: FsPolicy {
+                    entries: vec![FsEntry::write("/work")],
+                    protected: Vec::new(),
+                },
+                shell: ShellPolicy {
+                    env: Vec::new(),
+                    workdir: PathBuf::from("/work"),
+                },
+                network: crate::policy::NetworkPolicy {
+                    proxy,
+                    ..crate::policy::NetworkPolicy::default()
+                },
+                ..Policy::default()
+            },
+            egress,
+        }
+    }
+
+    #[test]
+    fn without_egress_the_init_is_the_command() {
+        let args = init_args(&request(None, None));
+        assert_eq!(
+            args,
+            vec![OsString::from("/bin/echo"), OsString::from("hi")]
+        );
+    }
+
+    #[test]
+    fn with_egress_the_init_is_the_supervisor() {
+        let egress = EgressLaunch {
+            supervisor: PathBuf::from("/sb/bin/sandbox-supervisor"),
+            forwarder: PathBuf::from("/sb/bin/egress-forward"),
+            token: "tok".to_owned(),
+        };
+        let grant = crate::policy::ProxyGrant {
+            port: 8080,
+            socket: Some(PathBuf::from("/run/egress.sock")),
+            egress: Vec::new(),
+        };
+        let args = init_args(&request(Some(egress), Some(grant)));
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("/sb/bin/sandbox-supervisor"),
+                OsString::from("--forward"),
+                OsString::from("/sb/bin/egress-forward"),
+                OsString::from("--socket"),
+                OsString::from("/run/egress.sock"),
+                OsString::from("--port"),
+                OsString::from("8080"),
+                OsString::from("--"),
+                OsString::from("/bin/echo"),
+                OsString::from("hi"),
+            ]
+        );
+    }
+
+    #[test]
+    fn with_egress_the_proxy_environment_is_injected() {
+        let egress = EgressLaunch {
+            supervisor: PathBuf::from("/s"),
+            forwarder: PathBuf::from("/f"),
+            token: "tok".to_owned(),
+        };
+        let grant = crate::policy::ProxyGrant {
+            port: 9000,
+            socket: Some(PathBuf::from("/run/e.sock")),
+            egress: Vec::new(),
+        };
+        let request = with_proxy_env(&request(Some(egress), Some(grant)));
+        let http = request
+            .policy
+            .shell
+            .env
+            .iter()
+            .find(|var| var.name == "HTTP_PROXY")
+            .expect("HTTP_PROXY is set");
+        assert_eq!(http.value, "http://agent:tok@127.0.0.1:9000");
+    }
+    #[test]
+    fn without_egress_no_proxy_environment_is_added() {
+        let request = with_proxy_env(&request(None, None));
+        assert!(request.policy.shell.env.is_empty());
+    }
 
     #[test]
     fn a_scratch_directory_is_created_and_removed_on_drop() {
