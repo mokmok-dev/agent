@@ -40,7 +40,8 @@ The implemented subsystems are the WAL record frame, store, and replay in
 fan-out broker in `agent/src/broker.rs`, the UDS/WebSocket transport in
 `agent/src/transport.rs`, the wire messages in `agent/src/protocol.rs`, the
 durable cursor store in `agent/src/cursor.rs`, the wired state machine in
-`agent/src/bus.rs`, and the async connection loop in `agent/src/server.rs`:
+`agent/src/bus.rs`, the authority claim in `agent/src/authority.rs`, and the
+async connection loop in `agent/src/server.rs`:
 
 | Module | Property |
 | --- | --- |
@@ -58,6 +59,7 @@ durable cursor store in `agent/src/cursor.rs`, the wired state machine in
 | `replay` | Replay yields records in order from a start sequence, skips earlier records within the starting segment, spans segments, and reports a corrupt segment. |
 | `bus` | Publish assigns the bus-owned attributes, commits durably, then fans out; nothing is committed when an envelope is rejected; ack is durable and makes a resume start from `max(requested, stored)`; subscribers of one ID on different UIDs are distinct; a slow subscriber is evicted without blocking publish. |
 | `server` | Over a real UDS: publish is committed and acknowledged; subscribe replays history then streams live events; ack persists and the next subscribe resumes; a reserved attribute, a malformed frame, and an ack before subscribe each produce the right error; a disallowed peer is closed; a slow subscriber is closed. |
+| `authority` | The decision and rule-change event types require the claim; the `requested` ask and unrelated types do not; a lookalike type is not privileged; only an authority-listener connection may publish a gated type. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
 hold the reference-model proptests; `agent/src/wal/proofs.rs` holds the Kani
