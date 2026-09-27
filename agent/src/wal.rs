@@ -27,6 +27,7 @@ mod chain;
 mod crc;
 mod error;
 mod frame;
+mod replay;
 mod scan;
 mod store;
 
@@ -39,5 +40,6 @@ pub use chain::{HASH_LEN, genesis_hash, hash_record};
 pub use crc::crc32c;
 pub use error::Error;
 pub use frame::{FRAME_VERSION, Header, MAGIC, RECORD_OVERHEAD, Record, record_len};
+pub use replay::{Replay, ReplayedRecord};
 pub use scan::{Entry, Recovery, recover, recover_from};
 pub use store::{Committed, DEFAULT_SEGMENT_SIZE, Store, StoreError, VerifyReport, verify_dir};
