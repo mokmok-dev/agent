@@ -130,7 +130,16 @@ impl Listener {
                 io::Error::new(io::ErrorKind::WouldBlock, "connection limit reached")
             })?;
             let (stream, _addr) = self.inner.accept().await?;
-            let credential = peer_credential(&stream)?;
+            // Reading peer credentials can fail when the peer has already gone
+            // (macOS returns `ENOTCONN` for a connect-and-disconnect). That is
+            // the peer's problem, not the listener's, so skip it.
+            let credential = match peer_credential(&stream) {
+                Ok(credential) => credential,
+                Err(error) => {
+                    tracing::debug!(%error, "skipped a peer whose credentials could not be read");
+                    continue;
+                },
+            };
 
             match tokio_tungstenite::accept_hdr_async_with_config(
                 stream,
