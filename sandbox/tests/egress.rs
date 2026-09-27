@@ -14,6 +14,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Duration;
 
 use sandbox::egress::{DestinationSet, ProxyConfig, Transport, UnixProxy, bearer};
 use sandbox::policy::HostPort;
@@ -122,11 +123,19 @@ impl Drop for Proxy {
 }
 
 /// Open a connection and send a raw request head, returning the response head.
+///
+/// The client read has a short deadline: the point of these tests is the
+/// response, and a server that never answers (a mutation of the head terminator,
+/// say) should fail in a moment rather than block on the proxy's own, longer
+/// timeout.
 fn exchange(
     socket: &std::path::Path,
     request: &[u8],
 ) -> (String, UnixStream) {
     let mut stream = UnixStream::connect(socket).expect("connects to the proxy");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("sets a read timeout");
     stream.write_all(request).expect("writes the request");
     stream.flush().expect("flushes");
     let mut reader = BufReader::new(stream.try_clone().expect("clones"));
@@ -134,7 +143,11 @@ fn exchange(
     // Read the blank line that ends the response head.
     loop {
         let mut line = String::new();
-        if reader.read_line(&mut line).expect("reads") == 0 {
+        if reader
+            .read_line(&mut line)
+            .expect("reads the response head")
+            == 0
+        {
             break;
         }
         let done = line == "\r\n" || line == "\n";

@@ -265,11 +265,20 @@ fn read_head(reader: &mut BufReader<UnixStream>) -> Result<Vec<u8>, ParseError> 
         if exceeds_cap(head.len()) {
             return Err(ParseError::HeadTooLarge);
         }
-        // The head ends at a blank line, LF or CRLF.
-        if head.ends_with(b"\n\n") || head.ends_with(b"\n\r\n") {
+        if head_is_complete(&head) {
             return Ok(head);
         }
     }
+}
+
+/// Whether `head` ends at the blank line that terminates it.
+///
+/// The blank line is `LF LF` or `LF CR LF`, so the check is a disjunction; a
+/// head ending in either is complete. Kept separate from the socket loop so the
+/// three-way shape (LF, CRLF, neither) is tested directly rather than only by
+/// driving a connection to its read timeout.
+fn head_is_complete(head: &[u8]) -> bool {
+    head.ends_with(b"\n\n") || head.ends_with(b"\n\r\n")
 }
 
 /// Open a TCP connection to `host:port` on the trusted side.
@@ -367,6 +376,22 @@ mod tests {
         assert!(!exceeds_cap(request::MAX_HEAD_BYTES));
         assert!(exceeds_cap(request::MAX_HEAD_BYTES + 1));
         assert!(!exceeds_cap(0));
+    }
+
+    #[test]
+    fn a_head_is_complete_at_either_blank_line() {
+        // The disjunction is real: each ending alone is complete.
+        assert!(head_is_complete(b"CONNECT h:1 HTTP/1.1\n\n"));
+        assert!(head_is_complete(b"CONNECT h:1 HTTP/1.1\r\n\r\n"));
+    }
+
+    #[test]
+    fn a_head_mid_line_is_not_complete() {
+        assert!(!head_is_complete(b"CONNECT h:1 HTTP/1.1\n"));
+        assert!(!head_is_complete(b"CONNECT h:1 HTTP/1.1\r\n"));
+        assert!(!head_is_complete(b"CONNECT h:1 HTTP/1.1\n\r"));
+        assert!(!head_is_complete(b""));
+        assert!(!head_is_complete(b"\n"));
     }
 
     #[test]
