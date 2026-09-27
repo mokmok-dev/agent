@@ -8,15 +8,26 @@ resolver = "3"
 # Revisit if the hashing cost matters.
 blake3 = { version = "1.8.2", default-features = false, features = ["pure"] }
 clap = { version = "4.6.6", features = ["derive"] }
+# The `Stream`/`Sink` extension traits for the WebSocket transport. tokio-
+# tungstenite already depends on it, so this only names the version.
+futures-util = { version = "0.3.34", default-features = false, features = [
+  "sink",
+] }
 proptest = "1.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.20"
 time = { version = "0.3.44", features = ["serde-well-known"] }
+# `server` spawns a task per connection and uses `select!`, so it needs `rt`,
+# `macros`, and `time`; the lower layers use only `sync`/`net`/`io-util` and
+# stay runtime-agnostic.
 tokio = { version = "1.53.1", default-features = false, features = [
   "io-util",
+  "macros",
   "net",
+  "rt",
   "sync",
+  "time",
 ] }
 # The server side of the handshake and RFC 6455 framing. No TLS: the transport
 # is a local Unix domain socket, and a remote client is expected to arrive

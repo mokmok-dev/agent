@@ -31,6 +31,12 @@ pub enum ClientMessage {
     },
     /// Begin delivery at `from_seq` (or the stored cursor if greater).
     Subscribe {
+        /// The stable subscriber identity the durable cursor is keyed on.
+        ///
+        /// `docs/event-bus/delivery.md` requires a client-supplied subscriber
+        /// ID namespaced by peer UID; the `subscribe` message is where it is
+        /// supplied, and later `ack`s on the same connection refer to it.
+        subscriber_id: String,
         /// The first sequence the client wants to receive.
         from_seq: u64,
         /// An optional filter the bus applies to delivery.
@@ -200,14 +206,25 @@ mod tests {
 
     #[test]
     fn a_subscribe_request_round_trips() {
-        let message = parse(r#"{"type":"subscribe","from_seq":1000}"#).expect("valid");
+        let message = parse(r#"{"type":"subscribe","subscriber_id":"audit-log","from_seq":1000}"#)
+            .expect("valid");
         assert_eq!(
             message,
             Message::Client(ClientMessage::Subscribe {
+                subscriber_id: "audit-log".to_owned(),
                 from_seq: 1000,
                 filter: None,
             })
         );
+    }
+
+    #[test]
+    fn a_subscribe_without_a_subscriber_id_is_rejected() {
+        // The durable cursor is keyed on the subscriber ID, so it is required.
+        assert!(matches!(
+            parse(r#"{"type":"subscribe","from_seq":0}"#),
+            Err(Error::Json(_))
+        ));
     }
 
     #[test]

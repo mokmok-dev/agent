@@ -11,6 +11,7 @@ path = "bins/verify.rs"
 [dependencies]
 blake3.workspace = true
 clap.workspace = true
+futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -21,10 +22,10 @@ ulid.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-# The runtime and macros are test-only: the transport's `accept` is async, so
-# its tests drive it on a runtime, but the library itself never spawns one.
-# `time` lets a test bound an `accept` so a regression fails instead of hanging.
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+# The multi-threaded runtime is test-only: production code needs only the
+# single-threaded `rt` the `server` module spawns on, but tests want a
+# multi-threaded one so blocking `Bus` calls do not starve the connection tasks.
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true

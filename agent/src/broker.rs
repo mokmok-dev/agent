@@ -122,6 +122,15 @@ impl Subscription {
         self.receiver.try_recv().ok()
     }
 
+    /// Await the next queued event.
+    ///
+    /// Returns `None` once the sender is gone, which is how the broker reports
+    /// an eviction: it removes the subscriber and drops its sender. Check
+    /// [`Subscription::is_evicted`] to distinguish eviction from a clean close.
+    pub async fn recv(&mut self) -> Option<Event> {
+        self.receiver.recv().await
+    }
+
     /// Whether the broker has evicted this subscriber for being slow.
     #[must_use]
     pub fn is_evicted(&self) -> bool {
