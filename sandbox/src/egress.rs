@@ -13,12 +13,21 @@
 //! provider credentials, which the command holds and sends end to end. See
 //! `docs/sandbox/network.md`.
 //!
+//! The child-side [`Forwarder`] is the other half on Linux: the command runs in a
+//! private network namespace, so it reaches this proxy through a forwarder on its
+//! own loopback. [`inject_proxy_env`] points the command's `HTTP_PROXY` at that
+//! loopback port, and [`select_transport`] refuses egress on a host that cannot
+//! make the proxy the only route.
+//!
 //! Approval for an unlisted destination is milestone 5. Today an unlisted
 //! destination is refused with `403`, which the design calls the behaviour with
 //! no approver configured.
 
 mod destinations;
+mod env;
+mod forwarder;
 mod request;
+mod transport;
 
 use std::io::{BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -28,7 +37,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub use destinations::DestinationSet;
+pub use env::{NO_PROXY, inject_proxy_env};
+pub use forwarder::{ForwardConfig, ForwardError, Forwarder};
 pub use request::{Connect, ParseError};
+pub use transport::{HostCapability, TransportError, select_transport};
 
 /// How long the proxy waits for a request head before giving up.
 pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
@@ -44,19 +56,28 @@ pub enum ProxyError {
     NoTransport,
 }
 
-/// Where the proxy listens.
+/// Where the proxy listens, and where a command in a private namespace reaches
+/// it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Transport {
-    /// A Unix domain socket, which crosses a network namespace. Linux.
-    UnixSocket(PathBuf),
-    /// Loopback TCP on `port`. The weaker form for a host without a namespace.
+    /// A Unix domain socket, which crosses a network namespace. Linux. The
+    /// command cannot reach the socket by address, so it reaches a forwarder on
+    /// loopback `forward_port`, which carries the bytes to the socket.
+    UnixSocket {
+        /// The proxy's socket, mounted into the command's namespace.
+        socket: PathBuf,
+        /// The loopback port the command's `HTTP_PROXY` names.
+        forward_port: u16,
+    },
+    /// Loopback TCP on `port`. The weaker form for a host without a namespace:
+    /// the command reaches the proxy directly, and nothing crosses a namespace.
     Loopback(u16),
 }
 
 /// The configuration of one proxy: its transport, its token, and its allowlist.
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
-    /// Where the proxy listens.
+    /// Where the proxy listens, and where a command reaches it.
     pub transport: Transport,
     /// The token a client must present. Generated per proxy and dies with it.
     pub token: String,
@@ -88,17 +109,22 @@ pub struct UnixProxy {
 }
 
 impl UnixProxy {
-    /// Bind a proxy at `path`, creating the parent directory `0700` and the
-    /// socket `0600`.
+    /// Bind a proxy at the socket named by `config`'s transport, creating the
+    /// parent directory `0700` and the socket `0600`.
+    ///
+    /// The path comes from the transport so there is one source of truth, the
+    /// same one the policy's `ProxyGrant` and the environment injection read.
     ///
     /// # Errors
     ///
-    /// Returns [`ProxyError::Bind`] if the directory or socket cannot be created.
-    pub fn bind(
-        path: impl AsRef<Path>,
-        config: ProxyConfig,
-    ) -> Result<Self, ProxyError> {
-        let path = path.as_ref().to_path_buf();
+    /// Returns [`ProxyError::NoTransport`] when `config` names the loopback
+    /// transport (which is not a Unix socket), or [`ProxyError::Bind`] if the
+    /// directory or socket cannot be created.
+    pub fn bind(config: ProxyConfig) -> Result<Self, ProxyError> {
+        let Transport::UnixSocket { socket, .. } = &config.transport else {
+            return Err(ProxyError::NoTransport);
+        };
+        let path = socket.clone();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(ProxyError::Bind)?;
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
@@ -303,10 +329,18 @@ fn open_upstream(
 /// When one side finishes writing, the other's write half is shut down and the
 /// remaining direction keeps flowing, so a client half-close still receives the
 /// reply.
-fn tunnel(
-    client: &UnixStream,
-    upstream: &TcpStream,
-) -> std::io::Result<()> {
+///
+/// Generic over the two endpoints because the same bridge serves both the proxy
+/// (a Unix-socket client to a TCP upstream) and the forwarder (a TCP client to a
+/// Unix-socket upstream).
+fn tunnel<C, U>(
+    client: &C,
+    upstream: &U,
+) -> std::io::Result<()>
+where
+    C: Duplex + 'static,
+    U: Duplex + 'static,
+{
     let mut upstream_read = upstream.try_clone()?;
     let mut upstream_write = upstream.try_clone()?;
     let mut client_read = client.try_clone()?;
@@ -315,16 +349,49 @@ fn tunnel(
     // Client -> upstream, then shut the upstream write half.
     let to_upstream = std::thread::spawn(move || {
         let _ = std::io::copy(&mut client_read, &mut upstream_write);
-        let _ = upstream_write.shutdown(std::net::Shutdown::Write);
+        let _ = upstream_write.shutdown_write();
     });
     // Upstream -> client, then shut the client write half.
     let to_client = std::thread::spawn(move || {
         let _ = std::io::copy(&mut upstream_read, &mut client_write);
-        let _ = client_write.shutdown(std::net::Shutdown::Write);
+        let _ = client_write.shutdown_write();
     });
     let _ = to_upstream.join();
     let _ = to_client.join();
     Ok(())
+}
+
+/// A duplex stream the bridge can clone and half-close.
+///
+/// `TcpStream` and `UnixStream` both offer `try_clone` and `shutdown`, but as
+/// inherent methods with no shared trait, so the bridge names the two it needs.
+trait Duplex: Read + Write + Send + Sized {
+    /// Duplicate the handle, so the two directions can copy independently.
+    fn try_clone(&self) -> std::io::Result<Self>;
+    /// Shut down the write half, leaving the read half open for a half-close.
+    fn shutdown_write(&self) -> std::io::Result<()>;
+}
+
+impl Duplex for TcpStream {
+    fn try_clone(&self) -> std::io::Result<Self> {
+        // The inherent method, not the trait's, so there is no recursion.
+        Self::try_clone(self)
+    }
+
+    fn shutdown_write(&self) -> std::io::Result<()> {
+        self.shutdown(std::net::Shutdown::Write)
+    }
+}
+
+impl Duplex for UnixStream {
+    fn try_clone(&self) -> std::io::Result<Self> {
+        // The inherent method, not the trait's, so there is no recursion.
+        Self::try_clone(self)
+    }
+
+    fn shutdown_write(&self) -> std::io::Result<()> {
+        self.shutdown(std::net::Shutdown::Write)
+    }
 }
 
 /// Write the HTTP response for `decision`.
@@ -417,18 +484,135 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let socket = root.join("e.sock");
         let config = ProxyConfig {
-            transport: Transport::UnixSocket(socket.clone()),
+            transport: Transport::UnixSocket {
+                socket,
+                forward_port: 8080,
+            },
             token: "t".to_owned(),
             destinations: DestinationSet::empty(),
         };
 
         let path;
         {
-            let proxy = UnixProxy::bind(&socket, config).expect("binds");
+            let proxy = UnixProxy::bind(config).expect("binds");
             path = proxy.path().to_path_buf();
             assert!(path.exists(), "the socket exists while the proxy is alive");
         }
         assert!(!path.exists(), "the socket is removed when the proxy drops");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A connected TCP pair, for exercising the bridge on the TCP side.
+    fn tcp_pair() -> (TcpStream, TcpStream) {
+        use std::net::{Ipv4Addr, TcpListener};
+        let listener =
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("binds an ephemeral port");
+        let client =
+            TcpStream::connect(listener.local_addr().expect("has an address")).expect("connects");
+        let (server, _) = listener.accept().expect("accepts");
+        (client, server)
+    }
+
+    /// Read `reader` to EOF, reporting whether EOF was reached (as opposed to the
+    /// read deadline expiring).
+    fn read_until_eof(reader: &mut impl Read) -> (Vec<u8>, bool) {
+        let mut out = Vec::new();
+        let mut buffer = [0_u8; 64];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => return (out, true),
+                Ok(read) => out.extend_from_slice(&buffer[..read]),
+                Err(_) => return (out, false),
+            }
+        }
+    }
+
+    #[test]
+    fn a_client_half_close_reaches_the_tcp_upstream() {
+        // The client's half-close must reach the TCP upstream as EOF. The other
+        // direction is deliberately left open, so `tunnel` has not returned and
+        // cannot be the thing that closed the upstream: only
+        // `TcpStream::shutdown_write` can. A no-op shutdown therefore leaves the
+        // upstream waiting, which the read deadline turns into a fast failure.
+        let (client_dev, client_peer) = UnixStream::pair().expect("a socket pair");
+        let (upstream_dev, upstream_peer) = tcp_pair();
+        std::thread::spawn(move || tunnel(&client_dev, &upstream_dev));
+
+        upstream_peer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("sets a read deadline");
+        let mut client_writer = client_peer.try_clone().expect("clones");
+        client_writer.write_all(b"req").expect("writes");
+        client_writer
+            .shutdown(std::net::Shutdown::Write)
+            .expect("half-closes");
+
+        let (bytes, eof) = read_until_eof(&mut upstream_peer.try_clone().expect("clones"));
+        assert_eq!(bytes, b"req", "the request reached the upstream");
+        assert!(eof, "the client half-close must reach the upstream as EOF");
+    }
+
+    #[test]
+    fn an_upstream_half_close_reaches_the_unix_client() {
+        // The mirror: the upstream's half-close must reach the Unix client as
+        // EOF, while the client's direction stays open so `tunnel` cannot be the
+        // one that closed it. Only `UnixStream::shutdown_write` can.
+        let (client_dev, client_peer) = UnixStream::pair().expect("a socket pair");
+        let (upstream_dev, upstream_peer) = tcp_pair();
+        std::thread::spawn(move || tunnel(&client_dev, &upstream_dev));
+
+        client_peer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("sets a read deadline");
+        let mut upstream_writer = upstream_peer.try_clone().expect("clones");
+        upstream_writer.write_all(b"res").expect("writes");
+        upstream_writer
+            .shutdown(std::net::Shutdown::Write)
+            .expect("half-closes");
+
+        let (bytes, eof) = read_until_eof(&mut client_peer.try_clone().expect("clones"));
+        assert_eq!(bytes, b"res", "the response reached the client");
+        assert!(eof, "the upstream half-close must reach the client as EOF");
+    }
+
+    #[test]
+    fn serve_one_accepts_a_connection_and_answers() {
+        // Covers `serve_one` directly, so the integration tests can dispatch each
+        // connection on its own thread (as a daemon must) without losing it.
+        let root =
+            std::env::temp_dir().join(format!("sandbox-proxy-serve-one-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let socket = root.join("p.sock");
+        let config = ProxyConfig {
+            transport: Transport::UnixSocket {
+                socket,
+                forward_port: 8080,
+            },
+            token: "t".to_owned(),
+            destinations: DestinationSet::empty(),
+        };
+        let proxy = UnixProxy::bind(config).expect("binds");
+
+        let mut client = UnixStream::connect(proxy.path()).expect("connects");
+        // The deadline is set before the exchange, while the peer is still open:
+        // macOS rejects a receive timeout on a Unix socket once the peer has
+        // closed, and the deadline is what turns a `serve_one` that never answers
+        // into a fast failure rather than a hang.
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("sets a read deadline");
+        client
+            .write_all(b"CONNECT h:1 HTTP/1.1\r\nProxy-Authorization: Bearer t\r\n\r\n")
+            .expect("writes the request");
+        let decision = proxy.serve_one().expect("serves one connection");
+        assert_eq!(decision, Decision::Forbidden, "the empty set forbids all");
+
+        let mut response = [0_u8; 64];
+        let read = client.read(&mut response).expect("reads the response");
+        assert!(
+            response[..read].starts_with(b"HTTP/1.1 403"),
+            "the answer is 403"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

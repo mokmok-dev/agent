@@ -44,7 +44,8 @@ durable cursor store in `agent/src/cursor.rs`, the wired state machine in
 async connection loop in `agent/src/server.rs`, the sandbox policy core in
 `sandbox/src/policy/`, the sandbox filesystem layer in
 `sandbox/src/filesystem.rs` and `sandbox/src/executor.rs`, and the sandbox
-egress proxy in `sandbox/src/egress/`:
+egress layer in `sandbox/src/egress/` (proxy, forwarder, environment injection,
+and transport selection):
 
 | Module | Property |
 | --- | --- |
@@ -73,13 +74,17 @@ egress proxy in `sandbox/src/egress/`:
 | `egress::destinations` | Match is exact on `host:port`: the host case-insensitively, the port exactly; the empty set permits nothing; a shared prefix and a different port are not matches. |
 | `egress::request` | The `CONNECT` head parses for a plain, bare-LF, IPv6-bracketed, and header-bearing request; the head length excludes tunnelled bytes; an oversized, incomplete, non-`CONNECT`, malformed, non-UTF-8, portless, zero-port, or headerless request is rejected with the right error. |
 | `egress` | Over a real socket: a permitted destination tunnels bytes end to end; a missing or wrong token is `407` without revealing the allowlist; an unlisted destination is `403` and an empty set forbids all; a malformed head is `400` and a failed upstream `502`; the socket is created `0600` and removed on drop. |
+| `egress::env` | The four proxy variables are set to a URL naming the reachable loopback port (the forwarder's in the Unix-socket transport, the proxy's in the loopback transport); an operator value is **replaced**, not appended, and the replacement is case-insensitive, so a stale value cannot win; `NO_PROXY` names the command's own loopback; an unrelated variable is untouched. |
+| `egress::transport` | Transport follows the host capability: bubblewrap can hold a private network namespace and gets the Unix-socket transport; a host without one is refused (`TransportError::Refused`), so egress fails closed rather than downgrading to the port-only form. |
+| `egress::forwarder` | The CLI parser accepts `--socket`/`--port` in either order and rejects a missing, unknown, non-numeric, out-of-range, or zero argument; binding port zero reports a real ephemeral port. Over a real socket: a client's bytes round-trip to the socket and back, a half-close still receives the reply, and the built `egress-forward` binary reports its port and bridges bytes. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
 hold the reference-model proptests; `agent/tests/verify_cli.rs` and
 `agent/tests/agent_cli.rs` drive the binaries end to end;
 `sandbox/tests/policy.rs` holds the policy precedence proptests;
 `sandbox/tests/egress.rs` drives the proxy over a real socket with a throwaway
-TCP upstream, so it needs no confinement; and `sandbox/tests/executor.rs` and
+TCP upstream, and `sandbox/tests/forwarder.rs` drives the forwarder over a
+throwaway Unix socket, so neither needs confinement; and `sandbox/tests/executor.rs` and
 `sandbox/tests/events.rs` spawn a real confined command through bubblewrap,
 skipping when the host cannot build a namespace (the condition under which the
 daemon refuses to spawn). The `test` flake check puts

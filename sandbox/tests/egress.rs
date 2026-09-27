@@ -78,22 +78,32 @@ impl Proxy {
         let _ = std::fs::remove_dir_all(&root);
         let socket = root.join("egress.sock");
         let config = ProxyConfig {
-            transport: Transport::UnixSocket(socket.clone()),
+            transport: Transport::UnixSocket {
+                socket,
+                forward_port: 8080,
+            },
             token: token.to_owned(),
             destinations,
         };
-        let proxy = Arc::new(UnixProxy::bind(&socket, config).expect("binds the proxy"));
+        let proxy = Arc::new(UnixProxy::bind(config).expect("binds the proxy"));
 
-        // Serve each connection on its own thread, so a test never drives the
-        // accept loop itself. The loop ends when `stop` is set and a final
-        // connection unblocks `accept`.
+        // Serve each connection on its own thread, as a daemon must: a long-lived
+        // tunnel must not block the next accept, nor the `Drop` that ends the
+        // loop. The loop ends when `stop` is set and a final connection unblocks
+        // `accept`.
         let stop = Arc::new(AtomicBool::new(false));
         let serving = Arc::clone(&proxy);
         let stopper = Arc::clone(&stop);
         let accept = std::thread::spawn(move || {
             while !stopper.load(Ordering::Relaxed) {
-                if serving.serve_one().is_err() {
-                    break;
+                match serving.listener().accept() {
+                    Ok((stream, _)) => {
+                        let config = serving.config().clone();
+                        std::thread::spawn(move || {
+                            let _ = sandbox::egress::serve(&stream, &config);
+                        });
+                    },
+                    Err(_) => break,
                 }
             }
         });
