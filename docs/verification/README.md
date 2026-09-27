@@ -77,11 +77,15 @@ proofs off that backend is cheaper than paying for them on every target.
 ## Local Checks
 
 ```sh
-nix develop -c cargo test                       # unit + proptest
+nix develop -c cargo test                       # unit + proptest + doctest
 nix develop -c cargo kani -p agent --lib        # Kani harnesses
 nix develop -c cargo mutants -j 8 --no-times    # mutation measurement
-nix flake check                                 # clippy, test, kani, harness mutation
+nix flake check                                 # clippy, nextest, doctest, kani, harness mutation
 ```
+
+The flake's `test` check runs `cargo nextest`, which does not run doctests,
+so a separate `doctest` check runs `cargo test --doc`. Locally, plain
+`cargo test` covers both in one invocation.
 
 ## Mutation Testing
 
@@ -168,8 +172,8 @@ of minutes. If a run behaves that way, check where the flags are declared first.
 ## CI Policy
 
 `nix flake check` (run by the `nix` workflow for every PR and main push)
-includes clippy, unit + proptest, the Kani harnesses, and the harness-mutation
-checks.
+includes clippy, the nextest suite, the doctest suite, the Kani harnesses, and
+the harness-mutation checks.
 
 A PR additionally runs only the mutants produced by its changed lines
 (`.github/workflows/nix.yaml`, `cargo mutants --in-diff`), so a newly written
