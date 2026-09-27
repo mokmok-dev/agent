@@ -65,7 +65,12 @@ Currently verified by Kani:
 | --- | --- |
 | `a_short_header_is_rejected_without_reading_past_it` | No sub-header-length input reads out of bounds. |
 | `a_truncated_payload_past_the_header_is_reported` | No declared-but-absent payload reads out of bounds. |
-| `a_single_record_recovers_cleanly` | A minimal scan terminates and commits exactly one record. |
+
+The proofs run only on **x86_64-linux**. Every supported target is 64-bit, so one
+bit-precise run covers the integer semantics, and CBMC's aarch64 backend does not
+agree with its x86_64 backend on the recovery path: a scan harness took fifty
+minutes and failed on aarch64 while passing in seconds on x86_64. Keeping the
+proofs off that backend is cheaper than paying for them on every target.
 
 ## Local Checks
 
@@ -136,17 +141,20 @@ fail instead of passing quietly.
 
 | File | Injected mutation | Harness that must fail |
 | --- | --- | --- |
-| `agent/src/wal/scan.rs` | `len > remaining` becomes `len >= remaining` | `a_single_record_recovers_cleanly` |
+| `agent/src/wal/frame.rs` | `bytes.len() < HEADER_LEN` becomes `< HEADER_LEN - 1` | `a_short_header_is_rejected_without_reading_past_it` |
 
-The mutation makes an exactly-fitting final record look torn, which the harness
-that recovers a single whole record catches. Reproduce locally by applying the
-same edit and running `nix develop -c cargo kani -p agent --lib --harness <name>`.
+The mutation lets a header-minus-one buffer fall through the length check, so the
+reader proceeds into a header that is not there; the harness that decodes a
+symbolic buffer catches it. (A plain `<` → `<=` swap is *not* caught here: it only
+changes behavior for a buffer of exactly `HEADER_LEN`, which this harness's
+`len < HEADER_LEN` never produces.) Reproduce locally by applying the same edit
+and running `nix develop -c cargo kani -p agent --lib --harness <name>`.
 
 Note that Kani does not run `blake3`: the crate reaches `cpuid` inline assembly
-for runtime CPU feature detection, which Kani cannot model. The frame harnesses
-therefore pass a fixed starting hash to `recover_from` instead of calling
-`genesis_hash`, and the Kani crate list is confined to `agent/src/wal`. Do not add a
-harness that hashes unless the hashing crate stops emitting that asm.
+for runtime CPU feature detection, which Kani cannot model. The remaining harnesses
+therefore decode and validate a buffer without hashing, and the Kani crate list is
+confined to `agent/src/wal`. Do not add a harness that hashes unless the hashing
+crate stops emitting that asm.
 
 The unwind bound lives in `[workspace.metadata.kani.flags]` in the **root**
 `Cargo.toml`, because `cargo-kani` reads flags from the workspace root, not from
