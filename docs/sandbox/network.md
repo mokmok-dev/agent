@@ -208,6 +208,14 @@ carries no allowlist or decision. The proxy on the other end of the socket is
 the trust boundary. It never parses the payload beyond copying bytes, so the
 decision cannot be bypassed by confusing the forwarder.
 
+The forwarder binary itself is `sandbox/bins/egress-forward.rs`; it binds and
+bridges, and does nothing else. **Starting it alongside the command inside the
+namespace is the supervisor's job** (milestone 6, long-lived processes): the
+supervisor is what runs both the forwarder and the command in one namespace and
+waits for them, so the forwarder stays a pure bridge rather than growing a
+process launcher. Until then the forwarder is proven on the host, over a real
+socket pair, which is the same byte copy it performs in the namespace.
+
 The forwarder is resolved as a sibling of the running daemon (installed next to
 it), then on `PATH`, then via an override variable. Every candidate follows the
 same trust rule as the helper: a binary inside a policy write root is rejected.

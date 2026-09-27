@@ -4,6 +4,10 @@ name = "sandbox"
 publish = false
 version.workspace = true
 
+[[bin]]
+name = "egress-forward"
+path = "bins/egress-forward.rs"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

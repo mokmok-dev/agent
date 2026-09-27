@@ -4,7 +4,8 @@
 //! private `/dev`, one writable bind per `write` entry, protected names re-bound
 //! read-only, and `deny` entries masked *after* the grants so they override
 //! them. The network namespace is dropped, so the command reaches nothing but
-//! its own loopback; egress is a later milestone.
+//! its own loopback. Mounting the egress proxy's socket and starting the
+//! forwarder are the supervisor's job, in a later milestone.
 //!
 //! The returned arguments end before the `--` separator. The caller appends
 //! `-- <program> <args>` and runs the result.
