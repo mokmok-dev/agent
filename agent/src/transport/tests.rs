@@ -235,11 +235,8 @@ async fn an_unsupported_subprotocol_is_refused_and_the_loop_continues() {
         .await
         .expect("accept task")
         .expect("accepts the good client");
-    assert_eq!(
-        credential.pid.is_some(),
-        cfg!(any(target_os = "linux", target_os = "android")),
-        "the PID is reported where the platform provides it",
-    );
+    // The peer ran as this process, so its credential is this process's.
+    assert_eq!(credential.uid, owner_uid(&dir.0));
     assert!(good.await.expect("good task").is_ok());
 }
 
