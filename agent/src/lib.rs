@@ -4,10 +4,13 @@
 //! ([`wal`]). See `docs/event-bus/` for its design.
 //!
 //! The event envelope is modeled in [`cloudevent`], the in-process fan-out in
-//! [`broker`], and the UDS/WebSocket transport in [`transport`].
+//! [`broker`], the UDS/WebSocket transport in [`transport`], the wire messages
+//! in [`protocol`], and durable subscriber progress in [`cursor`].
 
 pub mod broker;
 pub mod cloudevent;
+pub mod cursor;
+pub mod protocol;
 #[cfg(unix)]
 pub mod transport;
 pub mod wal;
