@@ -68,15 +68,19 @@ async connection loop in `agent/src/server.rs`, the sandbox policy core in
 | `filesystem::bwrap` | The argument list grants the broad read root and a private `/dev`, binds each `write` root read-write, re-binds each *existing* protected name read-only, and masks each `deny` **after** the grants (a directory as a read-only tmpfs, a file as the null device); the environment is cleared then set; the scratch is a tmpfs and the `TMPDIR`; namespaces are unshared. A missing `write` or `deny` target is a `RenderError`. |
 | `filesystem` | Backend detection is by capability: a `bwrap` that cannot build a namespace is not selected, a `bwrap` inside a write root is refused, and an empty `PATH` selects nothing. |
 | `executor` | The scratch directory is created and removed with its guard. Over a real `bwrap`: a write inside a write root reaches the host; a write outside, a `../` traversal, and a symlink out of the root are all `Read-only file system`; a `deny`d file is unreadable; an existing protected name is read-only; the host environment is scrubbed; the output is capped at the policy limit; and a timed-out command is killed with its process group, leaving no marker. |
+| `events` | The classifier recognises the kernel's exact denial messages: `Read-only file system` is a filesystem violation naming the path, `Permission denied` and `Operation not permitted` likewise, and `Network is unreachable` / `No route to host` a network violation with no path. An unrelated non-zero exit yields none; distinct denials are kept and repeats collapse. `exec.completed` carries the exit code, duration, output sizes, and timeout flag; a violation carries the reason, the path, and a bounded output snippet; the `traceparent` reaches every event. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
 hold the reference-model proptests; `agent/tests/verify_cli.rs` and
 `agent/tests/agent_cli.rs` drive the binaries end to end;
 `sandbox/tests/policy.rs` holds the policy precedence proptests; and
-`sandbox/tests/executor.rs` spawns a real confined command through bubblewrap,
-skipping when the host cannot build a namespace (the condition under which the
-daemon refuses to spawn). The `test` flake check puts `bubblewrap` on `PATH` so
-those spawn tests run in CI. `agent/src/wal/proofs.rs` holds the Kani harnesses.
+`sandbox/tests/executor.rs` and `sandbox/tests/events.rs` spawn a real confined
+command through bubblewrap, skipping when the host cannot build a namespace (the
+condition under which the daemon refuses to spawn). The `test` flake check puts
+`bubblewrap` on `PATH` so those spawn tests run in CI. A GitHub Actions runner
+forbids unprivileged user namespaces, so the *spawn* tests skip there even with
+bubblewrap present; any logic they would cover has a unit test with a plain
+child, which needs no confinement, so no branch loses coverage on those hosts. `agent/src/wal/proofs.rs` holds the Kani harnesses.
 A machine-checked obligation catalog is deferred until the verified scope spans
 more than one crate; the tables above are the record for now.
 

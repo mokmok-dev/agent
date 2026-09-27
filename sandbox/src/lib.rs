@@ -14,6 +14,11 @@
 //! policy into the argument list of a bubblewrap invocation. The Landlock
 //! fallback and the macOS Seatbelt profile are later milestones.
 //!
+//! Milestone 3 adds [`events`]: the `CloudEvents` a terminal execution produces,
+//! with a classifier for the OS-enforced denials in a command's output. The
+//! sandbox authors only `type`, `subject`, `data`, and `traceparent`; the daemon
+//! joins them to the bus envelope.
+//!
 //! # The precedence rule
 //!
 //! A path is writable only inside a `write` entry, and a `deny` nested in a
@@ -46,6 +51,7 @@
 //! # Ok::<(), sandbox::policy::InvalidPolicy>(())
 //! ```
 
+pub mod events;
 pub mod executor;
 pub mod filesystem;
 pub mod policy;
