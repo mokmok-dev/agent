@@ -7,8 +7,12 @@
 //!
 //! Milestone 1 implements the **policy core**: the four domains, their
 //! invariants, and the `deny > write > read` path precedence. It is a pure data
-//! model that spawns nothing. Rendering it into kernel rules, resolving paths
-//! against the host, and spawning a confined command are later milestones.
+//! model that spawns nothing.
+//!
+//! Milestone 2 adds the **filesystem** layer: [`filesystem::Backend::detect`]
+//! chooses a kernel mechanism by capability, and [`filesystem::render`] turns a
+//! policy into the argument list of a bubblewrap invocation. The Landlock
+//! fallback and the macOS Seatbelt profile are later milestones.
 //!
 //! # The precedence rule
 //!
@@ -42,4 +46,6 @@
 //! # Ok::<(), sandbox::policy::InvalidPolicy>(())
 //! ```
 
+pub mod executor;
+pub mod filesystem;
 pub mod policy;

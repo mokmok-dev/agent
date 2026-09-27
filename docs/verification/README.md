@@ -41,8 +41,9 @@ fan-out broker in `agent/src/broker.rs`, the UDS/WebSocket transport in
 `agent/src/transport.rs`, the wire messages in `agent/src/protocol.rs`, the
 durable cursor store in `agent/src/cursor.rs`, the wired state machine in
 `agent/src/bus.rs`, the authority claim in `agent/src/authority.rs`, the
-async connection loop in `agent/src/server.rs`, and the sandbox policy core in
-`sandbox/src/policy/`:
+async connection loop in `agent/src/server.rs`, the sandbox policy core in
+`sandbox/src/policy/`, and the sandbox filesystem layer in
+`sandbox/src/filesystem.rs` and `sandbox/src/executor.rs`:
 
 | Module | Property |
 | --- | --- |
@@ -64,14 +65,20 @@ async connection loop in `agent/src/server.rs`, and the sandbox policy core in
 | `server` (close-code) | Every internal disconnect reason maps to exactly one RFC 6455 close frame in one place. |
 | `policy::fs` | `deny > write > read` holds: a `deny` inside a broader `write` root wins, an unmatched path keeps the broad read grant, coverage is component-wise, and a `deny` over a write root is a construction error. A `protected` name (`<write-root>/<name>`, default `.git`/`.agents`) is never writable, even with an explicit `write` entry, and an empty `protected` list lifts the cap. |
 | `policy` | Every domain rejects its invalid shape (a relative path, a `..` component, a non-component protected name, an empty or whitespace host, a zero port, a zero limit); the workdir must be **effectively writable** (no covering `deny`, not inside a protected name); a policy round-trips through JSON. |
+| `filesystem::bwrap` | The argument list grants the broad read root and a private `/dev`, binds each `write` root read-write, re-binds each *existing* protected name read-only, and masks each `deny` **after** the grants (a directory as a read-only tmpfs, a file as the null device); the environment is cleared then set; the scratch is a tmpfs and the `TMPDIR`; namespaces are unshared. A missing `write` or `deny` target is a `RenderError`. |
+| `filesystem` | Backend detection is by capability: a `bwrap` that cannot build a namespace is not selected, a `bwrap` inside a write root is refused, and an empty `PATH` selects nothing. |
+| `executor` | The scratch directory is created and removed with its guard. Over a real `bwrap`: a write inside a write root reaches the host; a write outside, a `../` traversal, and a symlink out of the root are all `Read-only file system`; a `deny`d file is unreadable; an existing protected name is read-only; the host environment is scrubbed; the output is capped at the policy limit; and a timed-out command is killed with its process group, leaving no marker. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
 hold the reference-model proptests; `agent/tests/verify_cli.rs` and
 `agent/tests/agent_cli.rs` drive the binaries end to end;
-`sandbox/tests/policy.rs` holds the policy precedence proptests;
-`agent/src/wal/proofs.rs` holds the Kani harnesses. A machine-checked obligation
-catalog is deferred until the verified scope spans more than one crate; the
-tables above are the record for now.
+`sandbox/tests/policy.rs` holds the policy precedence proptests; and
+`sandbox/tests/executor.rs` spawns a real confined command through bubblewrap,
+skipping when the host cannot build a namespace (the condition under which the
+daemon refuses to spawn). The `test` flake check puts `bubblewrap` on `PATH` so
+those spawn tests run in CI. `agent/src/wal/proofs.rs` holds the Kani harnesses.
+A machine-checked obligation catalog is deferred until the verified scope spans
+more than one crate; the tables above are the record for now.
 
 Kani is expensive, so its harnesses are kept to the properties only it can
 establish: exhaustive bounds safety over attacker-controlled bytes. A property
