@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use sandbox::executor::{ExecError, ExecRequest, Process, ProcessRequest, Scratch, run};
+use sandbox::executor::{ExecError, ExecRequest, Process, Scratch, run};
 use sandbox::filesystem::{Backend, RenderError};
 use sandbox::policy::{EnvVar, FsEntry, FsPolicy, Limits, Policy, ShellPolicy};
 
@@ -403,7 +403,7 @@ fn a_long_lived_process_runs_and_is_killed_with_its_descendants() {
     // The process starts a background sleep and a late write, then sleeps. It is
     // long-lived, so it must still be running after we observe it.
     let marker = tree.work().join("late.txt");
-    let request = ProcessRequest {
+    let request = ExecRequest {
         program: OsString::from("/bin/sh"),
         args: vec![
             OsString::from("-c"),
@@ -413,6 +413,7 @@ fn a_long_lived_process_runs_and_is_killed_with_its_descendants() {
             )),
         ],
         policy,
+        egress: None,
     };
     let mut process = Process::spawn(&backend, &request, scratch.path()).expect("spawns");
 
