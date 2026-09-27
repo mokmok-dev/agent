@@ -49,6 +49,24 @@ Kani harnesses. A machine-checked obligation catalog is deferred until the
 verified scope spans more than one crate; the tables above are the record for
 now.
 
+Kani is expensive, so its harnesses are kept to the properties only it can
+establish: exhaustive bounds safety over attacker-controlled bytes. A property
+that a reference model already checks over many inputs — encode/decode
+round-trip, chain-link detection, plain length arithmetic — is deliberately
+*not* restated as a proof. In particular the `encode_then_decode_round_trips`
+harness used to dominate the runtime (hashing a symbolic record makes CBMC
+unwind `crc32c` thousands of times) and was removed; its property is covered by
+`agent/tests/wal.rs`. When adding a harness, ask what it proves that sampling
+does not, and prefer deleting a self-evident one.
+
+Currently verified by Kani:
+
+| Harness | What sampling cannot show |
+| --- | --- |
+| `a_short_header_is_rejected_without_reading_past_it` | No sub-header-length input reads out of bounds. |
+| `a_truncated_payload_past_the_header_is_reported` | No declared-but-absent payload reads out of bounds. |
+| `a_single_record_recovers_cleanly` | A minimal scan terminates and commits exactly one record. |
+
 ## Local Checks
 
 ```sh

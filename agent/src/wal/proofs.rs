@@ -1,25 +1,26 @@
 //! Kani harnesses for the WAL record frame.
 //!
-//! These cover the pure, index-heavy part of the format: length arithmetic,
-//! framing, bounds, and chain validation. The BLAKE3 chain hash is not exercised
-//! here: the `blake3` crate reaches `cpuid` inline assembly for runtime CPU
-//! feature detection, which Kani cannot model. Hash continuity is covered by the
-//! proptest reference model in `tests/wal.rs` instead.
+//! These are deliberately few. Kani's unique value here is exhaustive bounds
+//! safety over attacker-controlled bytes: the proptest samples lengths, while
+//! these prove that *no* input reaches an out-of-bounds read. Properties that a
+//! reference model already covers over many inputs — encode/decode round-trip,
+//! chain-link detection, and plain length arithmetic — are left to
+//! `tests/wal.rs` and `tests.rs` rather than restated as expensive proofs.
 //!
-//! Run with `cargo kani --lib`. Because a chain-validation harness is handed a
-//! caller-supplied starting hash, it never calls `hash_record` and so never
-//! reaches `blake3`.
+//! Run with `cargo kani -p agent --lib`. Because a scan harness is handed a
+//! caller-supplied starting hash, it never calls `hash_record`, so the proofs
+//! never reach `blake3`'s `cpuid` inline assembly.
 
 use super::chain::HASH_LEN;
 use super::error::Error;
-use super::frame::{FRAME_VERSION, HEADER_LEN, MAGIC, RECORD_OVERHEAD, Record, record_len};
+use super::frame::{FRAME_VERSION, HEADER_LEN, MAGIC, Record};
 use super::scan::recover_from;
 
 /// Upper bound on symbolic payload lengths, so proof search stays finite.
 const MAX_PAYLOAD: usize = 64;
 
-/// A fixed chain head for the scan harnesses. It is a plain constant rather
-/// than [`super::chain::genesis_hash`] so the proof does not pull in `blake3`.
+/// A fixed chain head for the scan harness. It is a plain constant rather than
+/// [`super::chain::genesis_hash`] so the proof does not pull in `blake3`.
 const START: [u8; HASH_LEN] = [0u8; HASH_LEN];
 
 /// A log consisting of exactly one record with a four-byte payload.
@@ -36,18 +37,6 @@ fn header_with(payload_len: u32) -> [u8; HEADER_LEN] {
     buf[4] = FRAME_VERSION;
     buf[24..28].copy_from_slice(&payload_len.to_le_bytes());
     buf
-}
-
-#[kani::proof]
-fn record_len_is_exact() {
-    let payload_len: usize = kani::any();
-    kani::assume(payload_len <= MAX_PAYLOAD);
-    assert_eq!(record_len(payload_len), Some(payload_len + RECORD_OVERHEAD));
-}
-
-#[kani::proof]
-fn record_len_rejects_overflow() {
-    assert_eq!(record_len(usize::MAX), None);
 }
 
 #[kani::proof]
@@ -76,29 +65,8 @@ fn a_short_header_is_rejected_without_reading_past_it() {
 }
 
 #[kani::proof]
-#[kani::unwind(80)]
-fn encode_then_decode_round_trips() {
-    let seq: u64 = kani::any();
-    let timestamp_ns: u64 = kani::any();
-    let payload = [kani::any::<u8>(), kani::any(), kani::any(), kani::any()];
-    let prev_hash = [kani::any::<u8>(); HASH_LEN];
-
-    let record = Record::new(seq, timestamp_ns, payload.to_vec(), prev_hash);
-    let bytes = record
-        .encode()
-        .expect("a four-byte payload always fits the length field");
-    assert_eq!(bytes.len(), record.total_len());
-
-    let decoded = Record::decode(&bytes).expect("an encoded record always decodes");
-    assert_eq!(decoded.header(), record.header());
-    assert_eq!(decoded.payload(), &payload);
-    assert_eq!(decoded.prev_hash(), &prev_hash);
-}
-
-#[kani::proof]
 fn a_single_record_recovers_cleanly() {
-    // The starting hash is passed in, so the scan never hashes and never reaches
-    // `blake3`'s unsupported inline assembly.
+    // The starting hash is passed in, so the scan never hashes.
     let bytes = single_record(START);
     let recovery = recover_from(&bytes, START).expect("a well-formed record recovers");
 
@@ -106,16 +74,4 @@ fn a_single_record_recovers_cleanly() {
     assert_eq!(recovery.committed_len(), bytes.len());
     assert_eq!(recovery.records().len(), 1);
     assert_eq!(recovery.head_seq(), Some(7));
-}
-
-#[kani::proof]
-fn a_broken_chain_is_fatal() {
-    let mut wrong = START;
-    wrong[0] ^= 1;
-    let bytes = single_record(wrong);
-
-    assert!(matches!(
-        recover_from(&bytes, START),
-        Err(Error::ChainMismatch { .. })
-    ));
 }
