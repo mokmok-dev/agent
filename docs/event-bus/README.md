@@ -158,7 +158,10 @@ reuse is real.
    authorization.
 5. Protocol and cursor: `publish`/`subscribe`/`ack`, durable cursor, resume.
 6. Replay: `gap` handling and archival-boundary behavior.
-7. Observability: log metrics, verification reporting, close-code taxonomy.
+7. Observability: structured `tracing` logs, the close-code taxonomy, and a
+   `traceparent` that the bus preserves but does not author. An OpenTelemetry
+   exporter is deferred until a collector and a sampling policy exist; W3C trace
+   context needs no SDK at the bus, only string preservation.
 
 ## Open Questions
 

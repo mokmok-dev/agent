@@ -60,11 +60,14 @@ async connection loop in `agent/src/server.rs`:
 | `bus` | Publish assigns the bus-owned attributes, commits durably, then fans out; nothing is committed when an envelope is rejected; ack is durable and makes a resume start from `max(requested, stored)`; subscribers of one ID on different UIDs are distinct; a slow subscriber is evicted without blocking publish. |
 | `server` | Over a real UDS: publish is committed and acknowledged; subscribe replays history then streams live events; ack persists and the next subscribe resumes; a reserved attribute, a malformed frame, and an ack before subscribe each produce the right error; a disallowed peer is closed; a slow subscriber is closed. |
 | `authority` | The decision and rule-change event types require the claim; the `requested` ask and unrelated types do not; a lookalike type is not privileged; only an authority-listener connection may publish a gated type. |
+| `server` (close-code) | Every internal disconnect reason maps to exactly one RFC 6455 close frame in one place. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
-hold the reference-model proptests; `agent/src/wal/proofs.rs` holds the Kani
-harnesses. A machine-checked obligation catalog is deferred until the verified
-scope spans more than one crate; the tables above are the record for now.
+hold the reference-model proptests; `agent/tests/verify_cli.rs` and
+`agent/tests/agent_cli.rs` drive the binaries end to end; `agent/src/wal/proofs.rs`
+holds the Kani harnesses. A machine-checked obligation catalog is deferred until
+the verified scope spans more than one crate; the tables above are the record for
+now.
 
 Kani is expensive, so its harnesses are kept to the properties only it can
 establish: exhaustive bounds safety over attacker-controlled bytes. A property

@@ -131,32 +131,97 @@ async fn accept_loop(
     allowlist: &Allowlist,
 ) -> std::io::Result<()> {
     loop {
-        let connection = listener.accept().await?;
-        let bus = Arc::clone(bus);
-        let allowlist = allowlist.clone();
-        tokio::spawn(async move {
-            if !allowlist.permits(&connection.credential()) {
-                refuse(connection).await;
-                return;
-            }
-            if let Err(error) = serve(bus, claim, connection).await {
-                // A connection error is local; the accept loop keeps serving.
-                // The error is dropped until the observability milestone exists.
-                let _ = error;
-            }
-        });
+        accept_one(listener, claim, bus, allowlist).await?;
+    }
+}
+
+/// Accept one connection, authorize it, and serve it on its own task.
+///
+/// The connection holds a semaphore permit that bounds concurrent connections,
+/// so it must be held until the task is spawned or the peer is refused. Clippy's
+/// `significant_drop_tightening` suggests dropping it earlier, which is
+/// impossible: `refuse` consumes it, and the accept path moves it into `serve`.
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "the connection's permit must live until it is spawned or refused"
+)]
+async fn accept_one(
+    listener: &Listener,
+    claim: Authority,
+    bus: &SharedBus,
+    allowlist: &Allowlist,
+) -> std::io::Result<()> {
+    let connection = listener.accept().await?;
+    let credential = connection.credential();
+    if !allowlist.permits(&credential) {
+        tracing::warn!(
+            uid = credential.uid,
+            gid = credential.gid,
+            pid = credential.pid,
+            "refused a peer outside the allowlist",
+        );
+        refuse(connection).await;
+        return Ok(());
+    }
+    tracing::debug!(
+        uid = credential.uid,
+        authority = claim.is_granted(),
+        "accepted a connection",
+    );
+    let bus = Arc::clone(bus);
+    tokio::spawn(async move {
+        if let Err(error) = serve(bus, claim, connection).await {
+            // A connection error is local; the accept loop keeps serving.
+            tracing::warn!(%error, "connection ended with an error");
+        }
+    });
+    Ok(())
+}
+
+/// Why a connection ended, and how it closes on the wire.
+///
+/// This is the close-code taxonomy: the internal reason (an authentication
+/// refusal, a slow-consumer eviction, a normal client goodbye) maps to an
+/// RFC 6455 close frame in exactly one place, so the wire behavior cannot drift
+/// from the reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Disconnect {
+    /// The client closed, or its stream ended without an error. Sent no frame.
+    ClientClosed,
+    /// The peer is not on the allowlist.
+    Forbidden,
+    /// The subscriber's queue filled; it resumes from its durable cursor.
+    SlowConsumer,
+}
+
+impl Disconnect {
+    /// The close frame for this reason, or `None` to close without one.
+    const fn frame(self) -> Option<CloseFrame> {
+        let (code, reason) = match self {
+            Self::ClientClosed => return None,
+            // 1008 Policy Violation: the peer is not authorized.
+            Self::Forbidden => (CloseCode::Policy, "forbidden"),
+            // 1013 Try Again Later: the client should reconnect and resume.
+            Self::SlowConsumer => (CloseCode::Again, "slow consumer"),
+        };
+        Some(CloseFrame {
+            code,
+            reason: Utf8Bytes::from_static(reason),
+        })
     }
 }
 
 /// Close a connection whose peer is not permitted, without reading a message.
 async fn refuse(mut connection: Connection) {
-    let _ = connection
+    // A failure to send the close is not actionable: the peer may already be
+    // gone. It is logged at debug, not swallowed silently.
+    if let Err(error) = connection
         .websocket()
-        .close(Some(CloseFrame {
-            code: CloseCode::Policy,
-            reason: Utf8Bytes::from_static("forbidden"),
-        }))
-        .await;
+        .close(Disconnect::Forbidden.frame())
+        .await
+    {
+        tracing::debug!(%error, "failed to send the refusal close frame");
+    }
 }
 
 /// Failures of one connection.
@@ -315,6 +380,10 @@ async fn publish(
     incoming: crate::cloudevent::Incoming,
 ) -> Result<(), ConnectionError> {
     if authority::requires_authority(&incoming.ty) && !claim.is_granted() {
+        tracing::warn!(
+            ty = incoming.ty,
+            "refused a privileged event without authority"
+        );
         send(
             socket,
             &ServerMessage::Error {
@@ -327,12 +396,14 @@ async fn publish(
         return Ok(());
     }
 
+    let event_type = incoming.ty.clone();
     let result = {
         let mut bus = bus.lock().map_err(|_| ConnectionError::Poisoned)?;
         bus.publish(incoming)
     };
     match result {
         Ok(published) => {
+            tracing::debug!(ty = event_type, seq = published.seq, "published");
             send(
                 socket,
                 &ServerMessage::Published {
@@ -343,6 +414,7 @@ async fn publish(
             .await?;
         },
         Err(error) => {
+            tracing::warn!(ty = event_type, %error, "publish failed");
             send(socket, &server_error(&error, Some(id))).await?;
         },
     }
@@ -381,11 +453,13 @@ async fn subscribe(
     let (subscribed, replay) = match registered {
         Ok(pair) => pair,
         Err(error) => {
+            tracing::warn!(%error, %subscriber_id, "subscribe failed");
             send(socket, &server_error(&error, None)).await?;
             return Ok(());
         },
     };
 
+    tracing::debug!(subscriber_id, from_seq = subscribed.from_seq, "subscribed");
     send(
         socket,
         &ServerMessage::Subscribed {
@@ -438,8 +512,12 @@ async fn ack(
         bus.ack(uid, subscriber, cursor)
     };
     match result {
-        Ok(()) => send(socket, &ServerMessage::CursorAck { cursor }).await?,
+        Ok(()) => {
+            tracing::debug!(subscriber, cursor, "cursor recorded");
+            send(socket, &ServerMessage::CursorAck { cursor }).await?;
+        },
         Err(error) => {
+            tracing::warn!(subscriber, cursor, %error, "ack failed");
             send(socket, &server_error(&error, None)).await?;
         },
     }
@@ -471,19 +549,17 @@ async fn close_if_evicted(
     socket: &mut Socket,
     session: &Session,
 ) -> Result<(), ConnectionError> {
-    let evicted = session
+    let reason = if session
         .subscription
         .as_ref()
-        .is_some_and(Subscription::is_evicted);
-    let frame = if evicted {
-        Some(CloseFrame {
-            code: CloseCode::Again,
-            reason: Utf8Bytes::from_static("slow consumer"),
-        })
+        .is_some_and(Subscription::is_evicted)
+    {
+        Disconnect::SlowConsumer
     } else {
-        None
+        Disconnect::ClientClosed
     };
-    socket.close(frame).await?;
+    tracing::debug!(?reason, "closing connection");
+    socket.close(reason.frame()).await?;
     Ok(())
 }
 
@@ -1055,5 +1131,20 @@ mod tests {
 
         let event = subscriber.expect().await;
         assert_eq!(event["type"], "agent.sandbox.egress.rule_added");
+    }
+
+    #[test]
+    fn every_disconnect_maps_to_its_wire_close_frame() {
+        // The taxonomy is the single place the internal reason becomes a wire
+        // frame, so the mapping is pinned here.
+        assert!(Disconnect::ClientClosed.frame().is_none());
+
+        let forbidden = Disconnect::Forbidden.frame().expect("a close frame");
+        assert_eq!(forbidden.code, CloseCode::Policy);
+        assert_eq!(forbidden.reason, Utf8Bytes::from_static("forbidden"));
+
+        let slow = Disconnect::SlowConsumer.frame().expect("a close frame");
+        assert_eq!(slow.code, CloseCode::Again);
+        assert_eq!(slow.reason, Utf8Bytes::from_static("slow consumer"));
     }
 }

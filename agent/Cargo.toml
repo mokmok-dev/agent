@@ -8,6 +8,10 @@ version.workspace = true
 name = "verify"
 path = "bins/verify.rs"
 
+[[bin]]
+name = "agent"
+path = "bins/agent.rs"
+
 [dependencies]
 blake3.workspace = true
 clap.workspace = true
@@ -18,14 +22,16 @@ thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
+tracing.workspace = true
+# Only the `agent` binary installs a subscriber; the library only emits events.
+# It lives here rather than under `[dev-dependencies]` because cargo has no
+# per-binary dependency section. It is pure Rust with no build script, so it does
+# not break the Kani `--lib` build.
+tracing-subscriber.workspace = true
 ulid.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-# The multi-threaded runtime is test-only: production code needs only the
-# single-threaded `rt` the `server` module spawns on, but tests want a
-# multi-threaded one so blocking `Bus` calls do not starve the connection tasks.
-tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true
