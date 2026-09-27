@@ -26,7 +26,6 @@ use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::handshake::server::{
     Callback, ErrorResponse, Request, Response,
 };
@@ -122,8 +121,9 @@ impl Listener {
     /// # Errors
     ///
     /// Returns an [`io::Error`] if accepting from the socket fails or the
-    /// connection cap is reached. A non-recoverable handshake failure is
-    /// returned as an `io::Error`.
+    /// connection cap is reached. A peer that fails the handshake is skipped,
+    /// not returned as an error: the listener is healthy, and one port probe or
+    /// truncated request must not stop the bus.
     pub async fn accept(&self) -> io::Result<Connection> {
         loop {
             let permit = Arc::clone(&self.permits).try_acquire_owned().map_err(|_| {
@@ -146,11 +146,16 @@ impl Listener {
                         _permit: permit,
                     });
                 },
-                // The callback refused the subprotocol; skip this peer and keep
-                // serving. The permit is dropped when `permit` goes out of
-                // scope at the end of this iteration.
-                Err(WsError::Http(response)) if response.status() == StatusCode::FORBIDDEN => {},
-                Err(error) => return Err(io::Error::other(error)),
+                // A failed handshake — an unsupported subprotocol, a plain
+                // connect probe, a truncated request — is the peer's problem,
+                // not the listener's. Drop the permit and wait for the next.
+                Err(error) => {
+                    tracing::debug!(
+                        uid = credential.uid,
+                        %error,
+                        "skipped a peer that failed the handshake",
+                    );
+                },
             }
         }
     }
@@ -513,6 +518,38 @@ mod tests {
             .expect("accepts the good client");
         // The peer ran as this process, so its credential is this process's.
         assert_eq!(credential.uid, owner_uid(&dir.0));
+        assert!(good.await.expect("good task").is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_bare_connect_probe_does_not_stop_the_listener() {
+        let dir = SocketDir::new("probe");
+        let listener = Listener::bind(dir.socket(), WebSocketConfig::default()).expect("binds");
+        let path = dir.socket();
+
+        // A health check that connects and disconnects without a handshake must
+        // not take the listener down. This is the probe the daemon's own
+        // readiness check uses.
+        let probe = tokio::spawn(async move {
+            let stream = UnixStream::connect(&path).await.expect("connects");
+            drop(stream);
+        });
+
+        // A real client arriving afterwards is still served.
+        let good_path = dir.socket();
+        let good = tokio::spawn(async move {
+            let stream = UnixStream::connect(&good_path).await.expect("connects");
+            let mut request = "ws://localhost/".into_client_request().expect("request");
+            request.headers_mut().insert(
+                header::SEC_WEBSOCKET_PROTOCOL,
+                HeaderValue::from_static(SUBPROTOCOL),
+            );
+            tokio_tungstenite::client_async(request, stream).await
+        });
+
+        probe.await.expect("probe task");
+        let connection = listener.accept().await.expect("accepts the real client");
+        assert_eq!(connection.credential().uid, owner_uid(&dir.0));
         assert!(good.await.expect("good task").is_ok());
     }
 

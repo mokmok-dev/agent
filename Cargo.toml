@@ -18,14 +18,29 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.20"
 time = { version = "0.3.44", features = ["serde-well-known"] }
+# Structured logging and spans. `tracing` alone has no build script and depends
+# only on `tracing-core`, so it does not disturb the Kani `--lib` build. The
+# subscriber that installs a global logger lives in the binary, not the library.
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+# The binary's log subscriber. Kept out of the library so the library does not
+# install global state and the Kani unit graph stays small. `env-filter` pulls
+# `regex-automata`; it is only reachable from the binary.
+tracing-subscriber = { version = "0.3.23", features = [
+  "env-filter",
+  "fmt",
+  "json",
+] }
 # `server` spawns a task per connection and uses `select!`, so it needs `rt`,
 # `macros`, and `time`; the lower layers use only `sync`/`net`/`io-util` and
-# stay runtime-agnostic.
+# stay runtime-agnostic. `rt-multi-thread` is what the `agent` binary runs on:
+# a connection's `fsync` blocks its worker, so several workers are what keep one
+# publish from stalling the others.
 tokio = { version = "1.53.1", default-features = false, features = [
   "io-util",
   "macros",
   "net",
   "rt",
+  "rt-multi-thread",
   "sync",
   "time",
 ] }

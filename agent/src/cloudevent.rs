@@ -334,6 +334,28 @@ mod tests {
     }
 
     #[test]
+    fn commit_preserves_a_producer_traceparent() {
+        // The bus owns only `source`, `id`, `time`, and `sequence`. A W3C
+        // `traceparent` is the producer's, so the bus must carry it through
+        // unchanged: the audit log and the operational trace then share one
+        // trace id without the bus running an OpenTelemetry SDK.
+        let json = br#"{"specversion":"1.0","type":"agent.sandbox.egress.requested",
+            "traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}"#;
+        let incoming: Incoming = serde_json::from_slice(json).expect("a valid incoming event");
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+        let event = incoming
+            .commit("agent://eventbus", Sequence::new(1), epoch())
+            .expect("no reserved attribute was set");
+
+        assert_eq!(
+            event.extensions.get("traceparent"),
+            Some(&json!(traceparent)),
+            "the bus must not rewrite a producer's trace context",
+        );
+    }
+
+    #[test]
     fn commit_assigns_every_bus_owned_attribute() {
         let json = br#"{"specversion":"1.0","type":"agent.task.started",
             "data":{"task_id":"t-1"}}"#;
