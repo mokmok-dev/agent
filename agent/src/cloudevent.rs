@@ -191,7 +191,7 @@ impl Event {
     clippy::derive_partial_eq_without_eq,
     reason = "serde_json::Value contains f64, so Eq cannot be derived"
 )]
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Incoming {
     /// Must be `"1.0"`.
     pub specversion: SpecVersion,
@@ -199,21 +199,27 @@ pub struct Incoming {
     #[serde(rename = "type")]
     pub ty: String,
     /// A producer-supplied `source`, which the bus owns and rejects.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// A producer-supplied `id`, which the bus owns; a ULID is assigned if
     /// absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// An optional producer-supplied time, which the bus owns; the commit time
     /// is used if absent.
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub time: Option<OffsetDateTime>,
     /// The logical stream, for example a task ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
     /// The media type of `data`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub datacontenttype: Option<String>,
     /// A producer-supplied `sequence`, which the bus owns and rejects.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence: Option<Sequence>,
     /// The event payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
     /// Additional extension attributes, keyed by name.
     #[serde(flatten)]
