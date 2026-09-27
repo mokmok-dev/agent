@@ -89,6 +89,7 @@ mod tests {
             },
             token: "tok".to_owned(),
             rules: std::sync::Arc::new(crate::egress::Allowlist::empty()),
+            approver: None,
         }
     }
 

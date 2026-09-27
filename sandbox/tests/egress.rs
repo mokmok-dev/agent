@@ -16,7 +16,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
-use sandbox::egress::{Allowlist, DestinationSet, ProxyConfig, Transport, UnixProxy, bearer};
+use sandbox::egress::{
+    Allowlist, Approval, Approver, DestinationSet, ProxyConfig, Transport, UnixProxy, bearer,
+};
 use sandbox::policy::HostPort;
 
 /// A throwaway TCP server that echoes a fixed banner and returns one line.
@@ -99,6 +101,34 @@ impl Proxy {
         token: &str,
         destinations: DestinationSet,
     ) -> Self {
+        Self::build(tag, token, destinations, None)
+    }
+
+    /// Start a proxy whose unlisted destinations go to `approver`.
+    fn start_with_approver(
+        tag: &str,
+        token: &str,
+        approver: Arc<dyn Approver>,
+    ) -> Self {
+        Self::build(tag, token, DestinationSet::empty(), Some(approver))
+    }
+
+    /// Start a proxy with both a starting allowlist and an approver.
+    fn start_listed_with_approver(
+        tag: &str,
+        token: &str,
+        destinations: DestinationSet,
+        approver: Arc<dyn Approver>,
+    ) -> Self {
+        Self::build(tag, token, destinations, Some(approver))
+    }
+
+    fn build(
+        tag: &str,
+        token: &str,
+        destinations: DestinationSet,
+        approver: Option<Arc<dyn Approver>>,
+    ) -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
@@ -115,6 +145,7 @@ impl Proxy {
             },
             token: token.to_owned(),
             rules: Arc::clone(&rules),
+            approver,
         };
         let proxy = Arc::new(UnixProxy::bind(config).expect("binds the proxy"));
 
@@ -418,6 +449,116 @@ fn revoking_a_rule_closes_an_established_tunnel() {
         reader.read_line(&mut tail).expect("reads after revoke"),
         0,
         "the revoked tunnel must reach EOF, not stay open"
+    );
+    std::mem::forget(upstream);
+}
+
+/// An approver that answers with a fixed approval and counts the asks.
+#[derive(Debug)]
+struct FixedApprover {
+    answer: Approval,
+    asks: Arc<AtomicU32>,
+}
+
+impl FixedApprover {
+    fn new(answer: Approval) -> Arc<Self> {
+        Arc::new(Self {
+            answer,
+            asks: Arc::new(AtomicU32::new(0)),
+        })
+    }
+}
+
+impl Approver for FixedApprover {
+    fn ask(
+        &self,
+        _destination: &HostPort,
+        _traceparent: Option<String>,
+    ) -> Approval {
+        self.asks.fetch_add(1, Ordering::SeqCst);
+        self.answer
+    }
+}
+
+#[test]
+fn an_unlisted_destination_with_an_approver_is_granted() {
+    // The proxy starts empty; the approver grants, so the tunnel opens and bytes
+    // flow.
+    let upstream = Upstream::start("HELLO\n");
+    let port = upstream.port;
+    let approver = FixedApprover::new(Approval::Granted);
+    let proxy = Proxy::start_with_approver("grant", "tok", approver.clone());
+
+    let request = format!(
+        "CONNECT 127.0.0.1:{port} HTTP/1.1\r\nProxy-Authorization: {}\r\n\r\nping\n",
+        bearer("tok")
+    );
+    let (status, mut stream) = exchange(proxy.path(), request.as_bytes());
+    assert!(status.starts_with("HTTP/1.1 200"), "status was: {status}");
+    assert_eq!(
+        approver.asks.load(Ordering::SeqCst),
+        1,
+        "the approver was asked"
+    );
+
+    let mut reader = BufReader::new(stream.try_clone().expect("clones"));
+    let mut banner = String::new();
+    reader.read_line(&mut banner).expect("reads the banner");
+    assert_eq!(banner, "HELLO\n");
+    let _ = stream.flush();
+    upstream.join();
+}
+
+#[test]
+fn an_unlisted_destination_with_a_denying_approver_is_403() {
+    let approver = FixedApprover::new(Approval::Denied);
+    let proxy = Proxy::start_with_approver("deny", "tok", approver.clone());
+    let request = format!(
+        "CONNECT api.example.com:443 HTTP/1.1\r\nProxy-Authorization: {}\r\n\r\n",
+        bearer("tok")
+    );
+    let (status, _) = exchange(proxy.path(), request.as_bytes());
+    assert!(status.starts_with("HTTP/1.1 403"), "status was: {status}");
+    assert_eq!(approver.asks.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn an_unlisted_destination_with_a_cancelling_approver_is_403() {
+    let approver = FixedApprover::new(Approval::Cancelled);
+    let proxy = Proxy::start_with_approver("cancel", "tok", approver.clone());
+    let request = format!(
+        "CONNECT api.example.com:443 HTTP/1.1\r\nProxy-Authorization: {}\r\n\r\n",
+        bearer("tok")
+    );
+    let (status, _) = exchange(proxy.path(), request.as_bytes());
+    assert!(status.starts_with("HTTP/1.1 403"), "status was: {status}");
+    assert_eq!(approver.asks.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_listed_destination_never_consults_the_approver() {
+    // A listed destination is the pre-approved set, so the approver is never
+    // asked even though one is configured.
+    let upstream = Upstream::start("HELLO\n");
+    let port = upstream.port;
+    let approver = FixedApprover::new(Approval::Denied);
+    let proxy = Proxy::start_listed_with_approver(
+        "listed",
+        "tok",
+        DestinationSet::of([HostPort::new("127.0.0.1", port)]),
+        approver.clone(),
+    );
+
+    let request = format!(
+        "CONNECT 127.0.0.1:{port} HTTP/1.1\r\nProxy-Authorization: {}\r\n\r\nping\n",
+        bearer("tok")
+    );
+    let (status, _) = exchange(proxy.path(), request.as_bytes());
+    assert!(status.starts_with("HTTP/1.1 200"), "status was: {status}");
+    assert_eq!(
+        approver.asks.load(Ordering::SeqCst),
+        0,
+        "a listed destination must not consult the approver"
     );
     std::mem::forget(upstream);
 }

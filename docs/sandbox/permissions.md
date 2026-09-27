@@ -111,14 +111,19 @@ is configured, the proxy asks instead of refusing.
 
 The approval core is `egress::approval`: `RequestId`, a `Pending` registry that
 correlates a decision to the request that asked (`resolve` removes the entry, so
-a second or unknown decision is ignored), and `await_decision`, the one place a
-deadline is turned into a `Cancelled` rather than a fabricated `Denied`. The
-consultation rule (`consult`) is a pure function of "listed" and "an approver is
-configured": a listed destination never consults an approver, an unlisted one
-with no approver is refused, and an unlisted one with an approver is asked.
+a second or unknown decision is ignored), and `await_outcome`, which distinguishes
+a received decision from an expiring deadline so exactly one cancellation is
+recorded. The `Desk` ties them together behind the `Approver` seam the proxy
+calls: it publishes `egress.requested`, waits on the correlation registry, and
+records its own `egress.cancelled` only when the deadline expires — an approver's
+own cancellation is already recorded by the approver. The consultation rule
+(`consult`) is a pure function of "listed" and "an approver is configured": a
+listed destination never consults an approver, an unlisted one with no approver is
+refused, and an unlisted one with an approver is asked.
 
-Wiring the proxy to publish `requested` and wait is the daemon's, which owns both
-the sandbox and the bus.
+The proxy consults the `Approver` seam and does not know how the answer is
+obtained. The daemon implements the `Publisher` seam (publish an authored event,
+mint a `RequestId`) over the bus crate, which the sandbox does not depend on.
 
 ```
 confined command
