@@ -1,10 +1,31 @@
-[workspace]
-members = []
-resolver = "3"
+[package]
+edition = "2024"
+name = "agent"
+publish = false
+version = "0.0.0"
 
-[workspace.dependencies]
+[[bin]]
+name = "verify"
+path = "bins/verify.rs"
 
-[workspace.lints.clippy]
+[dependencies]
+# `pure` forces the portable Rust implementation and avoids all C code, which
+# Kani's compiler cannot model (runtime CPU feature detection) or link.
+# Revisit if the hashing cost matters.
+blake3 = { version = "1.8.2", default-features = false, features = ["pure"] }
+thiserror = "2.0.20"
+
+[dev-dependencies]
+proptest = "1.11.0"
+
+[package.metadata.kani.flags]
+# The CRC table loop runs once per byte, and a harness hashes a record of up to
+# ~68 bytes, so the bound has to exceed that. Individual harnesses raise it
+# further when they need to.
+default-unwind = "80"
+output-format = "terse"
+
+[lints.clippy]
 all = "deny"
 expect_used = "deny"
 nursery = "deny"
@@ -14,14 +35,12 @@ todo = "deny"
 unimplemented = "deny"
 unwrap_used = "deny"
 
-[workspace.lints.rust]
-future_incompatible = "deny"
+[lints.rust]
+future_incompatible = { level = "deny", priority = -1 }
+missing_docs = "deny"
+# `#[cfg(kani)]` harnesses are compiled by `cargo kani`, not `cargo test` or
+# `cargo clippy`, so the cfg needs to be declared or every check warns. The
+# group above has to sit at a lower priority so this specific lint wins.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
 unsafe_code = "deny"
-unused = "deny"
-
-[workspace.metadata.crane]
-name = "agent"
-
-[workspace.package]
-edition = "2024"
-version = "0.0.0"
+unused = { level = "deny", priority = -1 }

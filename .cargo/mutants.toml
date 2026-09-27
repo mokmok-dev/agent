@@ -1,0 +1,15 @@
+# Measurement conditions for cargo-mutants, shared by local runs and the PR job
+# so both sides measure the same set.
+
+# A `#[cfg(kani)]` harness is not compiled by `cargo test`, so a mutant inside
+# one always reports a miss that no test can fix. Harness strength is checked by
+# the harness-mutation derivations in flake.nix instead. The file is excluded
+# rather than a regex on the function name, because a mutant's name is
+# unqualified and would not carry the `proofs::` path.
+exclude_globs = ["src/wal/proofs.rs"]
+
+# `recover_from` only ever compares from `position == 0` before incrementing it,
+# so `position < bytes.len()` and `bytes.len() - position < HEADER_LEN` are both
+# vacuously true on entry and never reached again. Changing `<` to any other
+# operator on those two guards cannot change an outcome.
+exclude_re = ["replace < with .* in recover_from"]
