@@ -119,7 +119,18 @@
                 cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
               }
             );
-            test = craneLib.cargoTest (
+            # `cargo nextest run` runs the unit and integration binaries with
+            # per-test process isolation, but it deliberately never runs
+            # doctests. The `doctest` check below covers those with
+            # `cargo test --doc`; keep both, or a doctest can rot unnoticed.
+            test = craneLib.cargoNextest (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+                cargoExtraArgs = "--locked";
+              }
+            );
+            doctest = craneLib.cargoDocTest (
               commonArgs
               // {
                 inherit cargoArtifacts;
