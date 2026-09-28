@@ -252,7 +252,7 @@ impl Incoming {
             specversion: self.specversion,
             ty: self.ty,
             source: source.to_owned(),
-            id: self.id.unwrap_or_else(|| Ulid::new().to_string()),
+            id: self.id.unwrap_or_else(|| Ulid::generate().to_string()),
             time: Some(self.time.unwrap_or(now)),
             subject: self.subject,
             datacontenttype: self.datacontenttype,
@@ -445,7 +445,7 @@ mod tests {
     fn serialization_is_deterministic_regardless_of_extension_order() {
         // The same two extensions supplied in opposite orders must produce the same
         // bytes, because serialization is hashed and chained. A fixed `id` keeps the
-        // two events otherwise identical despite `Ulid::new` being random.
+        // two events otherwise identical despite `Ulid::generate` being random.
         let json_a = br#"{"specversion":"1.0","type":"e",
             "id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","a":"1","b":"2"}"#;
         let json_b = br#"{"specversion":"1.0","type":"e",
