@@ -185,6 +185,28 @@ The reply is not streamed. The seam answers with a whole turn, the capability
 reports each turn's prose as progress, and the deadline bounds one turn; a
 streamed reply would need a different seam.
 
+### Secrets
+
+Two values the client holds are credentials: the provider key, which it reads from
+the environment variable `--env-key` names, and the proxy's token, which it parses
+out of the injected `HTTP_PROXY` URL. Both are held as `secrecy::SecretString`
+values rather than `String`s, which buys two properties a plain `String` does not
+have: the type cannot be printed (its `Debug` is redacted, so a config, a client,
+or a proxy in a log line shows `[REDACTED]`), and the buffer is wiped when the
+value drops, so the bytes do not outlive the client in freed memory. The buffers
+that carry either secret on the way out are wiped for the same reason: the request
+head holds `Authorization: Bearer <key>` and the `CONNECT` head holds
+`Proxy-Authorization: Bearer <token>`, and both are written as `Zeroizing<String>`.
+
+What this does not reach is the environment block itself. The value arrives through
+`std::env::var`, and the process's environment is a copy the kernel holds; clearing
+it takes `std::env::remove_var`, which is `unsafe` in edition 2024 and denied
+everywhere in this workspace. The same is true of the child's environment the
+daemon builds: the value has to reach the agent's variable, so a copy of it exists
+wherever the policy is rendered and in the confined process's own environment, by
+design. Zeroizing the copies this process owns is what is in reach, and it is what
+is done.
+
 ## The Policy Grants the Bus Socket
 
 `sandbox`'s `NetworkPolicy.unix_sockets` is a list of socket paths the command

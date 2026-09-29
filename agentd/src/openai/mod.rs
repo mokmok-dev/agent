@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustls::{ClientConfig, RootCertStore};
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::model::{self, Message, Model, Response, Tool};
 
@@ -42,6 +43,15 @@ pub use http::Proxy;
 
 /// How long one model call may take, end to end.
 pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(60);
+
+/// `value` as a secret that cannot be printed and is wiped when it drops.
+///
+/// Everything that carries a key or a proxy token goes through here, so the type
+/// says what the value is: a plain `String` in a struct field is a value somebody
+/// will print.
+pub(super) fn secret(value: String) -> SecretString {
+    SecretString::from(value.into_boxed_str())
+}
 
 /// What a client needs to reach one endpoint.
 #[derive(Debug)]
@@ -52,7 +62,10 @@ pub struct Config {
     /// The model id every request asks for.
     pub model: String,
     /// The API key, sent as `Authorization: Bearer <key>`.
-    pub api_key: String,
+    ///
+    /// Held as a [`SecretString`]: it cannot be printed (its `Debug` is redacted)
+    /// and it is wiped when the config is dropped.
+    pub api_key: SecretString,
     /// The proxy to reach the endpoint through, or `None` to connect directly.
     proxy: Option<Proxy>,
     /// The roots the endpoint's certificate must chain to, or `None` for the ones
@@ -74,7 +87,7 @@ impl Config {
         Self {
             base_url: base_url.into(),
             model: model.into(),
-            api_key: api_key.into(),
+            api_key: secret(api_key.into()),
             proxy: None,
             roots: None,
             deadline: DEFAULT_DEADLINE,
@@ -125,7 +138,11 @@ pub struct Client {
     /// The model id every request asks for.
     model: String,
     /// The `Authorization` value, which carries the key.
-    authorization: String,
+    ///
+    /// Its own copy of the key, so it is a [`SecretString`] too: the header exists
+    /// for the whole life of the client, and a plain `String` would leave the key in
+    /// freed memory when it drops.
+    authorization: SecretString,
     /// The proxy to reach the endpoint through.
     proxy: Option<Proxy>,
     /// How long one call may take.
@@ -152,7 +169,7 @@ impl Client {
             tls,
             endpoint: http::Target::parse(&config.base_url)?,
             model: config.model,
-            authorization: format!("Bearer {}", config.api_key),
+            authorization: secret(format!("Bearer {}", config.api_key.expose_secret())),
             proxy: config.proxy,
             deadline: config.deadline,
         })
@@ -175,7 +192,7 @@ impl Client {
             &self.tls,
             &self.endpoint,
             self.proxy.as_ref(),
-            &self.authorization,
+            self.authorization.expose_secret(),
             &body,
             Instant::now() + self.deadline,
         )?;
@@ -280,8 +297,16 @@ mod tests {
     fn a_client_builds_for_a_usable_endpoint() {
         let client = Client::new(config()).expect("builds");
         assert_eq!(client.model, "grok-4.7");
-        assert_eq!(client.authorization, "Bearer xai-secret");
+        assert_eq!(client.authorization.expose_secret(), "Bearer xai-secret");
         assert_eq!(client.endpoint.path, "/v1/chat/completions");
+    }
+
+    #[test]
+    fn a_configs_debug_never_shows_the_key() {
+        // `Config`'s own `Debug` is derived, so this is the wrapper's redaction at
+        // work rather than a hand-written impl.
+        let debug = format!("{:?}", config());
+        assert!(!debug.contains("xai-secret"), "debug was: {debug}");
     }
 
     #[test]

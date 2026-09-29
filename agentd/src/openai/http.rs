@@ -17,6 +17,7 @@
 //! proxy speaks `CONNECT` alone, so a plaintext endpoint has no route, and the
 //! tunnel is opaque so TLS stays end to end. See `docs/sandbox/network.md`.
 
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -24,8 +25,10 @@ use std::time::Instant;
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use secrecy::{ExposeSecret, SecretString};
+use zeroize::Zeroizing;
 
-use super::Error;
+use super::{Error, secret};
 
 /// The most bytes of a response head this client reads.
 ///
@@ -66,7 +69,10 @@ pub(super) fn compiled_roots() -> RootCertStore {
 /// token is the bearer value the proxy expects and the host is the child-side
 /// forwarder on the command's own loopback. The token never reaches a log — see the
 /// [`Debug`] impl — because it is the whole of the proxy's authorization.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// Two proxies are not compared: the token inside is a secret, and comparing
+/// secrets by value is how they end up in an assertion message.
+#[derive(Clone)]
 pub struct Proxy {
     /// The proxy's host, which this client resolves (the endpoint's is the
     /// proxy's business).
@@ -74,7 +80,10 @@ pub struct Proxy {
     /// The proxy's port.
     port: u16,
     /// The bearer value, when the URL carried one.
-    token: Option<String>,
+    ///
+    /// A [`SecretString`]: the token authorizes every tunnel this client opens, and
+    /// a plain `String` would leave it in freed memory and in any `Debug` string.
+    token: Option<SecretString>,
 }
 
 impl Proxy {
@@ -110,7 +119,7 @@ impl Proxy {
         // value. A URL with no password carries no token.
         let token = userinfo
             .and_then(|userinfo| userinfo.split_once(':'))
-            .map(|(_, token)| token.to_owned());
+            .map(|(_, token)| secret(token.to_owned()));
         Ok(Self {
             host: host.to_ascii_lowercase(),
             port,
@@ -264,11 +273,20 @@ fn connect_through(
     let socket = TcpStream::connect((proxy.host(), proxy.port())).map_err(io)?;
     let mut tunnel = Tunnel::new(socket, deadline);
     let authority = format!("{}:{}", target.host, target.port);
-    let authorization = proxy.token.as_ref().map_or_else(String::new, |token| {
-        format!("Proxy-Authorization: Bearer {token}\r\n")
-    });
-    let request =
-        format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n{authorization}\r\n");
+    // The head carries the token, so it is wiped once it has been written, and the
+    // token goes straight into that buffer rather than through a second string that
+    // would hold it and drop unzeroized.
+    let mut request = Zeroizing::new(format!(
+        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n"
+    ));
+    if let Some(token) = &proxy.token {
+        let _ = write!(
+            request,
+            "Proxy-Authorization: Bearer {}\r\n",
+            token.expose_secret()
+        );
+    }
+    request.push_str("\r\n");
     tunnel.write_all(request.as_bytes()).map_err(io)?;
     tunnel.flush().map_err(io)?;
 
@@ -299,12 +317,13 @@ fn write_request(
     } else {
         format!("{}:{}", target.host, target.port)
     };
-    let head = format!(
+    // The head carries the key, so it is wiped once it has been written.
+    let head = Zeroizing::new(format!(
         "POST {path} HTTP/1.1\r\nHost: {authority}\r\nAuthorization: {authorization}\r\n\
 Content-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n",
         path = target.path,
         length = body.len(),
-    );
+    ));
     stream.write_all(head.as_bytes()).map_err(io)?;
     stream.write_all(body).map_err(io)?;
     stream.flush().map_err(io)
