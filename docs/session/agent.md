@@ -72,8 +72,8 @@ Milestone 5 implements this as the `agentd` crate: a
 subscribes as `agent-<id>`, dedupes on the event id (delivery is at-least-once),
 acts on a command through a `Capability` seam, publishes the output, and
 acknowledges what it processed. The `agent-agent` binary runs it with a `shell`
-capability, which runs an argv in the session's workspace. The model-driven
-capability of milestone 6 is a second implementation of that seam.
+capability, which runs an argv in the session's workspace, and a `task`
+capability, which drives a model and offers `shell` as its one tool.
 
 ## The Shell Capability
 
@@ -93,6 +93,50 @@ Three rules make it safe to expose to a model:
 - **The child runs in the agent's own confinement.** The agent is already inside
   the session's namespace, so a child inherits the policy; the sandbox is the
   boundary, not the per-command spawn.
+
+The command is announced through the loop's `Reporter` before it is spawned, so a
+command that runs for minutes is visible while it runs rather than only when it
+ends.
+
+## The Task Capability
+
+The `task` action's `detail` is `{"task": "..."}`, and it is where the loops
+nest. The agent's own loop turns one command into one result; a task needs many
+model turns to get there, so the capability owns the inner loop: ask the model,
+run the tools it asks for, feed the results back, and stop when it answers with
+no tool call. Its output reports the model's answer and how many turns it took.
+
+The model is a `Model` seam rather than a provider's client, so the whole
+capability is exercisable without a network. The first client is an
+OpenAI-compatible `chat/completions` endpoint, and it owns the mapping from the
+agent's shapes to that wire format. The seam is the agent's own types because a
+conversation is four things — a system instruction, the task, what the model
+said, and what a tool returned — and a type that names them cannot carry a field
+its role has no meaning for.
+
+The capability offers `shell` as its one tool today, which is what makes a task's
+commands inherit the session's confinement and the bounded output above. It never
+spawns a process itself.
+
+**Everything that crosses into the model's context is bounded**, for the reason
+the shell capability bounds a command's output: a model's context is a resource
+like any other, and a command that writes without end must not be able to fill it.
+The shell capability caps a command at a mebibyte, which is right for the log and
+far too much for a model, so each stream is cut to 8 KiB before it is fed back —
+**separately**, so a huge standard output cannot crowd the standard error beside
+it out of the model's view — and the whole result is cut again, so a tool whose
+detail shape the capability does not know is bounded too. A cut is marked, so the
+model knows what it lost. A task also has a turn bound, so a model that never
+stops calling tools cannot hold the session, and it reports each turn's prose as
+progress, bounded in its turn.
+
+A tool the agent does not offer is reported to the model rather than refused, so
+the model is told what happened and gets to correct itself instead of the task
+ending.
+
+The provider's credentials are the agent's own and stay in its environment: the
+client runs inside the sandbox, so the tunnel stays opaque and TLS stays end to
+end. See [sandbox network](../sandbox/network.md).
 
 ## The Policy Grants the Bus Socket
 
@@ -151,6 +195,14 @@ session is a privileged act. The agent's own output is not gated, because the
 agent is the only writer of it and a forged output event cannot start or stop
 anything. The gating list lives in one place, next to the type constants, not
 scattered through the handlers.
+
+An output's `kind` says what it is: `started`, `progress`, `done`, or `error`. A
+capability reports through the loop's `Reporter` while it works, so an action that
+takes minutes is visible while it runs — `shell` announces the argv it is about to
+run, and `task` reports what the model said on each turn. A report is **best
+effort** and a result is not, which is why a capability cannot fail a command by
+reporting: the output the call returns is the result, and it is published over the
+same connection, so a dead bus is reported by that publish instead.
 
 ## What the Agent Does Not Get
 

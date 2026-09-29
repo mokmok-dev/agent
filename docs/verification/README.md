@@ -93,8 +93,9 @@ client in `agent/src/client.rs`, and the agent loop in `agentd/src/`:
 | `daemon::manager` (egress) | A session whose image grants egress binds a proxy whose socket exists while the session runs, and stopping the session removes it. The manager resolves the supervisor and forwarder, and fails closed with `EgressHelpersMissing` when they cannot be found. |
 | `daemon::launcher` (real) | Over a real `bwrap`, a confined `/bin/sh` script writes inside its workspace and the kernel denies its write outside it, so the session manager's end-to-end path holds. Skips when the host cannot build a namespace. |
 | `agentd::contract` | Both payloads round-trip through JSON; a command without `detail` parses with a null one; an unknown field is rejected. |
-| `agentd::shell` | Over a real `/bin/sh`: a command runs in the workspace, reports its exit code and output, and a relative path resolves there; an empty argv, an overlong argv, and a null byte are reported rather than run; a command that writes without end has exactly the cap retained, reports `truncated` and its total, and is killed at the timeout; a command that returns before the timeout is not killed. |
-| `agentd::loopcore` | Over the real bus server, with the agent binary as a separate process: a `shell` command is answered with an output event carrying the command's stdout and exit code; the command runs in the session's workspace (a relative write reaches the host); a command published while no agent runs is answered once one starts (replay from the cursor); a command addressed to another session produces no output and runs nothing; an unknown action is reported as an error rather than ignored. |
+| `agentd::shell` | Over a real `/bin/sh`: a command runs in the workspace, reports its exit code and output, and a relative path resolves there; an empty argv, an overlong argv, and a null byte are reported rather than run, and a command that is refused is not reported at all; the argv is reported before the command runs; a command that writes without end has exactly the cap retained, reports `truncated` and its total, and is killed at the timeout; a command that returns before the timeout is not killed. |
+| `agentd::task` | The model-driven capability against a scripted model, so nothing needs a network: a task the model answers with no tool call is `done` and reports the answer and the turn count; the task and the one `shell` tool are offered to the model, with the tool's schema naming `argv`; a tool the model asks for runs in the session's workspace and its output is fed back under the id of the call that asked for it; a turn that speaks while calling a tool is reported as progress; a model that never stops calling a tool is stopped at the turn bound, and at a bound of zero the model is never asked; a model that fails is reported with its own reason and the turn it failed on; a command with no `task`, or one that is not a string, is reported not run and the model is never asked; an unknown tool reaches the model as a reason and the task continues; a result is bounded before it crosses into the model, marked when it was cut, neither stream can crowd the other out of the model's view, and a cut lands on a character boundary. |
+| `agentd::loopcore` | Over the real bus server, with the agent binary as a separate process: a `shell` command is answered with an output event carrying the command's stdout and exit code, and is announced with a progress event carrying its argv **before** that result arrives; the command runs in the session's workspace (a relative write reaches the host); a command published while no agent runs is answered once one starts (replay from the cursor); a command addressed to another session produces no output and runs nothing; an unknown action is reported as an error rather than ignored. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
 hold the reference-model proptests; `agent/tests/verify_cli.rs` and
@@ -109,7 +110,11 @@ daemon refuses to spawn). `daemon/src/session.rs` holds the session-core tests,
 which need no confinement and run on every host, `agent/tests/client.rs` and
 `daemon/tests/bus_client.rs` drive the bus client against the real server over a
 Unix socket, and `agentd/tests/agent.rs` starts the agent binary against the real
-server and drives a command through it. The `test` flake check puts
+server and drives a command through it. `agentd/src/task.rs` holds the
+model-driven capability's tests against a scripted model, so they need no network
+and no provider, and `agentd/src/shell.rs` holds its tests over a real `/bin/sh`.
+`agentd/src/model.rs` is the model seam's own types and carries no behaviour of
+its own, so its coverage is the `agentd::task` row. The `test` flake check puts
 `bubblewrap` on `PATH` so those spawn tests run in CI. A GitHub Actions runner
 forbids unprivileged user namespaces, so the *spawn* tests skip there even with
 bubblewrap present; any logic they would cover has a unit test with a plain
@@ -119,8 +124,14 @@ more than one crate; the tables above are the record for now.
 
 The session manager in [docs/session](../session/README.md) is built in the
 `daemon` crate, and the agent program in `agentd`. Milestones 1 through 5 have
-landed. Milestone 6 (the coding-agent image) tracks the capability design, and
-its rows land when it does.
+landed, and milestone 6's first unit has landed too: the `Capability` seam gained
+a progress channel, and the agent gained a model-driven `task` capability with the
+`Model` seam it drives, in `agentd/src/model.rs` and `agentd/src/task.rs`. The
+provider client that makes that capability reach a real model — and the image
+arguments and allowlist entry it needs — is the next unit, and its rows land with
+it; until then the capability is verified against a scripted model, which needs no
+network. The task action is deliberately not yet wired into the `agent-agent`
+binary, so the binary's behaviour is unchanged by that unit.
 
 Kani is expensive, so its harnesses are kept to the properties only it can
 establish: exhaustive bounds safety over attacker-controlled bytes. A property
