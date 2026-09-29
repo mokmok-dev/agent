@@ -249,15 +249,41 @@ fn image() -> AgentImage {
     AgentImage::new("/usr/bin/agent-agent")
 }
 
-/// A manager over a fresh scratch parent and `launcher`.
+/// The `PATH` for a test manager.
+///
+/// The egress helpers must resolve, so this creates placeholder
+/// `sandbox-supervisor` and `egress-forward` files in the server's directory and
+/// puts it first on the path. The fake launcher never executes them, so only
+/// their presence matters; this keeps the test independent of whether cargo has
+/// built the real binaries.
+fn test_search_path(server: &BusServer) -> String {
+    let bin = server.root.join("helpers");
+    std::fs::create_dir_all(&bin).expect("creates the helper dir");
+    for name in ["sandbox-supervisor", "egress-forward"] {
+        std::fs::write(bin.join(name), b"#!/bin/sh\n").expect("writes the placeholder helper");
+    }
+    let host = std::env::var("PATH").unwrap_or_default();
+    format!("{}:{}", bin.display(), host)
+}
+
+/// A manager over a fresh run directory and `launcher`.
 fn manager(
     server: &BusServer,
     launcher: Box<dyn Launcher>,
 ) -> Manager {
-    let scratch = server.root.join("scratch");
-    let config =
-        ManagerConfig::new(server.socket.clone(), scratch).denying(server.root.join("authority"));
-    Manager::new(config, launcher)
+    let config = ManagerConfig::new(
+        server.socket.clone(),
+        server.root.join("run"),
+        server.root.join("agentd"),
+        test_search_path(server),
+    )
+    .denying(server.root.join("authority"));
+    Manager::new(
+        config,
+        launcher,
+        sandbox::egress::HostCapability::PrivateNetworkNamespace,
+        std::sync::Arc::new(server.client()),
+    )
 }
 
 #[test]
@@ -339,6 +365,38 @@ fn a_failed_session_releases_its_workspace() {
     second_manager
         .open_session(&server.client(), &second, &image(), &workspace.0)
         .expect("the workspace is free after the failure");
+}
+
+#[test]
+fn a_session_that_grants_egress_binds_a_proxy() {
+    // The image grants egress, so the start sequence binds a proxy for the
+    // session. The proxy's socket exists while the session runs and is removed
+    // when the session is stopped, which is the whole point of a per-session
+    // proxy: a revoke or a teardown reaches exactly one session's reach.
+    let server = BusServer::start("egress-bind");
+    let (_, boxed) = launcher(true);
+    let manager = manager(&server, boxed);
+    let workspace = Workspace::new("egress-bind");
+    let id = SessionId::new("s-1").expect("valid id");
+    let image = image().allowing("api.example.com");
+
+    manager
+        .open_session(&server.client(), &id, &image, &workspace.0)
+        .expect("opens");
+    assert_eq!(manager.state(&id).expect("known"), daemon::State::Running);
+
+    // The manager's egress socket for this session exists while it runs.
+    let socket = server.root.join("run").join("egress-s-1.sock");
+    assert!(
+        socket.exists(),
+        "a session that grants egress must bind its proxy"
+    );
+
+    manager.stop_session(&server.client(), &id).expect("stops");
+    assert!(
+        !socket.exists(),
+        "stopping a session must remove its proxy socket"
+    );
 }
 
 #[test]
