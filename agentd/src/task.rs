@@ -273,7 +273,6 @@ mod tests {
 
     use super::*;
     use crate::model::{Error, Response};
-    use crate::shell::DEFAULT_TIMEOUT;
 
     /// One request a [`Scripted`] model was given.
     #[derive(Debug, Clone)]
@@ -401,12 +400,12 @@ mod tests {
 
     /// A task capability over a fresh workspace, driven by `answers`.
     ///
-    /// The timeout is short because a test never leans on it; a command here
-    /// finishes on its own.
+    /// The shell keeps its own timeout, which every command here is well inside:
+    /// each finishes on its own, so no test leans on the timeout.
     fn task(answers: Vec<Result<Response, String>>) -> (Task, std::sync::Arc<Scripted>, Workspace) {
         let workspace = Workspace::new("task");
         let model = std::sync::Arc::new(Scripted::new(answers));
-        let shell = Shell::in_workspace(&workspace.0).with_timeout(DEFAULT_TIMEOUT);
+        let shell = Shell::in_workspace(&workspace.0);
         (
             Task::new(Box::new(ArcModel(model.clone())), shell),
             model,
