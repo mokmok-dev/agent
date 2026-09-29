@@ -14,12 +14,12 @@
 //! namespace's init, so a `SIGKILL` to it brings down every descendant.
 
 use std::path::Path;
-use std::process::{Child, ExitStatus};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::filesystem::Backend;
 
-use super::{ExecError, ExecRequest, Output, start_confined};
+use super::{ExecError, ExecRequest, start_confined};
 
 /// The terminal state of a long-lived process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,16 +32,38 @@ pub struct ProcessOutcome {
     pub killed: bool,
 }
 
+/// How a long-lived process's standard streams are wired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessStdio {
+    /// Inherit the daemon's streams: input and output are not captured. The
+    /// caller cannot write to the process, and a pipe it does not own cannot
+    /// fill, so nothing needs draining.
+    Inherited,
+    /// Pipe all three streams, so the caller can write standard input and read
+    /// standard output and error. This is what a caller uses to exchange data
+    /// with the process.
+    ///
+    /// **The caller must drain standard output and standard error**, on their
+    /// own threads. A full pipe blocks the process until it is read, so a caller
+    /// that waits for the process without reading can deadlock. Dropping the
+    /// standard input handle sends end of file to the process.
+    Piped,
+}
+
 /// A running long-lived confined process.
 ///
-/// The output pipes are inherited from the daemon's standard streams rather than
-/// captured: a long-lived process is not a request whose output is returned, and
-/// an uncaptured pipe cannot fill and block it. A caller that wants the output
-/// redirects the child itself before spawning, or reads it from wherever the
-/// backend sends it.
+/// The standard streams follow [`ProcessStdio`]. With [`ProcessStdio::Piped`] the
+/// pipes are held on the handle and handed out by [`Process::take_stdin`],
+/// [`Process::take_stdout`], and [`Process::take_stderr`]. A caller that wants
+/// the output moves each pipe to a reader thread itself, because a read blocks
+/// until data arrives or the pipe closes, and this handle must stay usable for
+/// [`Process::is_running`], [`Process::kill`], and [`Process::wait`] meanwhile.
 #[derive(Debug)]
 pub struct Process {
     child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
     started: Instant,
     /// Whether [`Process::kill`] ended it, so the outcome can record a stop
     /// rather than an exit on its own.
@@ -49,7 +71,7 @@ pub struct Process {
 }
 
 impl Process {
-    /// Spawn `request` under `backend`.
+    /// Spawn `request` under `backend` with `stdio`.
     ///
     /// The request is the same [`ExecRequest`] a one-shot command uses, so a
     /// long-lived process with an egress grant is launched through the same
@@ -64,15 +86,52 @@ impl Process {
         backend: &Backend,
         request: &ExecRequest,
         scratch: &Path,
+        stdio: ProcessStdio,
     ) -> Result<Self, ExecError> {
         let request = super::with_proxy_env(request);
-        let child = start_confined(backend, &request, scratch, Output::Inherited)?;
+        let (child_stdin, child_stdout, child_stderr) = match stdio {
+            ProcessStdio::Inherited => (Stdio::inherit(), Stdio::inherit(), Stdio::inherit()),
+            ProcessStdio::Piped => (Stdio::piped(), Stdio::piped(), Stdio::piped()),
+        };
+        let mut child = start_confined(
+            backend,
+            &request,
+            scratch,
+            child_stdin,
+            child_stdout,
+            child_stderr,
+        )?;
 
         Ok(Self {
+            stdin: child.stdin.take(),
+            stdout: child.stdout.take(),
+            stderr: child.stderr.take(),
             child,
             started: Instant::now(),
             killed: false,
         })
+    }
+
+    /// Take the standard input pipe, for writing, or `None` when the process was
+    /// not spawned with [`ProcessStdio::Piped`] or the pipe was already taken.
+    ///
+    /// Dropping the returned handle closes the pipe and sends end of file to the
+    /// process.
+    #[must_use]
+    pub const fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.stdin.take()
+    }
+
+    /// Take the standard output pipe, for reading. See [`Process::take_stdin`].
+    #[must_use]
+    pub const fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.stdout.take()
+    }
+
+    /// Take the standard error pipe, for reading. See [`Process::take_stdin`].
+    #[must_use]
+    pub const fn take_stderr(&mut self) -> Option<ChildStderr> {
+        self.stderr.take()
     }
 
     /// The process's id, for logs and for a caller that signals it directly.
@@ -139,24 +198,31 @@ mod tests {
     // child (not a confined one) so they run on a host that cannot build a
     // namespace, matching the rule for the executor's timeout tests.
 
+    use std::io::Read;
     use std::path::Path;
     use std::process::{Command, Stdio};
 
     use super::*;
 
     /// A `Process` around a plain `/bin/sh -c <script>`, bypassing the backend.
+    ///
+    /// Built with all three streams piped, so a test can exercise the pipe
+    /// accessors without confinement. A test that does not read them drops them.
     fn shell(script: &str) -> Option<Process> {
         if !Path::new("/bin/sh").exists() {
             return None;
         }
-        let child = Command::new("/bin/sh")
+        let mut child = Command::new("/bin/sh")
             .args(["-c", script])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .ok()?;
         Some(Process {
+            stdin: child.stdin.take(),
+            stdout: child.stdout.take(),
+            stderr: child.stderr.take(),
             child,
             started: Instant::now(),
             killed: false,
@@ -222,6 +288,33 @@ mod tests {
         };
         assert!(process.pid() > 1, "the pid is the child's, not a constant");
         drop(process);
+    }
+
+    #[test]
+    fn piped_stdin_round_trips_through_the_process() {
+        // The process copies its standard input to its standard output, so a
+        // value written to the handle must come back on the output pipe. A
+        // handle that wrote nowhere, or an output pipe the child never owned,
+        // fails this.
+        let Some(mut process) = shell("cat") else {
+            return;
+        };
+        let mut stdin = process.take_stdin().expect("stdin is piped");
+        let mut stdout = process.take_stdout().expect("stdout is piped");
+
+        // Drain on a thread, because the read blocks until the write closes the
+        // pipe, and the write happens on this thread.
+        let reader = std::thread::spawn(move || {
+            let mut buffer = String::new();
+            stdout.read_to_string(&mut buffer).expect("reads");
+            buffer
+        });
+
+        std::io::Write::write_all(&mut stdin, b"hello\n").expect("writes");
+        drop(stdin);
+
+        let echoed = reader.join().expect("joins");
+        assert_eq!(echoed, "hello\n", "the child echoes what it read");
     }
 
     #[test]

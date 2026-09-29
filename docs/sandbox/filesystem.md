@@ -130,6 +130,7 @@ bwrap \
   --ro-bind <protected> <protected>   # re-bind protected names read-only
   --tmpfs <deny-path>                 # mask a `deny` after the binds
   --tmpfs <scratch>                   # the command's TMPDIR
+  --dir <parent> --bind <socket> <socket>   # one per granted socket
   --unshare-all                       # pid, net, ipc, uts, cgroup, user
   --die-with-parent                   # no orphan outliving the daemon
   -- <command>
@@ -138,6 +139,17 @@ bwrap \
 - **`deny` is applied after the binds as a mask.** A mount over an earlier grant
   overrides it, so a `deny` nested in a write root is hidden. This is coarser
   than macOS, which carves the path out read-only; it is a stated gap.
+- **A granted socket is bound read-write, after the masks.** A Unix socket is a
+  filesystem object that crosses the network namespace, so it is mounted into the
+  command's view. It is the one grant rendered after the masks, because its
+  parent may live under the scratch tmpfs and the tmpfs must exist first. It is
+  bound read-write, which preserves the socket's host mode; a read-only bind also
+  permits `connect`, so the read-write form is not a kernel requirement. Every
+  socket the policy grants takes this path: each `network.unix_sockets` entry and
+  the egress proxy's socket. A `deny` over a granted socket or its parent is a
+  `RenderError::SocketDenied`, because a bind emitted after a mask would silently
+  override the `deny`; a socket that does not exist is
+  `RenderError::MissingSocket`, refused rather than skipped.
 - **`--unshare-all` drops the network namespace.** A command has loopback and
   nothing else, and loopback is its own. The one route out is a UDS bind-mounted
   in; see [network.md](./network.md).

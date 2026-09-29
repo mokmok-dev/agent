@@ -82,15 +82,20 @@ pub fn render(
     push(&mut args, "--tmpfs");
     push_path(&mut args, scratch);
 
-    // The egress proxy's socket, when the policy grants egress over a Unix
-    // socket. The socket is a filesystem object that crosses the network
-    // namespace, so it is mounted into the command's view. The parent directories
-    // are created first with `--dir`, so the mount does not depend on the socket's
-    // directory already existing in the command's view; then the socket itself is
-    // bound **read-write**, which is what lets the command `connect` to it. A
-    // `deny` over the socket or its parent is a construction error: bubblewrap
-    // could not create the mountpoint over a mask.
-    if let Some(socket) = egress_socket(policy) {
+    // Every socket the policy grants: the egress proxy's, and each
+    // `network.unix_sockets` entry. A Unix socket is a filesystem object that
+    // crosses the network namespace, so it is mounted into the command's view,
+    // **read-write**, which preserves the mode the socket has on the host. A
+    // read-only bind also permits `connect` (measured), so the read-write form is
+    // not a requirement; it is kept so the mount does not narrow the inode. The
+    // parent directories are created first with `--dir`, so the mount does not
+    // depend on the socket's directory already existing in the command's view (it
+    // might be under the scratch tmpfs, for instance); `--dir` on an existing
+    // directory is a no-op. This runs after the masks above, so a `deny` over a
+    // socket or its parent is a construction error: bubblewrap could not create
+    // the mountpoint over a mask, and a bind after a mask would silently override
+    // the `deny`.
+    for socket in granted_sockets(policy) {
         for entry in denies(policy) {
             if socket.starts_with(&entry.path) {
                 return Err(RenderError::SocketDenied {
@@ -99,11 +104,7 @@ pub fn render(
                 });
             }
         }
-        require_exists(socket, MissingKind::EgressSocket)?;
-        // The socket's parent directory is created explicitly, so the mount does
-        // not depend on it already existing in the command's view (it might be
-        // under the scratch tmpfs, for instance). `--dir` on an existing
-        // directory is a no-op.
+        require_exists(socket, MissingKind::Socket)?;
         if let Some(parent) = socket.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -166,6 +167,21 @@ fn egress_socket(policy: &Policy) -> Option<&Path> {
         .and_then(|grant| grant.socket.as_deref())
 }
 
+/// Every socket the policy grants, the egress proxy's included.
+///
+/// The two sources are one concept at render time: a socket path that must be
+/// bound into the command's namespace. The egress socket is last, so a policy
+/// that names it in `unix_sockets` too renders one redundant bind, which is
+/// harmless because a later bind over the same path wins.
+fn granted_sockets(policy: &Policy) -> impl Iterator<Item = &Path> {
+    policy
+        .network
+        .unix_sockets
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(egress_socket(policy))
+}
+
 /// The `<write-root>/<protected>` paths that exist, for a read-only re-bind.
 fn protected_paths(policy: &Policy) -> Vec<PathBuf> {
     let mut paths = Vec::new();
@@ -222,7 +238,7 @@ fn require_exists(
         MissingKind::DenyTarget => RenderError::MissingDenyTarget {
             path: path.to_path_buf(),
         },
-        MissingKind::EgressSocket => RenderError::MissingEgressSocket {
+        MissingKind::Socket => RenderError::MissingSocket {
             path: path.to_path_buf(),
         },
     })
@@ -235,8 +251,8 @@ enum MissingKind {
     WriteRoot,
     /// A `deny` target.
     DenyTarget,
-    /// The egress proxy's socket.
-    EgressSocket,
+    /// A socket the policy grants, the egress proxy's included.
+    Socket,
 }
 
 /// Push a borrowed string argument.
@@ -534,7 +550,9 @@ mod tests {
 
         let dir = index_of(&args, "--dir").expect("a --dir for the parent");
         assert_eq!(args[dir + 1], socket.parent().unwrap().as_os_str());
-        // The socket is bound read-write, not read-only: `connect` needs write.
+        // The socket is bound read-write, which preserves the host mode. A
+        // read-only bind also allows `connect` (measured), so this pins the form
+        // the renderer chose, not a kernel requirement.
         let bound = args
             .windows(3)
             .any(|w| w[0] == "--bind" && w[1] == socket.as_os_str() && w[2] == socket.as_os_str());
@@ -555,7 +573,7 @@ mod tests {
         let policy = policy_with_socket(&tree, &missing);
         assert!(matches!(
             render(&policy, &tree.scratch()),
-            Err(RenderError::MissingEgressSocket { .. })
+            Err(RenderError::MissingSocket { .. })
         ));
     }
 
@@ -573,5 +591,76 @@ mod tests {
             render(&policy, &tree.scratch()),
             Err(RenderError::SocketDenied { .. })
         ));
+    }
+
+    #[test]
+    fn a_granted_unix_socket_is_dir_created_and_bound_read_write() {
+        let (tree, socket) = socket_tree("unix-sockets");
+        let mut policy = policy(&tree);
+        policy.network.unix_sockets = vec![socket.clone()];
+        let args = render(&policy, &tree.scratch()).expect("renders");
+
+        let dir = index_of(&args, "--dir").expect("a --dir for the parent");
+        assert_eq!(args[dir + 1], socket.parent().unwrap().as_os_str());
+        // Read-write, which preserves the host mode. A read-only bind also
+        // allows `connect` (measured), so this pins the form, not a requirement.
+        let bound = args
+            .windows(3)
+            .any(|w| w[0] == "--bind" && w[1] == socket.as_os_str() && w[2] == socket.as_os_str());
+        assert!(bound, "a granted unix socket should be bound read-write");
+    }
+
+    #[test]
+    fn a_missing_unix_socket_is_reported() {
+        // A declared socket that is not there is refused, not skipped, so a
+        // session whose bus socket is absent fails before the command runs.
+        let tree = Tree::new("missing-unix-socket");
+        let mut policy = policy(&tree);
+        policy.network.unix_sockets = vec![tree.0.join("absent.sock")];
+        assert!(matches!(
+            render(&policy, &tree.scratch()),
+            Err(RenderError::MissingSocket { .. })
+        ));
+    }
+
+    #[test]
+    fn a_unix_socket_inside_a_deny_is_reported() {
+        let (tree, socket) = socket_tree("unix-socket-denied");
+        let mut policy = policy(&tree);
+        policy.network.unix_sockets = vec![socket.clone()];
+        policy
+            .fs
+            .entries
+            .push(FsEntry::deny(socket.parent().unwrap()));
+        assert!(matches!(
+            render(&policy, &tree.scratch()),
+            Err(RenderError::SocketDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn the_egress_socket_and_a_unix_socket_both_render() {
+        // The two sources are one concept; both must be mounted, and the egress
+        // socket must not be lost when `unix_sockets` is also set.
+        let (tree, unix_socket) = socket_tree("both-sockets");
+        let egress_dir = tree.0.join("egress2");
+        fs::create_dir_all(&egress_dir).expect("creates the dir");
+        let egress_socket = egress_dir.join("proxy.sock");
+        std::os::unix::net::UnixListener::bind(&egress_socket).expect("binds the socket");
+
+        let mut policy = policy_with_socket(&tree, &egress_socket);
+        policy.network.unix_sockets = vec![unix_socket.clone()];
+        let args = render(&policy, &tree.scratch()).expect("renders");
+
+        for socket in [unix_socket, egress_socket] {
+            let bound = args.windows(3).any(|w| {
+                w[0] == "--bind" && w[1] == socket.as_os_str() && w[2] == socket.as_os_str()
+            });
+            assert!(
+                bound,
+                "{} should be mounted at its own path",
+                socket.display()
+            );
+        }
     }
 }

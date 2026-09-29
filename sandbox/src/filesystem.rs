@@ -38,12 +38,14 @@ pub enum RenderError {
         /// The missing path.
         path: PathBuf,
     },
-    /// The egress proxy's socket does not exist.
+    /// A socket the policy grants does not exist.
     ///
     /// A missing socket cannot be bound into the command's namespace, and
-    /// skipping it would silently grant no egress where the policy asked for it.
-    #[error("egress socket `{path}` does not exist")]
-    MissingEgressSocket {
+    /// skipping it would silently grant less than the policy declared. The
+    /// egress proxy's socket and every `network.unix_sockets` entry take this
+    /// path.
+    #[error("socket `{path}` does not exist")]
+    MissingSocket {
         /// The missing path.
         path: PathBuf,
     },
@@ -59,15 +61,15 @@ pub enum RenderError {
         /// The `deny` entry that covers it.
         deny: PathBuf,
     },
-    /// The egress proxy's socket lies inside a `deny` entry.
+    /// A socket the policy grants lies inside a `deny` entry.
     ///
-    /// The socket must be mounted into the command's namespace for egress to
-    /// work; a `deny` over it (or its parent directory) would make bubblewrap
-    /// unable to create the mountpoint, so the policy is rejected rather than run
-    /// with a broken egress grant.
-    #[error("the egress socket `{socket}` is inside a `deny` entry `{deny}`")]
+    /// The socket must be mounted into the command's namespace for the command
+    /// to reach it; a `deny` over it (or its parent directory) would make
+    /// bubblewrap unable to create the mountpoint, so the policy is rejected
+    /// rather than run with a broken grant.
+    #[error("the socket `{socket}` is inside a `deny` entry `{deny}`")]
     SocketDenied {
-        /// The proxy's socket path.
+        /// The granted socket path.
         socket: PathBuf,
         /// The `deny` entry that covers it.
         deny: PathBuf,
