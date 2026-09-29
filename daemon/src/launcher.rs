@@ -14,29 +14,29 @@
 
 use std::path::PathBuf;
 
-use sandbox::executor::EgressLaunch;
+use sandbox::executor::{EgressLaunch, ExecRequest, Process, ProcessStdio};
+use sandbox::filesystem::Backend;
 use sandbox::policy::Policy;
 
 use crate::Error;
 
 /// A running confined process, as the manager observes it.
 ///
-/// The manager needs only to ask whether it is alive and to stop it; the
-/// sandbox's `Process` implements this, and a test supplies a stub.
+/// The manager needs only to stop the process; the sandbox's `Process`
+/// implements this, and a test supplies a stub.
 pub trait LaunchedProcess: Send + std::fmt::Debug {
-    /// Whether the process is still running.
-    ///
-    /// # Errors
-    ///
-    /// Returns the underlying I/O error if the check fails.
-    fn is_running(&mut self) -> std::io::Result<bool>;
-
     /// Stop the process and its descendants.
     ///
     /// # Errors
     ///
     /// Returns the underlying I/O error if the kill fails.
     fn kill(&mut self) -> std::io::Result<()>;
+}
+
+impl LaunchedProcess for Process {
+    fn kill(&mut self) -> std::io::Result<()> {
+        Self::kill(self)
+    }
 }
 
 /// What a launcher is given to start one session's process.
@@ -72,4 +72,136 @@ pub trait Launcher: Send + Sync + std::fmt::Debug {
         &self,
         request: &LaunchRequest,
     ) -> Result<Box<dyn LaunchedProcess>, Error>;
+}
+
+/// The real launcher: the sandbox's executor under a detected backend.
+#[derive(Debug, Clone)]
+pub struct SandboxLauncher {
+    backend: Backend,
+}
+
+impl SandboxLauncher {
+    /// Detect the backend this host can enforce.
+    ///
+    /// `reject_under` is the policy's writable root, so a `bwrap` inside it is
+    /// refused, the same rule the sandbox applies.
+    #[must_use]
+    pub fn detect(
+        search_path: &str,
+        reject_under: &[PathBuf],
+    ) -> Self {
+        Self {
+            backend: Backend::detect(search_path, reject_under),
+        }
+    }
+
+    /// The detected backend, for a caller that needs to read the host's egress
+    /// capability before it binds a proxy.
+    #[must_use]
+    pub const fn backend(&self) -> &Backend {
+        &self.backend
+    }
+
+    /// A launcher over an explicit backend.
+    ///
+    /// Lets a caller that already detected a backend reuse it, and lets a test
+    /// exercise both the supported and unsupported paths without a host.
+    #[must_use]
+    pub const fn from_backend(backend: Backend) -> Self {
+        Self { backend }
+    }
+}
+
+impl Launcher for SandboxLauncher {
+    fn is_supported(&self) -> bool {
+        self.backend.is_supported()
+    }
+
+    fn launch(
+        &self,
+        request: &LaunchRequest,
+    ) -> Result<Box<dyn LaunchedProcess>, Error> {
+        if !self.backend.is_supported() {
+            return Err(Error::NoBackend);
+        }
+        let exec = ExecRequest {
+            program: request.program.clone().into_os_string(),
+            args: request.args.iter().map(Into::into).collect(),
+            policy: request.policy.clone(),
+            egress: request.egress.clone(),
+        };
+        let process = Process::spawn(
+            &self.backend,
+            &exec,
+            &request.scratch,
+            ProcessStdio::Inherited,
+        )
+        .map_err(|error| Error::Launcher(error.to_string()))?;
+        Ok(Box::new(process))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Tests that need no confinement: the support flag mirrors the backend, and a
+    // launcher with no backend refuses to launch.
+
+    use super::*;
+
+    #[test]
+    fn support_mirrors_the_detected_backend() {
+        // On this host, whatever the backend, the launcher's support flag must
+        // equal it. A constant `true` would claim support on a host without a
+        // mechanism; a constant `false` would refuse a host that has one.
+        let launcher = SandboxLauncher::detect("", &[]);
+        assert_eq!(
+            launcher.is_supported(),
+            launcher.backend().is_supported(),
+            "the launcher's support must mirror the backend"
+        );
+    }
+
+    #[test]
+    fn a_supported_backend_reports_support() {
+        // A synthetic supported backend, so the flag is pinned to the backend on
+        // a host that has no mechanism at all.
+        use sandbox::filesystem::Backend;
+        let bubblewrap = Backend::Bubblewrap {
+            program: PathBuf::from("/usr/bin/bwrap"),
+        };
+        assert!(
+            SandboxLauncher::from_backend(bubblewrap).is_supported(),
+            "a bubblewrap backend is supported"
+        );
+    }
+
+    #[test]
+    fn an_unsupported_backend_reports_no_support() {
+        use sandbox::filesystem::{Backend, BackendError};
+        let unsupported = Backend::Unsupported {
+            reason: BackendError::BubblewrapNotInstalled,
+        };
+        assert!(
+            !SandboxLauncher::from_backend(unsupported).is_supported(),
+            "an unsupported backend reports no support"
+        );
+    }
+
+    #[test]
+    fn a_launcher_without_a_backend_refuses_to_launch() {
+        // `""` resolves no `bwrap`, so this is the fail-closed path.
+        let launcher = SandboxLauncher::detect("", &[]);
+        assert!(!launcher.is_supported());
+        let request = LaunchRequest {
+            policy: sandbox::policy::Policy::default(),
+            program: PathBuf::from("/bin/true"),
+            args: Vec::new(),
+            scratch: PathBuf::from("/tmp"),
+            egress: None,
+        };
+        let error = launcher
+            .launch(&request)
+            .expect_err("a launcher without a backend must refuse");
+        assert!(matches!(error, Error::NoBackend));
+    }
 }

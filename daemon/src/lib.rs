@@ -11,14 +11,16 @@
 //! process, an egress allowlist) arrive with the milestones that create them.
 
 pub mod bus;
+pub mod helper;
 pub mod image;
 pub mod launcher;
 pub mod manager;
 pub mod session;
 
 pub use bus::{BusClient, BusPublisher};
+pub use helper::{EgressBinaries, resolve_egress};
 pub use image::AgentImage;
-pub use launcher::{LaunchRequest, LaunchedProcess, Launcher};
+pub use launcher::{LaunchRequest, LaunchedProcess, Launcher, SandboxLauncher};
 pub use manager::{Manager, ManagerConfig};
 pub use session::{Session, SessionId, SessionRegistry, State};
 

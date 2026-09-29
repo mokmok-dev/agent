@@ -8,6 +8,14 @@
 # unqualified and would not carry the `proofs::` path.
 exclude_globs = ["agent/src/wal/proofs.rs"]
 
+# The daemon's real path over the sandbox's executor: `LaunchedProcess for
+# Process` is a one-line pass-through to `Process::kill`, and the only code that
+# calls it is `real_launcher.rs`, which spawns a real confined process. Every CI
+# runner here forbids unprivileged user namespaces, so that test skips and the
+# delegation cannot be reached; a replacement with `Ok(())` therefore survives.
+# The test runs on a namespace-capable host, which is where the behavior is
+# checked, so the survivor is a coverage gap of the CI host, not of the code.
+#
 # `recover_from` only ever compares from `position == 0` before incrementing it,
 # so `position < bytes.len()` and `bytes.len() - position < HEADER_LEN` are both
 # vacuously true on entry and never reached again. Changing `<` to any other
@@ -20,5 +28,6 @@ exclude_globs = ["agent/src/wal/proofs.rs"]
 # unobservable. The oversized-first-record test pins the intended layout anyway.
 exclude_re = [
   "replace < with .* in recover_from",
+  "replace <impl LaunchedProcess for Process>::kill",
   "replace > with >= in .*write_batch",
 ]
