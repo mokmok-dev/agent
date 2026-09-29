@@ -204,17 +204,18 @@ bus. Neither gains a dependency on the other.
    transitions.
 3. Egress wiring. The proxy serve loop and the `Publisher` and `Desk`
    implementations over the bus. An unlisted host becomes a `requested` event,
-   and a grant lets the tunnel through. **The bus client and `Publisher` bridge
-   have landed** in `daemon/src/bus.rs`, verified against the real bus server.
-   The proxy's serve loop arrives with the start sequence, because the proxy is
-   per-session.
+   and a grant lets the tunnel through. **Landed**, in `daemon/src/bus.rs`,
+   `daemon/src/egress.rs`, and `daemon/src/helper.rs`: the bus client and
+   `Publisher` bridge are verified against the real bus server, and the
+   per-session proxy binds, serves, and is torn down with its session.
 4. Daemon. The image, the start sequence, the lifecycle events, and teardown
    landed in `daemon/src/image.rs`, `daemon/src/launcher.rs`, and
    `daemon/src/manager.rs`, tested with a fake launcher. The real
    `SandboxLauncher` and the egress helper resolution followed, and a confined
    shell script writing inside its workspace and denied outside it is the
-   end-to-end proof. The egress proxy's serve loop is the remaining part.
-   Tested over a real Unix socket with a confined stub agent.
+   end-to-end proof. **Landed.** The egress proxy's serve loop completed the
+   milestone: a session that grants egress binds a proxy, serves it, and removes
+   its socket on teardown. Tested over a real Unix socket.
 5. Agent. The in-repo agent crate. It subscribes to the bus, acts on a message,
    and publishes its events.
 6. Coding agent image. The provider host on the allowlist, the workspace

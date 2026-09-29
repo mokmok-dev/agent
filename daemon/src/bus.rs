@@ -430,6 +430,15 @@ fn route_server(
     }
 }
 
+/// Mint a per-proxy egress token.
+///
+/// The token is opaque and dies with the proxy; a per-connection approval request
+/// id is minted the same way. See `docs/sandbox/security.md`.
+#[must_use]
+pub fn mint_token() -> String {
+    Ulid::generate().to_string()
+}
+
 /// The daemon's implementation of the sandbox's [`Publisher`] seam.
 ///
 /// The sandbox authors an event and the bridge publishes it; the sandbox never
@@ -532,4 +541,23 @@ pub enum Error {
     /// The connection is gone.
     #[error("the bus connection is closed")]
     Closed,
+}
+
+#[cfg(test)]
+mod tests {
+    // Tests for the pure helpers. The connection itself is covered end to end in
+    // `tests/bus_client.rs`, against the real server.
+
+    use super::*;
+
+    #[test]
+    fn mint_token_is_a_unique_ulid() {
+        // The token is per proxy and must not be a constant: two proxies must not
+        // share a credential. A ULID is 26 Crockford base32 characters.
+        let first = mint_token();
+        let second = mint_token();
+        assert_ne!(first, second, "each proxy gets a fresh token");
+        assert_eq!(first.len(), 26, "a ULID is 26 characters");
+        assert!(first.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
 }

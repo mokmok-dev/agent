@@ -113,6 +113,8 @@ pub struct Session {
     scratch: Option<sandbox::executor::Scratch>,
     /// The confined process, killed when the session is torn down.
     process: Option<Box<dyn crate::launcher::LaunchedProcess>>,
+    /// The session's egress proxy, stopped when the session is torn down.
+    egress: Option<crate::egress::Egress>,
 }
 
 impl Session {
@@ -157,6 +159,25 @@ impl Session {
         Ok(())
     }
 
+    /// Record the session's egress proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidTransition`] unless the session is `Starting`.
+    pub fn attach_egress(
+        &mut self,
+        egress: Option<crate::egress::Egress>,
+    ) -> Result<(), Error> {
+        if self.state != State::Starting {
+            return Err(Error::InvalidTransition {
+                action: "attach egress to",
+                state: self.state,
+            });
+        }
+        self.egress = egress;
+        Ok(())
+    }
+
     /// Release the session's resources: kill the process, then drop the scratch.
     ///
     /// The order is the design's: the process is killed before the scratch is
@@ -178,6 +199,9 @@ impl Session {
             return Err(Error::Launcher(error.to_string()));
         }
         self.scratch = None;
+        // Dropping the proxy stops its serve loop and removes its socket. The
+        // process was killed first, so nothing is left reaching the proxy.
+        self.egress = None;
         Ok(())
     }
 
@@ -313,6 +337,7 @@ impl SessionRegistry {
             workspace,
             scratch: None,
             process: None,
+            egress: None,
         }))
     }
 
@@ -350,6 +375,24 @@ impl SessionRegistry {
             .get_mut(id)
             .ok_or_else(|| Error::NoSuchSession(id.clone()))?;
         session.attach(scratch, process)
+    }
+
+    /// Record a session's egress proxy during its start sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoSuchSession`] for an unknown id and the session's own
+    /// transition error when it is not `Starting`.
+    pub fn attach_egress(
+        &mut self,
+        id: &SessionId,
+        egress: Option<crate::egress::Egress>,
+    ) -> Result<(), Error> {
+        let session = self
+            .sessions
+            .get_mut(id)
+            .ok_or_else(|| Error::NoSuchSession(id.clone()))?;
+        session.attach_egress(egress)
     }
 
     /// Release a session's resources without changing its state.

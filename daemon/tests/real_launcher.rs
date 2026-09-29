@@ -125,8 +125,22 @@ fn manager(
     search_path: &str,
 ) -> Option<Manager> {
     let launcher = launcher_or_skip(search_path)?;
-    let config = ManagerConfig::new(server.socket.clone(), server.root.join("scratch"));
-    Some(Manager::new(config, launcher))
+    let capability = sandbox::egress::HostCapability::of(&sandbox::filesystem::Backend::detect(
+        search_path,
+        &[],
+    ));
+    let config = ManagerConfig::new(
+        server.socket.clone(),
+        server.root.join("run"),
+        server.root.join("agentd"),
+        search_path.to_owned(),
+    );
+    Some(Manager::new(
+        config,
+        launcher,
+        capability,
+        std::sync::Arc::new(server.client()),
+    ))
 }
 
 fn host_path() -> String {

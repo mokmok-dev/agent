@@ -11,6 +11,7 @@
 //! process, an egress allowlist) arrive with the milestones that create them.
 
 pub mod bus;
+pub mod egress;
 pub mod helper;
 pub mod image;
 pub mod launcher;
@@ -18,6 +19,7 @@ pub mod manager;
 pub mod session;
 
 pub use bus::{BusClient, BusPublisher};
+pub use egress::Egress;
 pub use helper::{EgressBinaries, resolve_egress};
 pub use image::AgentImage;
 pub use launcher::{LaunchRequest, LaunchedProcess, Launcher, SandboxLauncher};
@@ -64,6 +66,16 @@ pub enum Error {
     /// The launcher could not start or stop the confined process.
     #[error("launcher error: {0}")]
     Launcher(String),
+    /// This host cannot confine egress to a single route, so egress is refused.
+    #[error("this host cannot confine egress to one route")]
+    EgressRefused,
+    /// The egress proxy could not be bound or served.
+    #[error("egress proxy error: {0}")]
+    Egress(String),
+    /// An egress grant needs the supervisor and forwarder binaries, and they
+    /// could not be resolved.
+    #[error("the egress helper binaries could not be resolved")]
+    EgressHelpersMissing,
     /// The composed policy is not valid.
     #[error(transparent)]
     Policy(#[from] sandbox::policy::InvalidPolicy),
