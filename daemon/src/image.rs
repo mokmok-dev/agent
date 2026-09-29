@@ -15,8 +15,9 @@ pub struct AgentImage {
     pub program: PathBuf,
     /// The program's arguments.
     pub args: Vec<String>,
-    /// The hosts the agent may reach through the egress proxy, at port 443.
-    pub allowed_hosts: Vec<String>,
+    /// The destinations the agent may reach through the egress proxy. The zero
+    /// list reaches nothing.
+    pub rules: Vec<HostPort>,
     /// The environment variables the program receives. The host environment is
     /// never inherited; this is the whole allowlist.
     pub env: Vec<EnvVar>,
@@ -29,7 +30,7 @@ impl AgentImage {
         Self {
             program: program.into(),
             args: Vec::new(),
-            allowed_hosts: Vec::new(),
+            rules: Vec::new(),
             env: Vec::new(),
         }
     }
@@ -50,7 +51,20 @@ impl AgentImage {
         mut self,
         host: impl Into<String>,
     ) -> Self {
-        self.allowed_hosts.push(host.into());
+        self.rules.push(HostPort::new(host, 443));
+        self
+    }
+
+    /// Allow the agent to reach `destination` through the proxy.
+    ///
+    /// A destination carries its port, so an endpoint on a non-default port is a
+    /// rule of its own. [`crate::settings`] derives one per declared endpoint.
+    #[must_use]
+    pub fn allowing_destination(
+        mut self,
+        destination: HostPort,
+    ) -> Self {
+        self.rules.push(destination);
         self
     }
 
@@ -68,7 +82,7 @@ impl AgentImage {
     /// Whether this image reaches the network at all.
     #[must_use]
     pub const fn grants_egress(&self) -> bool {
-        !self.allowed_hosts.is_empty()
+        !self.rules.is_empty()
     }
 
     /// Build the confinement policy for a session on `workspace`.
@@ -128,13 +142,10 @@ impl AgentImage {
         Ok(policy)
     }
 
-    /// The egress grant for this image: every allowed host at port 443.
+    /// The egress grant for this image: every rule it carries.
     #[must_use]
     pub fn egress_rules(&self) -> Vec<HostPort> {
-        self.allowed_hosts
-            .iter()
-            .map(|host| HostPort::new(host.clone(), 443))
-            .collect()
+        self.rules.clone()
     }
 }
 
@@ -161,6 +172,17 @@ mod tests {
         assert_eq!(
             image.egress_rules(),
             vec![HostPort::new("api.example.com", 443)]
+        );
+    }
+
+    #[test]
+    fn an_allowed_destination_keeps_its_port() {
+        // A model endpoint on a non-default port is a different destination to
+        // the proxy, so the port the settings derived must survive the image.
+        let image = image().allowing_destination(HostPort::new("models.internal", 8443));
+        assert_eq!(
+            image.egress_rules(),
+            vec![HostPort::new("models.internal", 8443)]
         );
     }
 

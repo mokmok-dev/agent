@@ -51,7 +51,9 @@ impl Egress {
     ///
     /// The proxy's token is opaque and per proxy; the approval requests it
     /// publishes go over `bus`, and an unlisted destination is asked about rather
-    /// than refused, so an authority can widen a session while it runs.
+    /// than refused, so an authority can widen a session while it runs. The rules
+    /// it starts with are the image's, which the settings file derives from the
+    /// endpoints it declares. See [`crate::settings`].
     ///
     /// # Errors
     ///
@@ -65,33 +67,7 @@ impl Egress {
         sandbox_id: &str,
         deadline: Duration,
     ) -> Result<Self, Error> {
-        Self::start_with_rules(
-            DestinationSet::of(image.egress_rules()),
-            socket,
-            capability,
-            bus,
-            sandbox_id,
-            deadline,
-        )
-    }
-
-    /// Bind a proxy with an explicit starting destination set.
-    ///
-    /// Lets a caller name a port the image's `allowing` helper does not, which a
-    /// test needs because it cannot bind port 443.
-    ///
-    /// # Errors
-    ///
-    /// As [`Egress::start`].
-    pub fn start_with_rules(
-        rules: DestinationSet,
-        socket: PathBuf,
-        capability: &HostCapability,
-        bus: &Arc<BusClient>,
-        sandbox_id: &str,
-        deadline: Duration,
-    ) -> Result<Self, Error> {
-        let rules = Arc::new(Allowlist::new(rules));
+        let rules = Arc::new(Allowlist::new(DestinationSet::of(image.egress_rules())));
         let approver: Arc<dyn Approver> = Arc::new(Desk::new(
             Arc::new(BusPublisher::new(Arc::clone(bus))),
             sandbox_id.to_owned(),

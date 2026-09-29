@@ -170,6 +170,39 @@ applies to `bwrap` and the supervisor. A binary inside a policy write root is
 refused, because a repository must not supply the program that decides what it
 does.
 
+## The Settings and the Egress Allowlist
+
+The operator declares the OpenAI-compatible endpoints in a settings file, and the
+session's egress allowlist is **derived** from them. One `host:port` rule per
+declared endpoint's `base_url`; a host declared by two endpoints is one rule, and
+an endpoint on a non-default port is a rule of its own.
+
+```toml
+# The key is the model id sent to the API.
+[model."grok-4.7"]
+base_url = "https://api.x.ai/v1"
+env_key = "XAI_API_KEY"
+```
+
+The file is `$XDG_CONFIG_HOME/agent/config.toml`, falling back to
+`$HOME/.config/agent/config.toml`. It is the only scope: a project-side file
+would let a repository grant its own agent egress. A file that is absent declares
+no endpoint, and a session with no endpoint reaches nothing — the same
+fail-closed default an empty allowlist has.
+
+Only `https` is accepted. The egress proxy speaks `CONNECT` alone and the sandbox
+gives the command no route but that proxy, so a plaintext endpoint cannot be
+reached at all; the URL is refused when the file is read rather than at a call
+that would look like a network outage. See
+[sandbox network](../sandbox/network.md).
+
+The daemon reads the file and the agent never does: the endpoint's `env_key`
+names the variable in the agent's own environment, which the image carries as an
+`env` entry when the client that calls the endpoint lands. The value is the
+agent's own — the daemon never holds it, and the tunnel never sees it. Deriving
+the rule from the same `base_url` the client calls is what keeps the allowlist and
+the endpoint from disagreeing. See [daemon.md](./daemon.md).
+
 ## The Output Contract
 
 An agent publishes events. The contract names the types, so a consumer reads the

@@ -226,7 +226,14 @@ bus. Neither gains a dependency on the other.
    replaces it without touching the loop.
 6. Coding agent image. The provider host on the allowlist, the workspace
    convention, and the task events. This is where the authority-socket question
-   in [lifecycle.md](./lifecycle.md#authority) becomes a requirement.
+   in [lifecycle.md](./lifecycle.md#authority) becomes a requirement. The
+   provider host **landed** first: the operator declares the OpenAI-compatible
+   endpoints in a settings file
+   (`$XDG_CONFIG_HOME/agent/config.toml`), and the session's egress allowlist is
+   derived from each `base_url` rather than declared beside it, in
+   `daemon/src/settings.rs`. See [agent.md](./agent.md#the-settings-and-the-egress-allowlist).
+   The provider client, the image arguments it needs, the workspace convention,
+   and the task events remain.
 
 ## Open Questions
 
