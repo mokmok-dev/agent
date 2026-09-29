@@ -138,6 +138,23 @@ where
     panic!("never saw {what}");
 }
 
+/// Whether `event` is an output event for `session` whose `kind` is `kind`.
+///
+/// The agent publishes progress while a command runs and its result when it
+/// ends, so a test that wants the result has to say so.
+fn is_output(
+    event: &CloudEvent,
+    session: &str,
+    kind: &str,
+) -> bool {
+    event.ty == "agent.session.output"
+        && event.subject.as_deref() == Some(session)
+        && event
+            .data
+            .as_ref()
+            .is_some_and(|data| data["kind"] == json!(kind))
+}
+
 /// A running agent binary, killed on drop.
 struct Agent {
     child: Child,
@@ -216,7 +233,7 @@ fn an_agent_runs_a_shell_command_and_reports_its_output() {
     let _agent = Agent::start(&server, "s-1", &workspace.0, 0);
 
     let output = await_event(&seen, "an output event", |event| {
-        event.ty == "agent.session.output" && event.subject.as_deref() == Some("s-1")
+        is_output(event, "s-1", "done")
     });
     assert_eq!(
         output.data.as_ref().expect("data")["kind"],
@@ -253,7 +270,7 @@ fn a_shell_command_runs_in_the_session_workspace() {
 
     let _agent = Agent::start(&server, "s-w", &workspace.0, 0);
     await_event(&seen, "the command's output", |event| {
-        event.ty == "agent.session.output" && event.subject.as_deref() == Some("s-w")
+        is_output(event, "s-w", "done")
     });
 
     assert_eq!(
@@ -288,7 +305,7 @@ fn an_agent_survives_a_restart_without_losing_a_command() {
     let _agent = Agent::start(&server, "s-2", &workspace.0, 0);
 
     let output = await_event(&seen, "the replayed command's output", |event| {
-        event.ty == "agent.session.output" && event.subject.as_deref() == Some("s-2")
+        is_output(event, "s-2", "done")
     });
     assert_eq!(output.data.as_ref().expect("data")["action"], "shell");
     assert_eq!(
@@ -357,11 +374,60 @@ fn an_agent_reports_an_unknown_action_without_running_anything() {
     let _agent = Agent::start(&server, "s-u", &workspace.0, 0);
 
     let output = await_event(&seen, "the unknown action's output", |event| {
-        event.ty == "agent.session.output" && event.subject.as_deref() == Some("s-u")
+        is_output(event, "s-u", "error")
     });
     assert_eq!(output.data.as_ref().expect("data")["kind"], "error");
     assert_eq!(
         output.data.as_ref().expect("data")["detail"]["reason"],
         "the agent has no capability for this action"
+    );
+}
+
+#[test]
+fn an_agent_reports_a_command_before_it_runs() {
+    // A command may run for minutes, so the agent announces it while it runs
+    // rather than reporting only the result when it ends.
+    let server = BusServer::start("progress");
+    let observer = server.client();
+    let (handler, seen) = recorder();
+    observer.subscribe(0, handler).expect("subscribes");
+    let workspace = Workspace::new("progress");
+
+    let client = server.client();
+    client
+        .publish(incoming(
+            "agent.session.command",
+            "s-p",
+            json!({"action": "shell", "detail": {"argv": ["/bin/sh", "-c", "echo hi"]}}),
+        ))
+        .expect("publishes the command");
+
+    let _agent = Agent::start(&server, "s-p", &workspace.0, 0);
+
+    let progress = await_event(&seen, "a progress event", |event| {
+        is_output(event, "s-p", "progress")
+    });
+    assert_eq!(progress.data.as_ref().expect("data")["action"], "shell");
+    assert_eq!(
+        progress.data.as_ref().expect("data")["detail"]["argv"],
+        json!(["/bin/sh", "-c", "echo hi"]),
+        "the report names the argv that is about to run"
+    );
+
+    // The report arrives before the result, which is what makes the work visible
+    // while it runs rather than only when it ends.
+    await_event(&seen, "the command's result", |event| {
+        is_output(event, "s-p", "done")
+    });
+    let events = seen.lock().expect("unpoisoned").clone();
+    let at = |kind: &str| {
+        events
+            .iter()
+            .position(|event| is_output(event, "s-p", kind))
+            .expect("the event was awaited")
+    };
+    assert!(
+        at("progress") < at("done"),
+        "the report comes before the result"
     );
 }
