@@ -196,8 +196,9 @@ bus. Neither gains a dependency on the other.
 
 1. Executor grants and streams. The bubblewrap renderer binds each granted
    `network.unix_sockets` entry, so a confined agent can reach the bus. The
-   long-lived `Process` gains a configurable standard input and output, and
-   `Scratch` becomes unique per session. Tested over a real `bwrap`.
+   long-lived `Process` gains a configurable standard input and output through
+   `ProcessStdio`, and `Scratch` becomes unique per session. **Landed.** Tested
+   over a real `bwrap` and without confinement.
 2. Session core. The `SessionId`, the state machine, and the registry, with no
    process spawning. Tested as pure transitions.
 3. Egress wiring. The proxy serve loop and the `Publisher` and `Desk`

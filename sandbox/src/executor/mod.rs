@@ -20,6 +20,7 @@ use std::ffi::OsString;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::filesystem::{Backend, RenderError};
@@ -27,7 +28,7 @@ use crate::policy::Policy;
 
 mod process;
 
-pub use process::{Process, ProcessOutcome};
+pub use process::{Process, ProcessOutcome, ProcessStdio};
 
 /// A command to run under a policy.
 #[derive(Debug, Clone)]
@@ -109,6 +110,12 @@ pub enum ExecError {
 #[derive(Debug)]
 pub struct Scratch(PathBuf);
 
+/// Distinguishes scratches created in one process, under one parent.
+///
+/// The process id alone is not enough: two sessions in one daemon would compute
+/// the same name, and the second `Scratch` would delete the first's directory.
+static NEXT_SCRATCH: AtomicU64 = AtomicU64::new(0);
+
 impl Scratch {
     /// Create a unique, empty scratch directory under `parent`.
     ///
@@ -116,8 +123,8 @@ impl Scratch {
     ///
     /// Returns the underlying [`io::Error`] if the directory cannot be created.
     pub fn new(parent: &Path) -> Result<Self, io::Error> {
-        let dir = parent.join(format!("agent-scratch-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let unique = NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed);
+        let dir = parent.join(format!("agent-scratch-{}-{unique}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
         Ok(Self(dir))
     }
@@ -152,7 +159,14 @@ pub fn run(
     // request is untouched and the environment the command receives names the
     // forwarder on loopback.
     let request = with_proxy_env(request);
-    let mut child = start_confined(backend, &request, scratch.path(), Output::Piped)?;
+    let mut child = start_confined(
+        backend,
+        &request,
+        scratch.path(),
+        Stdio::null(),
+        Stdio::piped(),
+        Stdio::piped(),
+    )?;
 
     // Drain both pipes on their own threads, so a command that writes more than
     // the pipe buffer holds cannot block the process that is waiting for it. The
@@ -175,21 +189,12 @@ pub fn run(
     })
 }
 
-/// The confined command's standard streams.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Output {
-    /// Capture stdout and stderr on pipes, for a one-shot command whose output is
-    /// returned.
-    Piped,
-    /// Inherit the daemon's streams, for a long-lived process whose output is not
-    /// captured.
-    Inherited,
-}
-
 /// Build and start the confined process under `backend`.
 ///
-/// When `request.egress` is set, the backend runs the egress **supervisor** as
-/// the sandbox's init instead of the command, and the proxy variables are injected
+/// The three standard streams are the caller's choice, because a one-shot
+/// command captures its output while a long-lived process may stream it. When
+/// `request.egress` is set, the backend runs the egress **supervisor** as the
+/// sandbox's init instead of the command, and the proxy variables are injected
 /// into the policy's environment first. The supervisor then starts the forwarder
 /// and the command in the same namespace. Otherwise the backend runs the command
 /// directly.
@@ -197,7 +202,9 @@ pub(super) fn start_confined(
     backend: &Backend,
     request: &ExecRequest,
     scratch: &Path,
-    output: Output,
+    stdin: Stdio,
+    stdout: Stdio,
+    stderr: Stdio,
 ) -> Result<Child, ExecError> {
     let (program, args) = match (backend, backend.render(&request.policy, scratch)?) {
         (Backend::Bubblewrap { program }, Some(args)) => (program.clone(), args),
@@ -214,15 +221,9 @@ pub(super) fn start_confined(
     // environment is cleared too, so no host variable reaches the command.
     builder
         .env_clear()
-        .stdin(Stdio::null())
-        .stdout(match output {
-            Output::Piped => Stdio::piped(),
-            Output::Inherited => Stdio::inherit(),
-        })
-        .stderr(match output {
-            Output::Piped => Stdio::piped(),
-            Output::Inherited => Stdio::inherit(),
-        })
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()
         .map_err(ExecError::Spawn)
 }
@@ -464,6 +465,32 @@ mod tests {
         assert!(
             !path.exists(),
             "the scratch directory must be removed when the guard drops"
+        );
+
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn two_scratches_under_one_parent_are_distinct() {
+        // The process id alone would name both the same, and the second would
+        // delete the first. Each must get its own directory, and dropping one
+        // must leave the other intact.
+        let parent =
+            std::env::temp_dir().join(format!("sandbox-scratch-multi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).expect("creates the parent");
+
+        let first = Scratch::new(&parent).expect("creates the first");
+        let second = Scratch::new(&parent).expect("creates the second");
+        assert_ne!(first.path(), second.path(), "each scratch is its own dir");
+        assert!(first.path().is_dir() && second.path().is_dir());
+
+        let first_path = first.path().to_path_buf();
+        drop(first);
+        assert!(!first_path.exists(), "dropping the first removes only it");
+        assert!(
+            second.path().is_dir(),
+            "the second scratch survives the first's drop"
         );
 
         let _ = std::fs::remove_dir_all(&parent);

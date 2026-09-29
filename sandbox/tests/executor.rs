@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use sandbox::executor::{ExecError, ExecRequest, Process, Scratch, run};
+use sandbox::executor::{ExecError, ExecRequest, Process, ProcessStdio, Scratch, run};
 use sandbox::filesystem::{Backend, RenderError};
 use sandbox::policy::{EnvVar, FsEntry, FsPolicy, Limits, Policy, ShellPolicy};
 
@@ -101,6 +101,32 @@ fn sh(
         egress: None,
     };
     run(backend, &request, scratch).expect("the confined command runs")
+}
+
+/// The host's `perl`, which can open a Unix socket from a one-liner.
+///
+/// `sh` cannot open a Unix socket, so a test that must prove a real `connect`
+/// needs a language runtime. `perl` is the one present in this workspace's
+/// environment; the test returns early when it is absent, like the backend skip.
+fn perl() -> Option<&'static str> {
+    [
+        "/run/current-system/sw/bin/perl",
+        "/usr/bin/perl",
+        "/bin/perl",
+    ]
+    .into_iter()
+    .find(|candidate| std::path::Path::new(candidate).is_file())
+}
+
+/// A `perl` one-liner that connects to `socket`, echoing `CONNECT-OK` on
+/// success and the error otherwise. `IO::Socket::UNIX` ships with core perl.
+fn connect_script(socket: &std::path::Path) -> String {
+    format!(
+        "use IO::Socket::UNIX; \
+         my $c = IO::Socket::UNIX->new(Peer => q{{{}}}, Type => 1); \
+         print $c ? qq{{CONNECT-OK\\n}} : qq{{CONNECT-FAIL: $!\\n}};",
+        socket.display()
+    )
 }
 
 #[test]
@@ -415,7 +441,8 @@ fn a_long_lived_process_runs_and_is_killed_with_its_descendants() {
         policy,
         egress: None,
     };
-    let mut process = Process::spawn(&backend, &request, scratch.path()).expect("spawns");
+    let mut process = Process::spawn(&backend, &request, scratch.path(), ProcessStdio::Inherited)
+        .expect("spawns");
 
     assert!(process.pid() > 0);
     assert!(
@@ -438,6 +465,106 @@ fn a_long_lived_process_runs_and_is_killed_with_its_descendants() {
         !marker.exists(),
         "a killed process must not leave a descendant's marker"
     );
+}
+
+#[test]
+fn a_granted_unix_socket_is_connectable_inside_the_sandbox() {
+    // The policy declares a Unix socket the command may reach. It is bound into
+    // the namespace, so a real `connect` from inside succeeds. A test that only
+    // checks the path exists, or its `-w` bit, does not prove the grant works.
+    let Some(backend) = backend_or_skip() else {
+        return;
+    };
+    let Some(perl) = perl() else {
+        return;
+    };
+    let tree = Tree::new("unix-socket-connect");
+    let scratch = Scratch::new(&tree.work()).expect("scratch");
+
+    // A real listening socket on the host, held open for the test's duration.
+    let dir = tree.0.join("bus");
+    fs::create_dir_all(&dir).expect("creates the bus dir");
+    let socket = dir.join("bus.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("binds the socket");
+
+    let mut policy = policy(&tree);
+    policy.network.unix_sockets = vec![socket.clone()];
+    // `perl` is a policy env concern: the environment is an allowlist, so the
+    // runtime needs the host `PATH` the `policy` helper already grants.
+
+    let request = ExecRequest {
+        program: OsString::from(perl),
+        args: vec![
+            OsString::from("-e"),
+            OsString::from(connect_script(&socket)),
+        ],
+        policy,
+        egress: None,
+    };
+    let outcome = run(&backend, &request, &scratch).expect("the confined command runs");
+
+    let stdout = String::from_utf8_lossy(&outcome.stdout);
+    assert_eq!(
+        outcome.code,
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    assert!(
+        stdout.contains("CONNECT-OK"),
+        "a granted socket must accept a connect, got: {stdout}"
+    );
+    drop(listener);
+}
+
+#[test]
+fn a_long_lived_process_pipes_stdin_and_stdout_under_confinement() {
+    // The stdio grant reaches a real confined process: a value written to the
+    // handle comes back on the output pipe, with the process running under
+    // bubblewrap. The pipes are drained on threads, as a caller must.
+    let Some(backend) = backend_or_skip() else {
+        return;
+    };
+    let tree = Tree::new("piped-stdio");
+    let scratch = Scratch::new(&tree.work()).expect("scratch");
+    let policy = policy(&tree);
+
+    let request = ExecRequest {
+        program: OsString::from("/bin/sh"),
+        args: vec![OsString::from("-c"), OsString::from("cat")],
+        policy,
+        egress: None,
+    };
+    let mut process =
+        Process::spawn(&backend, &request, scratch.path(), ProcessStdio::Piped).expect("spawns");
+
+    let mut stdin = process.take_stdin().expect("stdin is piped");
+    let mut stdout = process.take_stdout().expect("stdout is piped");
+    let mut stderr = process.take_stderr().expect("stderr is piped");
+
+    let out_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout, &mut buffer);
+        buffer
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stderr, &mut buffer);
+        buffer
+    });
+
+    std::io::Write::write_all(&mut stdin, b"confined\n").expect("writes");
+    drop(stdin);
+
+    let echoed = out_reader.join().expect("joins");
+    assert_eq!(
+        String::from_utf8_lossy(&echoed),
+        "confined\n",
+        "the confined process echoes what it read"
+    );
+    let _ = err_reader.join().expect("joins");
+    let outcome = process.wait().expect("waits");
+    assert_eq!(outcome.code, Some(0), "cat exits cleanly after EOF");
 }
 
 #[test]

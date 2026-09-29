@@ -70,16 +70,13 @@ agent's cursor replays it. Nothing is lost between the client and the agent.
 ## The Policy Grants the Bus Socket
 
 `sandbox`'s `NetworkPolicy.unix_sockets` is a list of socket paths the command
-may connect to, and it is declared in the model but not yet rendered into
-bubblewrap. The agent needs it, because its bus connection is a Unix socket.
-
-Milestone 1 closes this. The renderer binds each existing `unix_sockets` entry
-into the command's namespace, and a `deny` over an entry stays a construction
-error, the same as the egress socket. A missing entry is refused before the
-command runs, so a session whose bus socket is absent fails closed.
-
-A `Deny` over the authority socket's directory is what keeps the agent out of the
-authoritative half of the bus. See [lifecycle.md](./lifecycle.md#authority).
+may connect to. The renderer binds each existing entry into the command's
+namespace, read-write, and a `deny` over an entry is a construction error, the
+same as the egress socket. A missing entry is a `RenderError::MissingSocket`,
+refused rather than skipped, so a session whose bus socket is absent fails before
+the command runs. A `deny` over the authority socket's directory is what keeps
+the agent out of the authoritative half of the bus. See
+[lifecycle.md](./lifecycle.md#authority).
 
 ## The Image
 
