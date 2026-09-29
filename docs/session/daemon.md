@@ -51,10 +51,19 @@ The connection is what reuses the bus's durability. A `requested` event the
 daemon publishes is committed before the proxy answers, so the approval record
 survives a crash the same way every other event does.
 
+The bus client is `daemon::bus::BusClient`. The transport is a WebSocket and one
+connection must both read a long-lived subscription and write a publish, so the
+connection runs on its own thread with a current-thread runtime; the public
+methods are blocking, because the daemon and the sandbox are. `BusPublisher`
+wraps the client as the sandbox's `Publisher`. Milestone 3 landed both, verified
+against the real bus server over a Unix socket.
+
 A second connection carries the authority claim, the same shape the bus already
-defines: a listener whose path the confined agent cannot reach. The daemon holds
-it to answer its own privileged events. See
-[event-bus security](../event-bus/security.md).
+defines: a listener whose path the confined agent cannot reach. It is needed once
+the daemon publishes the egress *decisions* it resolves and the rule changes,
+which the bus gates. The lifecycle events it publishes today are not gated. See
+[event-bus security](../event-bus/security.md) and
+[event-bus authority](../event-bus/README.md).
 
 ## The Start Sequence
 

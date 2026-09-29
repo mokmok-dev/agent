@@ -204,7 +204,10 @@ bus. Neither gains a dependency on the other.
    transitions.
 3. Egress wiring. The proxy serve loop and the `Publisher` and `Desk`
    implementations over the bus. An unlisted host becomes a `requested` event,
-   and a grant lets the tunnel through.
+   and a grant lets the tunnel through. **The bus client and `Publisher` bridge
+   have landed** in `daemon/src/bus.rs`, verified against the real bus server.
+   The proxy's serve loop arrives with the start sequence, because the proxy is
+   per-session.
 4. Daemon. The image, the start sequence, the lifecycle events, and teardown.
    Tested end to end over a real Unix socket with a confined stub agent.
 5. Agent. The in-repo agent crate. It subscribes to the bus, acts on a message,
