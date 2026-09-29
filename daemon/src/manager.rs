@@ -256,7 +256,9 @@ impl Manager {
         let request = LaunchRequest {
             policy,
             program: image.program.clone(),
-            args: image.args.clone(),
+            // The session's own flags: an agent image is told which session and
+            // workspace it acts for; any other image keeps the arguments it carries.
+            args: image.session_args(id, &self.config.bus_socket, workspace),
             scratch: scratch.path().to_path_buf(),
             egress: egress_launch,
         };

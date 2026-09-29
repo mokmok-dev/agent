@@ -26,21 +26,27 @@
 //! # The file
 //!
 //! ```toml
-//! # The key is the model id sent to the API.
+//! # The model a session uses, and the id sent to the API.
+//! default = "grok-4.7"
+//!
 //! [model."grok-4.7"]
 //! base_url = "https://api.x.ai/v1"
 //! env_key = "XAI_API_KEY"
 //! ```
 //!
-//! Validation happens once, in [`Settings::parse`], so [`Settings::egress_rules`]
-//! cannot fail. An absent file is an empty [`Settings`], which grants no egress —
-//! the same fail-closed default an empty allowlist has.
+//! A file that declares endpoints must name which one a session uses, because the
+//! agent is told exactly one model at launch. Validation happens once, in
+//! [`Settings::parse`], so [`Settings::egress_rules`] cannot fail. An absent file
+//! is an empty [`Settings`], which grants no egress and names no model — the same
+//! fail-closed default an empty allowlist has.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use sandbox::policy::HostPort;
 use serde::Deserialize;
+
+use crate::image::AgentImage;
 
 /// The file name the settings live in.
 const CONFIG_FILE: &str = "config.toml";
@@ -72,6 +78,8 @@ pub fn config_path(
 /// The daemon's settings.
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
+    /// The model a session uses, which a file that declares endpoints must name.
+    default: Option<String>,
     /// The declared endpoints, keyed by the model id sent to the API.
     models: BTreeMap<String, Endpoint>,
     /// The egress rules the endpoints derive, in model-id order and deduplicated.
@@ -94,6 +102,9 @@ pub struct Endpoint {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
+    /// The model a session uses.
+    #[serde(default)]
+    default: Option<String>,
     /// The declared endpoints, keyed by model id.
     #[serde(default)]
     model: BTreeMap<String, Endpoint>,
@@ -107,11 +118,23 @@ impl Settings {
     ///
     /// # Errors
     ///
-    /// Returns [`Error`] for text that is not valid TOML, a `base_url` that names
-    /// no destination a session could reach, or an `env_key` that is not a
-    /// variable name.
+    /// Returns [`Error`] for text that is not valid TOML, a `default` that names no
+    /// declared endpoint, a file that declares endpoints but no `default`, a
+    /// `base_url` that names no destination a session could reach, or an `env_key`
+    /// that is not a variable name.
     pub fn parse(text: &str) -> Result<Self, Error> {
         let raw: Raw = toml::from_str(text)?;
+        // A session is told exactly one model, so a file that declares endpoints
+        // must say which one it is.
+        if let Some(model) = &raw.default {
+            if !raw.model.contains_key(model) {
+                return Err(Error::UndeclaredModel {
+                    model: model.clone(),
+                });
+            }
+        } else if !raw.model.is_empty() {
+            return Err(Error::MissingDefault);
+        }
         let mut rules: Vec<HostPort> = Vec::new();
         for (model, endpoint) in &raw.model {
             let destination = destination(model, &endpoint.base_url)?;
@@ -123,6 +146,7 @@ impl Settings {
             }
         }
         Ok(Self {
+            default: raw.default,
             models: raw.model,
             rules,
         })
@@ -167,6 +191,58 @@ impl Settings {
     #[must_use]
     pub fn egress_rules(&self) -> &[HostPort] {
         &self.rules
+    }
+
+    /// The model a session uses, or `None` when the file declares no endpoint.
+    #[must_use]
+    pub fn default_model(&self) -> Option<&str> {
+        self.default.as_deref()
+    }
+
+    /// The image for a session of the project's agent, running `program`.
+    ///
+    /// The image carries what the agent needs to reach its endpoint: the model, the
+    /// base URL, and the key's variable name in its argv; the key's **value** in its
+    /// environment; and the egress rules the endpoints derive.
+    ///
+    /// The value comes from `key` rather than from the environment this runs in, so
+    /// the caller decides where a key lives and a test can answer from a map. A
+    /// report names the variable and never the value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoModel`] when the file declares no endpoint to use, and
+    /// [`Error::MissingKey`] when `key` has no value for the variable the endpoint
+    /// names.
+    pub fn image(
+        &self,
+        program: impl Into<PathBuf>,
+        key: impl FnOnce(&str) -> Option<String>,
+    ) -> Result<AgentImage, Error> {
+        let Some(model) = self.default.as_deref() else {
+            return Err(Error::NoModel);
+        };
+        // Validation rejects a `default` that names no declared endpoint, so this
+        // cannot be missing in a parsed file.
+        let Some(endpoint) = self.models.get(model) else {
+            return Err(Error::NoModel);
+        };
+        let value = key(&endpoint.env_key).ok_or_else(|| Error::MissingKey {
+            name: endpoint.env_key.clone(),
+        })?;
+
+        let mut image = AgentImage::agent(program);
+        for rule in &self.rules {
+            image = image.allowing_destination(rule.clone());
+        }
+        Ok(image
+            .with_arg("--model")
+            .with_arg(model)
+            .with_arg("--base-url")
+            .with_arg(endpoint.base_url.as_str())
+            .with_arg("--env-key")
+            .with_arg(endpoint.env_key.as_str())
+            .with_env(endpoint.env_key.as_str(), value))
     }
 }
 
@@ -225,6 +301,24 @@ pub enum Error {
     EnvKey {
         /// The model whose endpoint is malformed.
         model: String,
+    },
+    /// The file declares endpoints but no model to use.
+    #[error("the settings declare endpoints but no `default` model")]
+    MissingDefault,
+    /// The `default` names a model the file does not declare.
+    #[error("`{model}` is not a declared model")]
+    UndeclaredModel {
+        /// The model id the file named.
+        model: String,
+    },
+    /// There is no endpoint to build a session's image from.
+    #[error("the settings declare no model endpoint")]
+    NoModel,
+    /// The key's value is not available to the caller that builds the image.
+    #[error("`{name}` is not set, so a session would have no key for its endpoint")]
+    MissingKey {
+        /// The variable the endpoint names.
+        name: String,
     },
 }
 
@@ -317,11 +411,14 @@ mod tests {
     // otherwise pass unnoticed.
 
     use super::*;
+    use sandbox::policy::EnvVar;
 
     /// A settings file with one endpoint.
     fn text(base_url: &str) -> String {
         format!(
             r#"
+default = "grok-4.7"
+
 [model."grok-4.7"]
 base_url = "{base_url}"
 env_key = "XAI_API_KEY"
@@ -386,6 +483,8 @@ env_key = "XAI_API_KEY"
     fn every_declared_endpoint_derives_a_rule() {
         let settings = Settings::parse(
             r#"
+default = "grok-4.7"
+
 [model."grok-4.7"]
 base_url = "https://api.x.ai/v1"
 env_key = "XAI_API_KEY"
@@ -409,6 +508,8 @@ env_key = "LOCAL_API_KEY"
     fn one_destination_declared_twice_is_one_rule() {
         let settings = Settings::parse(
             r#"
+default = "a"
+
 [model."a"]
 base_url = "https://api.x.ai/v1"
 env_key = "A_KEY"
@@ -426,6 +527,8 @@ env_key = "B_KEY"
     fn the_same_host_on_two_ports_is_two_rules() {
         let settings = Settings::parse(
             r#"
+default = "a"
+
 [model."a"]
 base_url = "https://api.x.ai/v1"
 env_key = "A_KEY"
@@ -457,6 +560,101 @@ env_key = "B_KEY"
     fn an_undeclared_model_has_no_endpoint() {
         let settings = Settings::parse(&text("https://api.x.ai/v1")).expect("parses");
         assert!(settings.endpoint("gpt-9").is_none());
+    }
+
+    #[test]
+    fn the_default_names_the_model_a_session_uses() {
+        let settings = Settings::parse(&text("https://api.x.ai/v1")).expect("parses");
+        assert_eq!(settings.default_model(), Some("grok-4.7"));
+    }
+
+    #[test]
+    fn a_file_that_declares_endpoints_must_name_one() {
+        // A session is told exactly one model, so the file has to say which.
+        let text = r#"
+[model."grok-4.7"]
+base_url = "https://api.x.ai/v1"
+env_key = "XAI_API_KEY"
+"#;
+        let error = Settings::parse(text).expect_err("refused");
+        assert!(
+            matches!(error, Error::MissingDefault),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn a_default_that_names_no_endpoint_is_refused() {
+        let text = r#"
+default = "gpt-9"
+
+[model."grok-4.7"]
+base_url = "https://api.x.ai/v1"
+env_key = "XAI_API_KEY"
+"#;
+        let error = Settings::parse(text).expect_err("refused");
+        assert!(
+            matches!(&error, Error::UndeclaredModel { model } if model == "gpt-9"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_endpoints_names_no_model() {
+        let settings = Settings::parse("").expect("parses");
+        assert_eq!(settings.default_model(), None);
+        assert!(
+            matches!(
+                settings.image("/usr/bin/agent-agent", |_| None),
+                Err(Error::NoModel)
+            ),
+            "a session with no endpoint has no image to run"
+        );
+    }
+
+    #[test]
+    fn an_image_carries_the_endpoint_and_the_key() {
+        let settings = Settings::parse(&text("https://api.x.ai/v1")).expect("parses");
+        let image = settings
+            .image("/usr/bin/agent-agent", |name| {
+                (name == "XAI_API_KEY").then(|| "the-key".to_owned())
+            })
+            .expect("builds");
+        assert_eq!(image.program, PathBuf::from("/usr/bin/agent-agent"));
+        assert_eq!(
+            image.args,
+            [
+                "--model",
+                "grok-4.7",
+                "--base-url",
+                "https://api.x.ai/v1",
+                "--env-key",
+                "XAI_API_KEY"
+            ],
+            "the agent is told which model to call and how to authenticate"
+        );
+        assert_eq!(image.env, [EnvVar::new("XAI_API_KEY", "the-key")]);
+        assert_eq!(
+            image.egress_rules(),
+            [HostPort::new("api.x.ai", 443)],
+            "the endpoint's destination is the session's one rule"
+        );
+    }
+
+    #[test]
+    fn an_image_without_a_key_value_is_refused_by_name() {
+        let settings = Settings::parse(&text("https://api.x.ai/v1")).expect("parses");
+        let error = settings
+            .image("/usr/bin/agent-agent", |_| None)
+            .expect_err("refused");
+        assert!(
+            matches!(&error, Error::MissingKey { name } if name == "XAI_API_KEY"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.to_string().contains("XAI_API_KEY"),
+            "the variable is named: {error}"
+        );
     }
 
     #[test]
@@ -558,6 +756,8 @@ env_key = "B_KEY"
         for env_key in ["", "XAI=API_KEY"] {
             let text = format!(
                 r#"
+default = "grok-4.7"
+
 [model."grok-4.7"]
 base_url = "https://api.x.ai/v1"
 env_key = "{env_key}"
