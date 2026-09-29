@@ -471,20 +471,34 @@ impl sandbox::egress::Publisher for BusPublisher {
 /// provably `None`: the bus owns them and rejects a producer that sets them.
 #[must_use]
 pub fn to_incoming(event: sandbox::events::Event) -> Incoming {
+    authored(event.ty, event.subject, event.data, event.traceparent)
+}
+
+/// Build the producer half of an envelope from the daemon's own fields.
+///
+/// `source` and `sequence` stay `None`: the bus owns them and rejects a producer
+/// that sets them. `traceparent`, when present, is carried as an extension.
+#[must_use]
+pub fn authored(
+    ty: &str,
+    subject: impl Into<String>,
+    data: Value,
+    traceparent: Option<String>,
+) -> Incoming {
     let mut extensions = std::collections::BTreeMap::new();
-    if let Some(traceparent) = event.traceparent {
+    if let Some(traceparent) = traceparent {
         extensions.insert("traceparent".to_owned(), Value::String(traceparent));
     }
     Incoming {
         specversion: SpecVersion::V1_0,
-        ty: event.ty.to_owned(),
+        ty: ty.to_owned(),
         source: None,
         id: None,
         time: None,
-        subject: Some(event.subject),
+        subject: Some(subject.into()),
         datacontenttype: None,
         sequence: None,
-        data: Some(event.data),
+        data: Some(data),
         extensions,
     }
 }

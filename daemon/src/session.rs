@@ -103,12 +103,16 @@ impl State {
     }
 }
 
-/// One session: its identity, its state, and the workspace it holds.
+/// One session: its identity, its state, its workspace, and its resources.
 #[derive(Debug)]
 pub struct Session {
     id: SessionId,
     state: State,
     workspace: PathBuf,
+    /// The scratch guard, removed when the session is torn down.
+    scratch: Option<sandbox::executor::Scratch>,
+    /// The confined process, killed when the session is torn down.
+    process: Option<Box<dyn crate::launcher::LaunchedProcess>>,
 }
 
 impl Session {
@@ -128,6 +132,53 @@ impl Session {
     #[must_use]
     pub fn workspace(&self) -> &Path {
         &self.workspace
+    }
+
+    /// Record the resources a starting session has acquired.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidTransition`] unless the session is `Starting`, so
+    /// resources cannot be attached to a session that is already running or
+    /// terminal.
+    pub fn attach(
+        &mut self,
+        scratch: sandbox::executor::Scratch,
+        process: Box<dyn crate::launcher::LaunchedProcess>,
+    ) -> Result<(), Error> {
+        if self.state != State::Starting {
+            return Err(Error::InvalidTransition {
+                action: "attach resources to",
+                state: self.state,
+            });
+        }
+        self.scratch = Some(scratch);
+        self.process = Some(process);
+        Ok(())
+    }
+
+    /// Release the session's resources: kill the process, then drop the scratch.
+    ///
+    /// The order is the design's: the process is killed before the scratch is
+    /// removed, because a running agent must not observe its own `TMPDIR`
+    /// disappearing under it. Idempotent, so every terminal transition can call
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error if the kill fails, and
+    /// [`Error::NoSuchSession`] is not possible here.
+    pub fn shutdown(&mut self) -> Result<(), Error> {
+        if let Some(mut process) = self.process.take()
+            && let Err(error) = process.kill()
+        {
+            // Re-own the handle so a later teardown can retry, and report the
+            // failure rather than claiming the process is gone.
+            self.process = Some(process);
+            return Err(Error::Launcher(error.to_string()));
+        }
+        self.scratch = None;
+        Ok(())
     }
 
     /// Move a session that finished starting to `Running`.
@@ -260,6 +311,8 @@ impl SessionRegistry {
             id,
             state: State::Starting,
             workspace,
+            scratch: None,
+            process: None,
         }))
     }
 
@@ -272,6 +325,53 @@ impl SessionRegistry {
         self.sessions.get(id)
     }
 
+    /// A mutable session by id, or `None`.
+    pub fn get_mut(
+        &mut self,
+        id: &SessionId,
+    ) -> Option<&mut Session> {
+        self.sessions.get_mut(id)
+    }
+
+    /// Record the resources a session acquired during its start sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoSuchSession`] for an unknown id and the session's own
+    /// transition error when it is not `Starting`.
+    pub fn attach(
+        &mut self,
+        id: &SessionId,
+        scratch: sandbox::executor::Scratch,
+        process: Box<dyn crate::launcher::LaunchedProcess>,
+    ) -> Result<(), Error> {
+        let session = self
+            .sessions
+            .get_mut(id)
+            .ok_or_else(|| Error::NoSuchSession(id.clone()))?;
+        session.attach(scratch, process)
+    }
+
+    /// Release a session's resources without changing its state.
+    ///
+    /// Called before a terminal transition, so the process is gone and the
+    /// scratch removed while the session is still observable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoSuchSession`] for an unknown id, and the session's own
+    /// error if the kill fails.
+    pub fn shutdown(
+        &mut self,
+        id: &SessionId,
+    ) -> Result<(), Error> {
+        let session = self
+            .sessions
+            .get_mut(id)
+            .ok_or_else(|| Error::NoSuchSession(id.clone()))?;
+        session.shutdown()
+    }
+
     /// The live session holding `workspace`, or `None`.
     #[must_use]
     pub fn holder_of(
@@ -281,8 +381,12 @@ impl SessionRegistry {
         self.reserved.get(workspace)
     }
 
-    /// Run `transition` on the session `id`, releasing the workspace when the
-    /// session reaches a terminal state.
+    /// Run `transition` on the session `id`, releasing the workspace and the
+    /// session's resources when it reaches a terminal state.
+    ///
+    /// Teardown is idempotent, so a caller that already called `shutdown` (the
+    /// stop path does, so the process is gone before the state changes) is not
+    /// penalized.
     ///
     /// # Errors
     ///
@@ -303,6 +407,7 @@ impl SessionRegistry {
         transition(session)?;
         let state = session.state;
         if state.is_terminal() {
+            session.shutdown()?;
             let workspace = session.workspace.clone();
             self.reserved.remove(&workspace);
         }
