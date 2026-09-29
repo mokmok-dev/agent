@@ -208,12 +208,13 @@ bus. Neither gains a dependency on the other.
    have landed** in `daemon/src/bus.rs`, verified against the real bus server.
    The proxy's serve loop arrives with the start sequence, because the proxy is
    per-session.
-4. Daemon. The image, the start sequence, the lifecycle events, and teardown.
-   **Landed** in `daemon/src/image.rs`, `daemon/src/launcher.rs`, and
+4. Daemon. The image, the start sequence, the lifecycle events, and teardown
+   landed in `daemon/src/image.rs`, `daemon/src/launcher.rs`, and
    `daemon/src/manager.rs`, tested with a fake launcher. The real
-   `SandboxLauncher` composition and the egress proxy's serve loop are the
-   remaining part of this milestone, and need a host that can spawn a namespace.
-   Tested over a real Unix socket with a stub agent once those land.
+   `SandboxLauncher` and the egress helper resolution followed, and a confined
+   shell script writing inside its workspace and denied outside it is the
+   end-to-end proof. The egress proxy's serve loop is the remaining part.
+   Tested over a real Unix socket with a confined stub agent.
 5. Agent. The in-repo agent crate. It subscribes to the bus, acts on a message,
    and publishes its events.
 6. Coding agent image. The provider host on the allowlist, the workspace

@@ -95,10 +95,6 @@ struct FakeProcess {
 }
 
 impl LaunchedProcess for FakeProcess {
-    fn is_running(&mut self) -> std::io::Result<bool> {
-        Ok(!self.killed.load(Ordering::SeqCst))
-    }
-
     fn kill(&mut self) -> std::io::Result<()> {
         self.killed.store(true, Ordering::SeqCst);
         Ok(())
