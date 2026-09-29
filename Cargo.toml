@@ -1,5 +1,5 @@
 [workspace]
-members = ["agent", "sandbox"]
+members = ["agent", "daemon", "sandbox"]
 resolver = "3"
 
 [workspace.dependencies]

@@ -200,7 +200,8 @@ bus. Neither gains a dependency on the other.
    `ProcessStdio`, and `Scratch` becomes unique per session. **Landed.** Tested
    over a real `bwrap` and without confinement.
 2. Session core. The `SessionId`, the state machine, and the registry, with no
-   process spawning. Tested as pure transitions.
+   process spawning. **Landed**, in the new `daemon` crate. Tested as pure
+   transitions.
 3. Egress wiring. The proxy serve loop and the `Publisher` and `Desk`
    implementations over the bus. An unlisted host becomes a `requested` event,
    and a grant lets the tunnel through.

@@ -1,0 +1,45 @@
+//! The daemon that runs one confined agent per session.
+//!
+//! It is the one crate that depends on both [`sandbox`] and [`agent`], and the
+//! only place where the two meet. See `docs/session/` for its design.
+//!
+//! Milestone 2 is the **session core**: the [`SessionId`], the six-state
+//! [`session::State`] machine, and the [`session::SessionRegistry`] that owns
+//! the sessions. It spawns nothing and depends on neither the sandbox nor the
+//! bus yet, so it is a pure data model and its behavior is tested as pure
+//! transitions. The pieces a session will own (a scratch directory, a confined
+//! process, an egress allowlist) arrive with the milestones that create them.
+
+pub mod session;
+
+pub use session::{Session, SessionId, SessionRegistry, State};
+
+/// Everything that can go wrong in a session operation.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// A session id was empty or unsafe.
+    #[error("invalid session id `{0}`")]
+    InvalidSessionId(String),
+    /// A session with this id is already live.
+    #[error("session `{0}` already exists")]
+    SessionExists(SessionId),
+    /// No session has this id.
+    #[error("no session with id `{0}`")]
+    NoSuchSession(SessionId),
+    /// A workspace root is already reserved by a live session.
+    #[error("workspace `{workspace}` is reserved by a live session `{session}`")]
+    WorkspaceBusy {
+        /// The workspace root that is already reserved.
+        workspace: std::path::PathBuf,
+        /// The live session that holds it.
+        session: SessionId,
+    },
+    /// A transition is not valid from the session's current state.
+    #[error("cannot {action} a session in state {state:?}")]
+    InvalidTransition {
+        /// The action that was refused.
+        action: &'static str,
+        /// The state the session was in.
+        state: State,
+    },
+}

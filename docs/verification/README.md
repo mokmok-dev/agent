@@ -45,7 +45,7 @@ async connection loop in `agent/src/server.rs`, the sandbox policy core in
 `sandbox/src/policy/`, the sandbox filesystem layer in
 `sandbox/src/filesystem.rs` and `sandbox/src/executor.rs`, and the sandbox
 egress layer in `sandbox/src/egress/` (proxy, forwarder, environment injection,
-and transport selection):
+and transport selection), and the session core in `daemon/src/session.rs`:
 
 | Module | Property |
 | --- | --- |
@@ -82,6 +82,7 @@ and transport selection):
 | `egress::env` | The four proxy variables are set to a URL naming the reachable loopback port (the forwarder's in the Unix-socket transport, the proxy's in the loopback transport); an operator value is **replaced**, not appended, and the replacement is case-insensitive, so a stale value cannot win; `NO_PROXY` names the command's own loopback; an unrelated variable is untouched. |
 | `egress::transport` | Transport follows the host capability: bubblewrap can hold a private network namespace and gets the Unix-socket transport; a host without one is refused (`TransportError::Refused`), so egress fails closed rather than downgrading to the port-only form. |
 | `egress::forwarder` | The CLI parser accepts `--socket`/`--port` in either order and rejects a missing, unknown, non-numeric, out-of-range, or zero argument; binding port zero reports a real ephemeral port. Over a real socket: a client's bytes round-trip to the socket and back, a half-close still receives the reply, and the built `egress-forward` binary reports its port and bridges bytes. |
+| `daemon::session` | A `SessionId` accepts ASCII letters, digits, `.`, `_`, and `-` up to 128 characters, and rejects an empty, overlong, or unsafe one; its subject names the session. A session starts in `Starting`. Only `Running` reaches `Stopped` through `Stopping`, or reaches `Exited`; a setup error moves `Starting` to `Failed`. A terminal state is never left, so a failed session never reports `Running`, an exited one cannot be stopped, and a second stop is refused. The registry refuses a duplicate id and a workspace a live session already holds, and reaching a terminal state releases the workspace, so a client can reopen it. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
 hold the reference-model proptests; `agent/tests/verify_cli.rs` and
@@ -92,7 +93,8 @@ TCP upstream, and `sandbox/tests/forwarder.rs` drives the forwarder over a
 throwaway Unix socket, so neither needs confinement; and `sandbox/tests/executor.rs` and
 `sandbox/tests/events.rs` spawn a real confined command through bubblewrap,
 skipping when the host cannot build a namespace (the condition under which the
-daemon refuses to spawn). The `test` flake check puts
+daemon refuses to spawn). `daemon/src/session.rs` holds the session-core tests,
+which need no confinement and run on every host. The `test` flake check puts
 `bubblewrap` on `PATH` so those spawn tests run in CI. A GitHub Actions runner
 forbids unprivileged user namespaces, so the *spawn* tests skip there even with
 bubblewrap present; any logic they would cover has a unit test with a plain
@@ -100,10 +102,9 @@ child, which needs no confinement, so no branch loses coverage on those hosts. `
 A machine-checked obligation catalog is deferred until the verified scope spans
 more than one crate; the tables above are the record for now.
 
-The session manager in [docs/session](../session/README.md) is designed and not
-yet implemented. Milestone 1 has landed: `network.unix_sockets` now renders, and
-the long-lived `Process` takes a `ProcessStdio` choice. The remaining
-milestones add their rows as they land, the same as every milestone before it.
+The session manager in [docs/session](../session/README.md) is being built in the
+`daemon` crate. Milestones 1 and 2 have landed. The remaining milestones, and
+the rows they add, land one at a time.
 
 Kani is expensive, so its harnesses are kept to the properties only it can
 establish: exhaustive bounds safety over attacker-controlled bytes. A property

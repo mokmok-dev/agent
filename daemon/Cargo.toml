@@ -1,0 +1,11 @@
+[package]
+edition.workspace = true
+name = "daemon"
+publish = false
+version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true
