@@ -100,6 +100,12 @@ child, which needs no confinement, so no branch loses coverage on those hosts. `
 A machine-checked obligation catalog is deferred until the verified scope spans
 more than one crate; the tables above are the record for now.
 
+The session manager in [docs/session](../session/README.md) is designed and not
+yet implemented, so it adds no rows here. When milestone 1 lands, the
+`filesystem::bwrap` row gains the `network.unix_sockets` grant, and the
+`executor::process` row gains the stdio configuration. Each later milestone adds
+its rows as it lands, the same as every milestone before it.
+
 Kani is expensive, so its harnesses are kept to the properties only it can
 establish: exhaustive bounds safety over attacker-controlled bytes. A property
 that a reference model already checks over many inputs — encode/decode
