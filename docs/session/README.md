@@ -220,8 +220,10 @@ bus. Neither gains a dependency on the other.
    and publishes its events. **Landed**, as the `agentd` crate and the
    `agent-agent` binary: a bus peer with its own cursor, one command contract
    (`agent.session.command` / `agent.session.output` scoped by the subject), a
-   dedup on the event id because delivery is at-least-once, and an `echo`
-   capability as the seam a real one replaces.
+   dedup on the event id because delivery is at-least-once, and a **`shell`**
+   capability that runs an argv in the session's workspace with bounded output and
+   a timeout. The capability is a trait, so the model-driven one in milestone 6
+   replaces it without touching the loop.
 6. Coding agent image. The provider host on the allowlist, the workspace
    convention, and the task events. This is where the authority-socket question
    in [lifecycle.md](./lifecycle.md#authority) becomes a requirement.

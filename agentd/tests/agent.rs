@@ -144,10 +144,11 @@ struct Agent {
 }
 
 impl Agent {
-    /// Start the agent for `session`, replaying from `from_seq`.
+    /// Start the agent for `session` in `workspace`, replaying from `from_seq`.
     fn start(
         server: &BusServer,
         session: &str,
+        workspace: &Path,
         from_seq: u64,
     ) -> Self {
         let child = Command::new(env!("CARGO_BIN_EXE_agent-agent"))
@@ -155,6 +156,8 @@ impl Agent {
             .arg(&server.socket)
             .arg("--session")
             .arg(session)
+            .arg("--workdir")
+            .arg(workspace)
             .arg("--from-seq")
             .arg(from_seq.to_string())
             .env("RUST_LOG", "info")
@@ -171,12 +174,34 @@ impl Drop for Agent {
     }
 }
 
+/// A temp workspace, removed on drop.
+struct Workspace(PathBuf);
+
+impl Workspace {
+    fn new(tag: &str) -> Self {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("agent-ws-{tag}-{}-{unique}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("creates the workspace");
+        Self(path)
+    }
+}
+
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
-fn an_agent_answers_a_command_with_output_and_acks_it() {
-    let server = BusServer::start("echo");
+fn an_agent_runs_a_shell_command_and_reports_its_output() {
+    let server = BusServer::start("shell");
     let observer = server.client();
     let (handler, seen) = recorder();
     observer.subscribe(0, handler).expect("subscribes");
+    let workspace = Workspace::new("shell");
 
     // The agent replays the whole log, so the command must be in it first.
     let client = server.client();
@@ -184,11 +209,11 @@ fn an_agent_answers_a_command_with_output_and_acks_it() {
         .publish(incoming(
             "agent.session.command",
             "s-1",
-            json!({"action": "run", "detail": {"script": "echo hi"}}),
+            json!({"action": "shell", "detail": {"argv": ["/bin/sh", "-c", "echo hi"]}}),
         ))
         .expect("publishes the command");
 
-    let _agent = Agent::start(&server, "s-1", 0);
+    let _agent = Agent::start(&server, "s-1", &workspace.0, 0);
 
     let output = await_event(&seen, "an output event", |event| {
         event.ty == "agent.session.output" && event.subject.as_deref() == Some("s-1")
@@ -196,17 +221,45 @@ fn an_agent_answers_a_command_with_output_and_acks_it() {
     assert_eq!(
         output.data.as_ref().expect("data")["kind"],
         json!("done"),
-        "the echo capability reports done"
+        "the shell capability reports done"
     );
+    assert_eq!(output.data.as_ref().expect("data")["action"], "shell");
     assert_eq!(
-        output.data.as_ref().expect("data")["action"],
-        "run",
-        "the action is echoed"
+        output.data.as_ref().expect("data")["detail"]["stdout"],
+        "hi\n",
+        "the command's output is reported"
     );
+    assert_eq!(output.data.as_ref().expect("data")["detail"]["code"], 0);
+}
+
+#[test]
+fn a_shell_command_runs_in_the_session_workspace() {
+    // The workdir is the session's workspace, so a relative write lands there and
+    // the test can see it on the host.
+    let server = BusServer::start("workdir");
+    let observer = server.client();
+    let (handler, seen) = recorder();
+    observer.subscribe(0, handler).expect("subscribes");
+    let workspace = Workspace::new("workdir");
+
+    let client = server.client();
+    client
+        .publish(incoming(
+            "agent.session.command",
+            "s-w",
+            json!({"action": "shell", "detail": {"argv": ["/bin/sh", "-c", "echo x > made.txt"]}}),
+        ))
+        .expect("publishes the command");
+
+    let _agent = Agent::start(&server, "s-w", &workspace.0, 0);
+    await_event(&seen, "the command's output", |event| {
+        event.ty == "agent.session.output" && event.subject.as_deref() == Some("s-w")
+    });
+
     assert_eq!(
-        output.data.as_ref().expect("data")["detail"]["echoed"]["script"],
-        "echo hi",
-        "the command's detail is echoed back"
+        std::fs::read_to_string(workspace.0.join("made.txt")).expect("the file is on the host"),
+        "x\n",
+        "the command ran in the session's workspace"
     );
 }
 
@@ -219,6 +272,7 @@ fn an_agent_survives_a_restart_without_losing_a_command() {
     let observer = server.client();
     let (handler, seen) = recorder();
     observer.subscribe(0, handler).expect("subscribes");
+    let workspace = Workspace::new("restart");
 
     // Publish the command with no agent running.
     let client = server.client();
@@ -226,20 +280,21 @@ fn an_agent_survives_a_restart_without_losing_a_command() {
         .publish(incoming(
             "agent.session.command",
             "s-2",
-            json!({"action": "run", "detail": {"task": "wake"}}),
+            json!({"action": "shell", "detail": {"argv": ["/bin/sh", "-c", "echo replayed"]}}),
         ))
         .expect("publishes the command");
 
     // Start the agent after the command exists; it must still receive it.
-    let _agent = Agent::start(&server, "s-2", 0);
+    let _agent = Agent::start(&server, "s-2", &workspace.0, 0);
 
     let output = await_event(&seen, "the replayed command's output", |event| {
         event.ty == "agent.session.output" && event.subject.as_deref() == Some("s-2")
     });
-    assert_eq!(output.data.as_ref().expect("data")["action"], "run");
+    assert_eq!(output.data.as_ref().expect("data")["action"], "shell");
     assert_eq!(
-        output.data.as_ref().expect("data")["detail"]["echoed"]["task"],
-        "wake"
+        output.data.as_ref().expect("data")["detail"]["stdout"],
+        "replayed\n",
+        "the command published before the agent started was replayed and run"
     );
 }
 
@@ -251,17 +306,18 @@ fn an_agent_ignores_a_command_addressed_to_another_session() {
     let observer = server.client();
     let (handler, seen) = recorder();
     observer.subscribe(0, handler).expect("subscribes");
+    let workspace = Workspace::new("scoped");
 
     let client = server.client();
     client
         .publish(incoming(
             "agent.session.command",
             "s-4",
-            json!({"action": "run", "detail": {}}),
+            json!({"action": "shell", "detail": {"argv": ["/bin/sh", "-c", "echo leaked"]}}),
         ))
         .expect("publishes a command for another session");
 
-    let _agent = Agent::start(&server, "s-3", 0);
+    let _agent = Agent::start(&server, "s-3", &workspace.0, 0);
     std::thread::sleep(Duration::from_millis(400));
 
     assert!(
@@ -272,5 +328,40 @@ fn an_agent_ignores_a_command_addressed_to_another_session() {
             .any(|event| event.ty == "agent.session.output"
                 && event.subject.as_deref() == Some("s-3")),
         "an agent must not act on another session's command"
+    );
+    assert!(
+        !workspace.0.join("leaked").exists(),
+        "the other session's command must not run here"
+    );
+}
+
+#[test]
+fn an_agent_reports_an_unknown_action_without_running_anything() {
+    // A client and an agent of different versions must not crash each other: an
+    // action the agent has no capability for is reported, not ignored.
+    let server = BusServer::start("unknown");
+    let observer = server.client();
+    let (handler, seen) = recorder();
+    observer.subscribe(0, handler).expect("subscribes");
+    let workspace = Workspace::new("unknown");
+
+    let client = server.client();
+    client
+        .publish(incoming(
+            "agent.session.command",
+            "s-u",
+            json!({"action": "teleport", "detail": {}}),
+        ))
+        .expect("publishes the command");
+
+    let _agent = Agent::start(&server, "s-u", &workspace.0, 0);
+
+    let output = await_event(&seen, "the unknown action's output", |event| {
+        event.ty == "agent.session.output" && event.subject.as_deref() == Some("s-u")
+    });
+    assert_eq!(output.data.as_ref().expect("data")["kind"], "error");
+    assert_eq!(
+        output.data.as_ref().expect("data")["detail"]["reason"],
+        "the agent has no capability for this action"
     );
 }

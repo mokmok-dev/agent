@@ -11,6 +11,8 @@
 
 pub mod contract;
 pub mod loopcore;
+pub mod shell;
 
 pub use contract::{Command, Output, OutputKind};
 pub use loopcore::{AgentConfig, Error};
+pub use shell::{ACTION as SHELL_ACTION, Shell};

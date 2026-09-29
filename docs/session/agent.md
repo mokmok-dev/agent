@@ -71,8 +71,28 @@ Milestone 5 implements this as the `agentd` crate: a
 [contract](#the-output-contract) of two event types, and a loop that connects,
 subscribes as `agent-<id>`, dedupes on the event id (delivery is at-least-once),
 acts on a command through a `Capability` seam, publishes the output, and
-acknowledges what it processed. The `agent-agent` binary runs it with an `echo`
-capability, which is the seam the coding agent replaces in milestone 6.
+acknowledges what it processed. The `agent-agent` binary runs it with a `shell`
+capability, which runs an argv in the session's workspace. The model-driven
+capability of milestone 6 is a second implementation of that seam.
+
+## The Shell Capability
+
+The `shell` action's `detail` is `{"argv": [...]}`, and its output reports the
+exit code, the captured output, the total bytes written, whether the output was
+truncated, whether the timeout fired, and how long it ran.
+
+Three rules make it safe to expose to a model:
+
+- **Output is bounded while it is read.** The pipes are drained on their own
+  threads and retained only up to a cap; bytes past it are read and discarded, so
+  a command that writes without end neither blocks nor grows the agent's memory.
+  Reading it all first is the mistake this replaced, and it OOM-killed the agent.
+- **A command that never returns is killed.** The child is waited on under a
+  timeout, and the timeout is reported, so a hung command cannot hold the session
+  forever.
+- **The child runs in the agent's own confinement.** The agent is already inside
+  the session's namespace, so a child inherits the policy; the sandbox is the
+  boundary, not the per-command spawn.
 
 ## The Policy Grants the Bus Socket
 
