@@ -1,0 +1,31 @@
+[package]
+edition.workspace = true
+name = "agentd-agent"
+publish = false
+version.workspace = true
+
+[[bin]]
+name = "agent-agent"
+path = "bins/agent-agent.rs"
+
+[dependencies]
+agent = { path = "../agent" }
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = [
+  "macros",
+  "net",
+  "rt",
+  "rt-multi-thread",
+  "time",
+] }
+
+[lints]
+workspace = true

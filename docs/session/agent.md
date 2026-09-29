@@ -67,6 +67,13 @@ The consequence is that the agent's input and output are durable by construction
 A command that arrives while the agent is restarting is in the log, and the
 agent's cursor replays it. Nothing is lost between the client and the agent.
 
+Milestone 5 implements this as the `agentd` crate: a
+[contract](#the-output-contract) of two event types, and a loop that connects,
+subscribes as `agent-<id>`, dedupes on the event id (delivery is at-least-once),
+acts on a command through a `Capability` seam, publishes the output, and
+acknowledges what it processed. The `agent-agent` binary runs it with an `echo`
+capability, which is the seam the coding agent replaces in milestone 6.
+
 ## The Policy Grants the Bus Socket
 
 `sandbox`'s `NetworkPolicy.unix_sockets` is a list of socket paths the command
@@ -116,8 +123,8 @@ same type.
 | `agent.session.exited` | manager | The agent process ended on its own. |
 | `agent.session.failed` | manager | The session could not start. |
 | `agent.session.stop_requested` | authority client | A client asks a session to stop. |
-| `agent.session.<id>.command` | authority client | Input for the agent. |
-| `agent.session.<id>.output` | agent | The agent's progress and result. |
+| `agent.session.<id>.command` | authority client | Input for the agent, event type `agent.session.command` with the session as `subject`. |
+| `agent.session.<id>.output` | agent | The agent's progress and result, event type `agent.session.output`. |
 
 The lifecycle types are gated by authority, because starting and stopping a
 session is a privileged act. The agent's own output is not gated, because the
