@@ -45,8 +45,8 @@ async connection loop in `agent/src/server.rs`, the sandbox policy core in
 `sandbox/src/policy/`, the sandbox filesystem layer in
 `sandbox/src/filesystem.rs` and `sandbox/src/executor.rs`, and the sandbox
 egress layer in `sandbox/src/egress/` (proxy, forwarder, environment injection,
-and transport selection), the session core in `daemon/src/session.rs`, and the
-bus client in `daemon/src/bus.rs`:
+and transport selection), the session core in `daemon/src/session.rs`, the bus
+client in `agent/src/client.rs`, and the agent loop in `agentd/src/`:
 
 | Module | Property |
 | --- | --- |
@@ -92,6 +92,8 @@ bus client in `daemon/src/bus.rs`:
 | `daemon::egress` | Over a real Unix socket: a listed destination tunnels bytes end to end; an unlisted one is refused `403` after the approval deadline; and a live tunnel does not block a second connection, which is what pins the accept loop's dispatch. The socket is removed on drop. |
 | `daemon::manager` (egress) | A session whose image grants egress binds a proxy whose socket exists while the session runs, and stopping the session removes it. The manager resolves the supervisor and forwarder, and fails closed with `EgressHelpersMissing` when they cannot be found. |
 | `daemon::launcher` (real) | Over a real `bwrap`, a confined `/bin/sh` script writes inside its workspace and the kernel denies its write outside it, so the session manager's end-to-end path holds. Skips when the host cannot build a namespace. |
+| `agentd::contract` | Both payloads round-trip through JSON; a command without `detail` parses with a null one; an unknown field is rejected. |
+| `agentd::loopcore` | Over the real bus server, with the agent binary as a separate process: a command is answered with an output event whose `kind`, `action`, and echoed `detail` match; a command published while no agent runs is answered once one starts (replay from the cursor); and a command addressed to another session produces no output. The agent acknowledges what it processed, including events it skips. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
 hold the reference-model proptests; `agent/tests/verify_cli.rs` and
@@ -103,9 +105,10 @@ throwaway Unix socket, so neither needs confinement; and `sandbox/tests/executor
 `sandbox/tests/events.rs` spawn a real confined command through bubblewrap,
 skipping when the host cannot build a namespace (the condition under which the
 daemon refuses to spawn). `daemon/src/session.rs` holds the session-core tests,
-which need no confinement and run on every host, and `daemon/tests/bus_client.rs`
-drives the daemon's bus client against the real `agent` server over a Unix
-socket. The `test` flake check puts
+which need no confinement and run on every host, `agent/tests/client.rs` and
+`daemon/tests/bus_client.rs` drive the bus client against the real server over a
+Unix socket, and `agentd/tests/agent.rs` starts the agent binary against the real
+server and drives a command through it. The `test` flake check puts
 `bubblewrap` on `PATH` so those spawn tests run in CI. A GitHub Actions runner
 forbids unprivileged user namespaces, so the *spawn* tests skip there even with
 bubblewrap present; any logic they would cover has a unit test with a plain
@@ -113,9 +116,10 @@ child, which needs no confinement, so no branch loses coverage on those hosts. `
 A machine-checked obligation catalog is deferred until the verified scope spans
 more than one crate; the tables above are the record for now.
 
-The session manager in [docs/session](../session/README.md) is being built in the
-`daemon` crate. Milestones 1 and 2 have landed. The remaining milestones, and
-the rows they add, land one at a time.
+The session manager in [docs/session](../session/README.md) is built in the
+`daemon` crate, and the agent program in `agentd`. Milestones 1 through 5 have
+landed. Milestone 6 (the coding-agent image) tracks the capability design, and
+its rows land when it does.
 
 Kani is expensive, so its harnesses are kept to the properties only it can
 establish: exhaustive bounds safety over attacker-controlled bytes. A property

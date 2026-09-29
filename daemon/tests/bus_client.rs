@@ -1,9 +1,8 @@
-//! End-to-end tests for the daemon's bus client against the real bus server.
+//! End-to-end test for the daemon's egress `Publisher` bridge.
 //!
-//! The server is the real `agent::server::Server` over a real Unix socket, and
-//! the client is the one the daemon uses, so these exercise the wire protocol
-//! the way the daemon will. The client is synchronous, so the tests are plain
-//! `#[test]`; the server runs on a runtime in a background thread.
+//! The bridge is the daemon's part of the bus client: the sandbox authors an
+//! event, the bridge maps it to the producer half of an envelope and publishes it
+//! over the client. The generic client is covered in `agent/tests/client.rs`.
 #![expect(
     clippy::expect_used,
     clippy::panic,
@@ -11,15 +10,15 @@
 )]
 
 use std::os::unix::fs::MetadataExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent::bus::Bus;
-use agent::cloudevent::{Incoming, SpecVersion};
+use agent::cloudevent::Event as CloudEvent;
 use agent::server::Server;
 use agent::transport::{Allowlist, Listener, WebSocketConfig};
-use daemon::bus::{BusClient, BusPublisher, Config};
+use daemon::bus::{BusClient, BusPublisher, Config, Handler};
 use sandbox::egress::Publisher;
 use sandbox::events::Event;
 use sandbox::policy::HostPort;
@@ -36,8 +35,10 @@ impl BusServer {
     fn start(tag: &str) -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("daemon-bus-{tag}-{}-{unique}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "daemon-bridge-{tag}-{}-{unique}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("creates the root");
         let socket = root.join("bus.sock");
@@ -45,23 +46,16 @@ impl BusServer {
         let uid = std::fs::metadata(std::env::temp_dir())
             .expect("the temp dir has metadata")
             .uid();
-
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("builds a runtime");
-        // `Listener::bind` creates a tokio `UnixListener`, which needs a runtime
-        // context, and the server's accept loop needs a runtime to spawn on. The
-        // guard is dropped once the listener is bound; the runtime keeps running
-        // the server's tasks.
         let guard = runtime.enter();
         let listener = Listener::bind(&socket, WebSocketConfig::default()).expect("binds");
         let bus = Bus::open(root.join("data"), 16).expect("opens the bus");
         let server = Server::new(listener, bus, Allowlist::new().allow_uid(uid));
         runtime.spawn(server.run());
         drop(guard);
-
-        // Wait until the socket accepts, so a client never races the bind.
         wait_for(&socket);
         Self {
             root,
@@ -73,7 +67,7 @@ impl BusServer {
     fn client(&self) -> BusClient {
         BusClient::connect(&Config {
             socket: self.socket.clone(),
-            subscriber_id: "daemon-test".to_owned(),
+            subscriber_id: "bridge-test".to_owned(),
         })
         .expect("connects")
     }
@@ -86,7 +80,7 @@ impl Drop for BusServer {
 }
 
 /// Wait until the socket accepts a connection.
-fn wait_for(socket: &std::path::Path) {
+fn wait_for(socket: &Path) {
     for _ in 0..100 {
         if std::os::unix::net::UnixStream::connect(socket).is_ok() {
             return;
@@ -96,34 +90,11 @@ fn wait_for(socket: &std::path::Path) {
     panic!("the socket never accepted at {}", socket.display());
 }
 
-/// An incoming event of `ty` with `data`, as the daemon authors one.
-fn incoming(
-    ty: &str,
-    subject: &str,
-    data: serde_json::Value,
-) -> Incoming {
-    Incoming {
-        specversion: SpecVersion::V1_0,
-        ty: ty.to_owned(),
-        source: None,
-        id: None,
-        time: None,
-        subject: Some(subject.to_owned()),
-        datacontenttype: None,
-        sequence: None,
-        data: Some(data),
-        extensions: std::collections::BTreeMap::new(),
-    }
-}
-
-/// A handler that records every event it receives, and a signal for one.
-fn recorder() -> (
-    daemon::bus::Handler,
-    Arc<Mutex<Vec<agent::cloudevent::Event>>>,
-) {
+/// A handler that records every event it receives.
+fn recorder() -> (Handler, Arc<Mutex<Vec<CloudEvent>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&seen);
-    let handler = Box::new(move |event: &agent::cloudevent::Event| {
+    let handler = Box::new(move |event: &CloudEvent| {
         sink.lock().expect("unpoisoned").push(event.clone());
     });
     (handler, seen)
@@ -131,9 +102,9 @@ fn recorder() -> (
 
 /// Poll `seen` until it holds at least `count` events, or fail.
 fn await_events(
-    seen: &Arc<Mutex<Vec<agent::cloudevent::Event>>>,
+    seen: &Arc<Mutex<Vec<CloudEvent>>>,
     count: usize,
-) -> Vec<agent::cloudevent::Event> {
+) -> Vec<CloudEvent> {
     for _ in 0..200 {
         let events = seen.lock().expect("unpoisoned").clone();
         if events.len() >= count {
@@ -148,74 +119,7 @@ fn await_events(
 }
 
 #[test]
-fn a_published_event_is_committed_and_read_back() {
-    let server = BusServer::start("publish");
-    let client = server.client();
-
-    let receipt = client
-        .publish(incoming(
-            "agent.session.started",
-            "s-1",
-            json!({"workspace": "/work"}),
-        ))
-        .expect("publishes");
-    assert_eq!(receipt.seq, 0, "the first event is sequence zero");
-
-    let (handler, seen) = recorder();
-    let from_seq = client.subscribe(0, handler).expect("subscribes");
-    assert_eq!(from_seq, 0);
-
-    let events = await_events(&seen, 1);
-    let event = &events[0];
-    assert_eq!(event.ty, "agent.session.started");
-    assert_eq!(event.subject.as_deref(), Some("s-1"));
-    assert_eq!(event.data, Some(json!({"workspace": "/work"})));
-    assert_eq!(event.source, "agent://eventbus", "the bus owns the source");
-    assert_eq!(event.sequence.get(), 0);
-}
-
-#[test]
-fn a_subscriber_receives_a_live_event() {
-    // A second client publishes while the first is subscribed, so the event is
-    // delivered live rather than replayed.
-    let server = BusServer::start("live");
-    let subscriber = server.client();
-    let publisher = server.client();
-
-    let (handler, seen) = recorder();
-    subscriber.subscribe(0, handler).expect("subscribes");
-    publisher
-        .publish(incoming(
-            "agent.session.exited",
-            "s-1",
-            json!({"reason": "done"}),
-        ))
-        .expect("publishes");
-
-    let events = await_events(&seen, 1);
-    assert_eq!(events[0].ty, "agent.session.exited");
-    assert_eq!(events[0].data, Some(json!({"reason": "done"})));
-}
-
-#[test]
-fn one_connection_can_publish_and_receive() {
-    // The design's daemon uses one connection for both. Publish on the same
-    // client that subscribed, and see the event come back.
-    let server = BusServer::start("both");
-    let client = server.client();
-
-    let (handler, seen) = recorder();
-    client.subscribe(0, handler).expect("subscribes");
-    client
-        .publish(incoming("agent.session.stopped", "s-1", json!({})))
-        .expect("publishes on the same connection");
-
-    let events = await_events(&seen, 1);
-    assert_eq!(events[0].ty, "agent.session.stopped");
-}
-
-#[test]
-fn the_publisher_bridge_mints_an_id_and_publishes_a_request() {
+fn the_bridge_mints_an_id_and_publishes_a_request() {
     // The sandbox's `Publisher` seam over the daemon's client: it must mint a
     // unique id and publish an `egress.requested` the bus accepts.
     let server = BusServer::start("bridge");
@@ -255,58 +159,4 @@ fn the_publisher_bridge_mints_an_id_and_publishes_a_request() {
         Some(&json!("00-trace-span-01")),
         "the trace parent survives the bridge"
     );
-}
-
-#[test]
-fn a_producer_set_bus_attribute_is_refused() {
-    // `source` is the bus's, so a producer that sets it is refused and nothing is
-    // committed.
-    let server = BusServer::start("reserved");
-    let client = server.client();
-
-    let mut forged = incoming("agent.session.started", "s-1", json!({}));
-    forged.source = Some("agent://forged".to_owned());
-
-    let error = client
-        .publish(forged)
-        .expect_err("a reserved attribute fails");
-    assert!(
-        matches!(
-            error,
-            daemon::bus::Error::Refused {
-                code: agent::protocol::ErrorCode::ReservedAttribute,
-                ..
-            }
-        ),
-        "got {error:?}"
-    );
-
-    // Nothing was committed.
-    let (handler, seen) = recorder();
-    client.subscribe(0, handler).expect("subscribes");
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    assert!(seen.lock().expect("unpoisoned").is_empty());
-}
-
-#[test]
-fn ack_resumes_from_the_durable_cursor() {
-    // A reconnect with the same subscriber id resumes at max(from, cursor).
-    let server = BusServer::start("resume");
-    {
-        let client = server.client();
-        for _ in 0..3 {
-            client
-                .publish(incoming("agent.session.started", "s-1", json!({})))
-                .expect("publishes");
-        }
-        let (handler, seen) = recorder();
-        client.subscribe(0, handler).expect("subscribes");
-        await_events(&seen, 3);
-        client.ack(2).expect("acks");
-    }
-
-    let reconnected = server.client();
-    let (handler, _seen) = recorder();
-    let from_seq = reconnected.subscribe(0, handler).expect("subscribes");
-    assert_eq!(from_seq, 2, "the resume never skips the acknowledged event");
 }

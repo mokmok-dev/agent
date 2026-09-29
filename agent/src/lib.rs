@@ -7,11 +7,15 @@
 //! [`broker`], the UDS/WebSocket transport in [`transport`], the wire messages
 //! in [`protocol`], durable subscriber progress in [`cursor`], the wired state
 //! machine in [`bus`], the authority claim in [`authority`], and the async
-//! connection loop in [`server`].
+//! connection loop in [`server`]. [`client`] is the other side of that loop: the
+//! connection a subscriber or publisher holds, shared by the daemon and the
+//! confined agent.
 
 pub mod authority;
 pub mod broker;
 pub mod bus;
+#[cfg(unix)]
+pub mod client;
 pub mod cloudevent;
 pub mod cursor;
 pub mod protocol;
