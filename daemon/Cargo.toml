@@ -5,7 +5,15 @@ publish = false
 version.workspace = true
 
 [dependencies]
+agent = { path = "../agent" }
+futures-util.workspace = true
+sandbox = { path = "../sandbox" }
+serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "rt"] }
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+ulid.workspace = true
 
 [lints]
 workspace = true

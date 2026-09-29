@@ -45,7 +45,8 @@ async connection loop in `agent/src/server.rs`, the sandbox policy core in
 `sandbox/src/policy/`, the sandbox filesystem layer in
 `sandbox/src/filesystem.rs` and `sandbox/src/executor.rs`, and the sandbox
 egress layer in `sandbox/src/egress/` (proxy, forwarder, environment injection,
-and transport selection), and the session core in `daemon/src/session.rs`:
+and transport selection), the session core in `daemon/src/session.rs`, and the
+bus client in `daemon/src/bus.rs`:
 
 | Module | Property |
 | --- | --- |
@@ -83,6 +84,7 @@ and transport selection), and the session core in `daemon/src/session.rs`:
 | `egress::transport` | Transport follows the host capability: bubblewrap can hold a private network namespace and gets the Unix-socket transport; a host without one is refused (`TransportError::Refused`), so egress fails closed rather than downgrading to the port-only form. |
 | `egress::forwarder` | The CLI parser accepts `--socket`/`--port` in either order and rejects a missing, unknown, non-numeric, out-of-range, or zero argument; binding port zero reports a real ephemeral port. Over a real socket: a client's bytes round-trip to the socket and back, a half-close still receives the reply, and the built `egress-forward` binary reports its port and bridges bytes. |
 | `daemon::session` | A `SessionId` accepts ASCII letters, digits, `.`, `_`, and `-` up to 128 characters, and rejects an empty, overlong, or unsafe one; its subject names the session. A session starts in `Starting`. Only `Running` reaches `Stopped` through `Stopping`, or reaches `Exited`; a setup error moves `Starting` to `Failed`. A terminal state is never left, so a failed session never reports `Running`, an exited one cannot be stopped, and a second stop is refused. The registry refuses a duplicate id and a workspace a live session already holds, and reaching a terminal state releases the workspace, so a client can reopen it. |
+| `daemon::bus` | Against the real bus server over a Unix socket: a published event is committed and read back with the bus-owned `source` and `sequence`; a subscriber receives a live event; one connection both publishes and receives; the `Publisher` bridge mints distinct request ids and publishes an `egress.requested` whose `traceparent` survives; a producer-set `source` is refused and commits nothing; and a reconnect with the same subscriber id resumes from `max(from_seq, cursor)`. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
 hold the reference-model proptests; `agent/tests/verify_cli.rs` and
@@ -94,7 +96,9 @@ throwaway Unix socket, so neither needs confinement; and `sandbox/tests/executor
 `sandbox/tests/events.rs` spawn a real confined command through bubblewrap,
 skipping when the host cannot build a namespace (the condition under which the
 daemon refuses to spawn). `daemon/src/session.rs` holds the session-core tests,
-which need no confinement and run on every host. The `test` flake check puts
+which need no confinement and run on every host, and `daemon/tests/bus_client.rs`
+drives the daemon's bus client against the real `agent` server over a Unix
+socket. The `test` flake check puts
 `bubblewrap` on `PATH` so those spawn tests run in CI. A GitHub Actions runner
 forbids unprivileged user namespaces, so the *spawn* tests skip there even with
 bubblewrap present; any logic they would cover has a unit test with a plain

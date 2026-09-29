@@ -10,8 +10,10 @@
 //! transitions. The pieces a session will own (a scratch directory, a confined
 //! process, an egress allowlist) arrive with the milestones that create them.
 
+pub mod bus;
 pub mod session;
 
+pub use bus::{BusClient, BusPublisher};
 pub use session::{Session, SessionId, SessionRegistry, State};
 
 /// Everything that can go wrong in a session operation.
