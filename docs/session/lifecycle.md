@@ -31,6 +31,21 @@ invalid state cannot be represented and a caller cannot half-start a session.
 
 ## The Transitions
 
+```mermaid
+stateDiagram-v2
+    [*] --> Starting: accept and reserve
+    Starting --> Running: setup ok
+    Starting --> Failed: setup error
+    Running --> Exited: the process exits
+    Running --> Stopping: stop requested
+    Stopping --> Stopped: process reaped
+    Stopped --> [*]
+    Exited --> [*]
+    Failed --> [*]
+```
+
+A terminal state accepts no further transition.
+
 | From | Trigger | To | Work |
 | --- | --- | --- | --- |
 | none | `SessionRegistry::insert` | `Starting` | Reserve the id and the workspace root. |

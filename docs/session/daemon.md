@@ -61,6 +61,19 @@ it to answer its own privileged events. See
 Opening a session is one ordered sequence, and a failure at any step releases
 everything the earlier steps acquired. The order is the order that fails closed.
 
+```mermaid
+flowchart TD
+    image["image + workspace root"] --> policy["build and validate Policy"]
+    policy --> reserve["reserve SessionId<br/>and workspace root"]
+    reserve --> backend["detect backend"]
+    backend --> scratch["create Scratch guard"]
+    scratch --> proxy["bind UnixProxy,<br/>set network.proxy"]
+    proxy --> grants["add bus socket,<br/>deny authority dir"]
+    grants --> resolve["resolve program,<br/>supervisor, forwarder"]
+    resolve --> spawn["spawn confined process"]
+    spawn --> running["Running,<br/>publish started"]
+```
+
 1. Take the image and the workspace root, and build the `Policy`. Validate it
    before anything is created.
 2. Reserve the `SessionId` and the workspace root in the registry, so a second
@@ -106,6 +119,26 @@ Two seams connect the proxy to the bus.
 The proxy's own `sandbox_id` in those events is the `SessionId`, so the egress
 log and the lifecycle log for one session share a subject. See
 [sandbox events](../sandbox/events.md).
+
+```mermaid
+sequenceDiagram
+    participant A as agent (confined)
+    participant P as egress proxy
+    participant B as event bus
+    participant O as authority client
+
+    A->>P: CONNECT host:port
+    P->>B: agent.sandbox.egress.requested
+    B->>O: requested
+    O->>B: agent.sandbox.egress.granted
+    B->>P: granted (same request_id)
+    alt granted before the deadline
+        P->>A: 200 Connection Established
+        P-->>A: tunnel bytes
+    else denied, cancelled, or deadline
+        P->>A: 403 Forbidden
+    end
+```
 
 The allowlist is mutable at runtime, and it is the one thing about a running
 session that changes. An authority adds or revokes a `host:port` rule, and the

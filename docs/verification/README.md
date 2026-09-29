@@ -136,7 +136,13 @@ nix develop -c cargo test                       # unit + proptest + doctest
 nix develop -c cargo kani -p agent --lib        # Kani harnesses
 nix develop -c cargo mutants -j 8 --no-times    # mutation measurement
 nix flake check                                 # clippy, nextest, doctest, kani, harness mutation
+./scripts/check-diagrams.sh                     # render every mermaid block in docs/
 ```
+
+`scripts/check-diagrams.sh` renders each mermaid block in `docs/` on a real
+browser and fails on a parse error. Mermaid checks a diagram only when it draws
+it, so an unsupported edge or a bad label is invisible in the Markdown and
+breaks the rendered page.
 
 The flake's `test` check runs `cargo nextest`, which does not run doctests,
 so a separate `doctest` check runs `cargo test --doc`. Locally, plain

@@ -120,22 +120,35 @@ and the network reach at spawn. The egress proxy decides which destinations are
 reachable. The bus decides which events are authoritative. The session manager
 sits on the trusted side and owns the first two while it listens to the third.
 
-```
-   authority client                       event bus (WAL, durable)
-        │  agent.session.requested             ▲  agent.session.started
-        │  agent.session.stop_requested        │  agent.session.exited
-        ▼                                      │
-   ┌──────────────── daemon (trusted) ─────────┴─────────────────┐
-   │  SessionRegistry ──► Session (state machine)                 │
-   │       │ owns                                                  │
-   │       ├─ Scratch      (private tmpfs, removed on drop)        │
-   │       ├─ Policy ─────► bwrap ─────────► agent (untrusted)     │
-   │       ├─ Process  ────► the agent process as namespace init   │
-   │       └─ Allowlist ──► egress proxy (UDS) ──► provider        │
-   └───────────────────────────────────────────────────────────────┘
-                                  ▲ UDS (mounted bus socket)
-                                  │
-                        the agent subscribes and publishes
+```mermaid
+flowchart LR
+    client["authority client"]
+    bus[("event bus<br/>WAL, durable")]
+    provider["provider"]
+
+    subgraph trusted["daemon (trusted)"]
+        busclient["bus client"]
+        registry["SessionRegistry"]
+        session["Session"]
+        backend["bwrap"]
+        proxy["egress proxy (UDS)"]
+    end
+
+    subgraph confined["agent (untrusted, confined)"]
+        agent["agent process<br/>namespace init"]
+    end
+
+    client -->|"requested / stop_requested"| bus
+    bus -->|"commands"| busclient
+    busclient --> session
+    session --> registry
+    session -->|"started / exited / stopped / failed"| bus
+    session --> backend
+    session --> proxy
+    backend --> agent
+    agent <-->|"bus socket (UDS)"| bus
+    agent -->|"HTTP_PROXY"| proxy
+    proxy --> provider
 ```
 
 | Layer | Responsibility | Document |
