@@ -11,9 +11,15 @@
 //! process, an egress allowlist) arrive with the milestones that create them.
 
 pub mod bus;
+pub mod image;
+pub mod launcher;
+pub mod manager;
 pub mod session;
 
 pub use bus::{BusClient, BusPublisher};
+pub use image::AgentImage;
+pub use launcher::{LaunchRequest, LaunchedProcess, Launcher};
+pub use manager::{Manager, ManagerConfig};
 pub use session::{Session, SessionId, SessionRegistry, State};
 
 /// Everything that can go wrong in a session operation.
@@ -44,4 +50,25 @@ pub enum Error {
         /// The state the session was in.
         state: State,
     },
+    /// No confinement backend is available on this host, so no session opened.
+    #[error("no confinement backend is available on this host")]
+    NoBackend,
+    /// The agent program lies inside the workspace it would act on.
+    #[error("the agent program `{0}` is inside the session workspace")]
+    ProgramInsideWorkspace(std::path::PathBuf),
+    /// The scratch directory could not be created.
+    #[error("scratch directory error: {0}")]
+    Scratch(String),
+    /// The launcher could not start or stop the confined process.
+    #[error("launcher error: {0}")]
+    Launcher(String),
+    /// The composed policy is not valid.
+    #[error(transparent)]
+    Policy(#[from] sandbox::policy::InvalidPolicy),
+    /// The session registry's lock was poisoned.
+    #[error("the session registry lock is poisoned")]
+    Poisoned,
+    /// The bus connection failed.
+    #[error(transparent)]
+    Bus(#[from] crate::bus::Error),
 }
