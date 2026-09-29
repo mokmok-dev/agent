@@ -318,33 +318,6 @@ mod tests {
     }
 
     #[test]
-    fn inherited_stdio_exposes_no_pipes() {
-        // The accessors report absence rather than a pipe the process does not
-        // have, so a caller cannot try to read a stream that was inherited.
-        if !Path::new("/bin/sh").exists() {
-            return;
-        }
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", "exit 0"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawns");
-        let mut process = Process {
-            stdin: child.stdin.take(),
-            stdout: child.stdout.take(),
-            stderr: child.stderr.take(),
-            child,
-            started: Instant::now(),
-            killed: false,
-        };
-        assert!(process.take_stdin().is_none());
-        assert!(process.take_stdout().is_none());
-        assert!(process.take_stderr().is_none());
-    }
-
-    #[test]
     fn elapsed_measures_the_time_since_spawn() {
         let Some(process) = shell("sleep 30") else {
             return;

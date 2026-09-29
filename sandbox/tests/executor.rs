@@ -568,6 +568,39 @@ fn a_long_lived_process_pipes_stdin_and_stdout_under_confinement() {
 }
 
 #[test]
+fn inherited_stdio_exposes_no_pipes() {
+    // `ProcessStdio::Inherited` must not hand the caller a pipe the process does
+    // not have. Driven through the real spawn path, so the choice is the one
+    // `spawn` makes, not a hand-built handle.
+    let Some(backend) = backend_or_skip() else {
+        return;
+    };
+    let tree = Tree::new("inherited-stdio");
+    let scratch = Scratch::new(&tree.work()).expect("scratch");
+    let request = ExecRequest {
+        program: OsString::from("/bin/sh"),
+        args: vec![OsString::from("-c"), OsString::from("exit 0")],
+        policy: policy(&tree),
+        egress: None,
+    };
+    let mut process = Process::spawn(&backend, &request, scratch.path(), ProcessStdio::Inherited)
+        .expect("spawns");
+
+    assert!(
+        process.take_stdin().is_none(),
+        "no stdin pipe when inherited"
+    );
+    assert!(
+        process.take_stdout().is_none(),
+        "no stdout pipe when inherited"
+    );
+    assert!(
+        process.take_stderr().is_none(),
+        "no stderr pipe when inherited"
+    );
+}
+
+#[test]
 fn an_egress_socket_is_mounted_into_the_command_view() {
     let Some(backend) = backend_or_skip() else {
         return;
