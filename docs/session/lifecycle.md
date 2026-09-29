@@ -65,10 +65,10 @@ Two properties fall out of the machine, and each is a test:
 
 ## The Registry
 
-`SessionRegistry` maps a `SessionId` to a `Session`, beside the one lock that
-guards both. It is the single owner of session writes, because the daemon's
-handler and the reaper both act on a session and neither may drive the other's
-state.
+`SessionRegistry` maps a `SessionId` to a `Session`, and records the workspace
+each live session reserves. It is the single owner of session writes, because
+the daemon's handler and the reaper both act on a session and neither may drive
+the other's state.
 
 ```rust
 pub struct SessionId(String);
@@ -76,18 +76,36 @@ pub struct SessionId(String);
 pub struct Session {
     state: State,
     workspace: PathBuf,
-    scratch: Scratch,
-    process: Option<Process>,
-    egress: Arc<Allowlist>,
+    scratch: Scratch,      // milestone 4
+    process: Option<Process>, // milestone 4
+    egress: Arc<Allowlist>,   // milestone 3
 }
 
-pub struct SessionRegistry { /* Mutex<HashMap<SessionId, Session>> */ }
+pub struct SessionRegistry {
+    sessions: HashMap<SessionId, Session>,
+    reserved: HashMap<PathBuf, SessionId>,
+}
 ```
+
+The registry holds no lock of its own. The daemon serializes access, which is
+where the lock belongs once one handler and one reaper thread can both reach a
+session. A transition runs through `SessionRegistry::apply`, so the reservation
+cannot drift from the state: reaching a terminal state releases the workspace.
 
 The pieces a `Session` owns are the pieces that must die with it. `Scratch`
 removes its directory on drop. `Process` holds the confined child. The
 `Arc<Allowlist>` is shared with the proxy that serves the session, so revoking a
 rule reaches a live tunnel.
+
+Milestone 2 implements the core of this in the `daemon` crate: `SessionId`, the
+six-state `State`, `Session`, and `SessionRegistry`. Only the state and the
+workspace are present so far, because they are the parts that do not need a
+process. `SessionRegistry` maps `SessionId` to `Session` beside the workspace
+each session reserves, and it holds no internal lock. The daemon owns the lock,
+which is where it belongs once the handler and the reaper both touch a session.
+A transition runs through `SessionRegistry::apply` so the reservation stays in
+step: a terminal state releases the workspace, and a terminal session stays in
+the registry only until the daemon removes it.
 
 `SessionId` is derived from the bus subject, so the id a client uses is the id
 the log carries. The daemon mints it from the `agent.session.requested` payload,
