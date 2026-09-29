@@ -45,6 +45,13 @@ impl Authority {
 /// - the terminal decisions `granted` / `denied` / `cancelled`, and
 /// - the allowlist mutations `rule_added` / `rule_revoked`.
 ///
+/// The session lifecycle is gated for the same reason
+/// (`docs/session/lifecycle.md`): starting or stopping a session is a privileged
+/// act, so a confined agent must not be able to publish `agent.session.requested`
+/// or `agent.session.stop_requested` for itself. The manager's own lifecycle
+/// events (`started` / `stopped` / `exited` / `failed`) are **not** gated: the
+/// manager runs on the trusted side and is their only writer.
+///
 /// The `requested` events are deliberately **not** gated. They are the *ask*,
 /// which is the one capability the boundary grants the agent, and a decision
 /// carrying an unknown `request_id` is ignored by the proxy, so a forged
@@ -72,6 +79,8 @@ pub fn requires_authority(ty: &str) -> bool {
             | "agent.sandbox.permission.granted"
             | "agent.sandbox.permission.denied"
             | "agent.sandbox.permission.cancelled"
+            | "agent.session.requested"
+            | "agent.session.stop_requested"
     )
 }
 
@@ -122,6 +131,28 @@ mod tests {
     }
 
     #[test]
+    fn the_session_lifecycle_requests_require_authority() {
+        // Starting or stopping a session is privileged, so a confined agent must
+        // not be able to request either for itself.
+        for ty in ["agent.session.requested", "agent.session.stop_requested"] {
+            assert!(requires_authority(ty), "{ty} must be gated");
+        }
+    }
+
+    #[test]
+    fn the_managers_own_lifecycle_events_do_not_require_authority() {
+        // The manager is their only writer and runs on the trusted side.
+        for ty in [
+            "agent.session.started",
+            "agent.session.stopped",
+            "agent.session.exited",
+            "agent.session.failed",
+        ] {
+            assert!(!requires_authority(ty), "{ty} must not be gated");
+        }
+    }
+
+    #[test]
     fn unrelated_types_do_not_require_authority() {
         for ty in [
             "agent.task.started",
@@ -141,6 +172,8 @@ mod tests {
             "xagent.sandbox.egress.granted",
             "agent.sandbox.egress.granted_",
             "agent.sandbox.egress.grant",
+            "agent.session.requested.x",
+            "xagent.session.requested",
         ] {
             assert!(!requires_authority(ty), "{ty} must not be gated");
         }
