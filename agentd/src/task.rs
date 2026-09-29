@@ -227,10 +227,10 @@ fn failed(
 ///
 /// The `shell` capability caps a command's output at a mebibyte, which is right
 /// for the log and far too much for a model: a few turns of it would fill any
-/// context window. Each stream is cut to [`MAX_TOOL_RESULT_BYTES`] first, so a
-/// huge standard output cannot crowd out the standard error beside it, and the
-/// whole result is then cut to [`MAX_TOOL_MESSAGE_BYTES`], so a tool whose detail
-/// this does not know is bounded too.
+/// context window. Each stream is cut to [`MAX_TOOL_RESULT_BYTES`] first, so
+/// neither stream can crowd the other out of the model's view, and the whole
+/// result is then cut to [`MAX_TOOL_MESSAGE_BYTES`], so a tool whose detail this
+/// does not know is bounded too.
 fn tool_result(output: &Output) -> String {
     let mut detail = output.detail.clone();
     for field in ["stdout", "stderr"] {

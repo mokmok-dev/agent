@@ -123,12 +123,12 @@ the shell capability bounds a command's output: a model's context is a resource
 like any other, and a command that writes without end must not be able to fill it.
 The shell capability caps a command at a mebibyte, which is right for the log and
 far too much for a model, so each stream is cut to 8 KiB before it is fed back —
-**separately**, so a huge standard output cannot crowd the standard error beside
-it out of the model's view — and the whole result is cut again, so a tool whose
-detail shape the capability does not know is bounded too. A cut is marked, so the
-model knows what it lost. A task also has a turn bound, so a model that never
-stops calling tools cannot hold the session, and it reports each turn's prose as
-progress, bounded in its turn.
+**separately**, so neither stream can crowd the other out of the model's view —
+and the whole result is cut again, so a tool whose detail shape the capability
+does not know is bounded too. A cut is marked, so the model knows what it lost. A
+task also has a turn bound (32), so a model that never stops calling tools cannot
+hold the session, and it reports each turn's prose as progress, bounded in its
+turn.
 
 A tool the agent does not offer is reported to the model rather than refused, so
 the model is told what happened and gets to correct itself instead of the task
