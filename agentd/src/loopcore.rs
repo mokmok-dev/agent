@@ -4,6 +4,11 @@
 //! event into work. The loop is synchronous; the connection's thread does the
 //! WebSocket part, and this side owns the work.
 //!
+//! A command is one call to a [`Capability`], and the output that call returns is
+//! the command's result. A capability that takes a while may also report as it
+//! works, and the loop publishes each report as a `progress` output, so the log
+//! shows the work as it happens.
+//!
 //! Delivery is **at-least-once**: the bus redelivers the last acknowledged
 //! sequence, so a command can arrive twice. The loop deduplicates on the event's
 //! `id`, which is stable across redelivery.
@@ -15,8 +20,9 @@ use std::sync::{Arc, Mutex};
 
 use agent::client::{Client, Handler};
 use agent::cloudevent::Event as CloudEvent;
+use serde_json::Value;
 
-use crate::contract::{Command, OUTPUT, Output};
+use crate::contract::{Command, OUTPUT, Output, OutputKind};
 
 /// What the agent needs to run.
 #[derive(Debug, Clone)]
@@ -49,10 +55,34 @@ pub enum PublishError {
 /// What an agent does with a command.
 pub trait Capability: Send + Sync + std::fmt::Debug {
     /// Run the action, and return the output the agent publishes for it.
+    ///
+    /// The returned output is the command's result, and the loop publishes it.
+    /// While the action runs it may report through `reporter`, whose reports the
+    /// loop publishes as `progress` outputs. That is what makes an action that
+    /// takes minutes visible while it runs instead of only when it ends. A
+    /// capability that reports nothing is ordinary.
     fn act(
         &self,
         command: &Command,
+        reporter: &dyn Reporter,
     ) -> Output;
+}
+
+/// Where a capability reports what it is doing while it works.
+///
+/// The loop supplies one per command, already named for that command's action,
+/// so a report carries only the detail. Reporting is **best effort**: a report
+/// that cannot be published is logged and dropped. That is deliberate, because
+/// the returned [`Output`] is the command's result and it is published over the
+/// same connection, so a dead bus is reported by that publish instead. A
+/// capability therefore cannot fail a command by reporting, and one that reports
+/// nothing at all is ordinary.
+pub trait Reporter {
+    /// Publish one progress report for the command being run.
+    fn report(
+        &self,
+        detail: Value,
+    );
 }
 
 /// Run an agent for `session` until the process is stopped.
@@ -120,11 +150,51 @@ pub fn run(
             continue;
         };
 
-        let output = capability.act(&command);
+        let output = capability.act(
+            &command,
+            &BusReporter {
+                client: &client,
+                session: &config.session,
+                command_event: &event,
+                action: &command.action,
+            },
+        );
         publish_output(&client, &config.session, &event, &output)?;
         client.ack(event.sequence.get())?;
     }
     Ok(())
+}
+
+/// The loop's reporter: publishes each report as a `progress` output.
+///
+/// It is built per command, so a report needs only the detail: the action, the
+/// session, and the trace context come from the command being run.
+#[derive(Debug)]
+struct BusReporter<'a> {
+    /// The connection the reports are published on.
+    client: &'a Client,
+    /// The session whose subject the reports are published under.
+    session: &'a str,
+    /// The command the reports belong to, for its trace context.
+    command_event: &'a CloudEvent,
+    /// The action the reports are about, echoed from the command.
+    action: &'a str,
+}
+
+impl Reporter for BusReporter<'_> {
+    fn report(
+        &self,
+        detail: Value,
+    ) {
+        let output = Output {
+            kind: OutputKind::Progress,
+            action: self.action.to_owned(),
+            detail,
+        };
+        if let Err(error) = publish_output(self.client, self.session, self.command_event, &output) {
+            tracing::warn!(%error, "could not publish progress");
+        }
+    }
 }
 
 /// Publish one [`Output`] event for the command the agent just ran.

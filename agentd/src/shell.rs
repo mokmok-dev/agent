@@ -11,6 +11,9 @@
 //! able to grow the agent's memory, and a command that never returns must be
 //! stopped. This is the same rule the sandbox's executor follows, and for the
 //! same reason.
+//!
+//! The command is announced through the loop's [`Reporter`] before it is spawned,
+//! so a command that runs for minutes is visible while it runs.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -21,6 +24,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::contract::{Command, Output, OutputKind};
+use crate::loopcore::{Capability, Reporter};
 
 /// The default cap on captured output, one mebibyte.
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -62,10 +66,11 @@ impl Shell {
     }
 }
 
-impl crate::loopcore::Capability for Shell {
+impl Capability for Shell {
     fn act(
         &self,
         command: &Command,
+        reporter: &dyn Reporter,
     ) -> Output {
         let argv: Vec<String> =
             serde_json::from_value(command.detail.get("argv").cloned().unwrap_or(Value::Null))
@@ -77,6 +82,10 @@ impl crate::loopcore::Capability for Shell {
                 detail: json!({"reason": "malformed argv"}),
             };
         }
+
+        // Report what is about to run, before the spawn: a command may run for
+        // minutes, and a watcher should see it start rather than only its result.
+        reporter.report(json!({"argv": &argv}));
 
         let started = Instant::now();
         let spawned = ChildCommand::new(&argv[0])
@@ -224,12 +233,34 @@ mod tests {
     // Tests for the shell capability over a real `/bin/sh`. Running a child is
     // the capability, so the tests run one for real, in a temp workspace.
 
+    use std::sync::Mutex;
+
     use super::*;
-    use crate::loopcore::Capability;
+    use crate::loopcore::{Capability, Reporter};
 
     /// The cap, spelled so a mutant that changes the bound is caught here: the
     /// cap-exactness test writes this many bytes and asserts all were retained.
     const EXPECTED_CAP: usize = MAX_OUTPUT_BYTES;
+
+    /// A reporter that records what it was told, so a test can read the reports.
+    #[derive(Debug, Default)]
+    struct Reports(Mutex<Vec<Value>>);
+
+    impl Reports {
+        /// The details reported, in order.
+        fn details(&self) -> Vec<Value> {
+            self.0.lock().expect("unpoisoned").clone()
+        }
+    }
+
+    impl Reporter for Reports {
+        fn report(
+            &self,
+            detail: Value,
+        ) {
+            self.0.lock().expect("unpoisoned").push(detail);
+        }
+    }
 
     /// A temp workspace, removed on drop.
     struct Workspace(PathBuf);
@@ -276,7 +307,10 @@ mod tests {
     fn a_command_runs_in_the_workspace_and_reports_its_output() {
         let workspace = Workspace::new("echo");
         let shell = Shell::in_workspace(&workspace.0);
-        let output = shell.act(&shell_action(&["/bin/sh", "-c", "echo hello"]));
+        let output = shell.act(
+            &shell_action(&["/bin/sh", "-c", "echo hello"]),
+            &Reports::default(),
+        );
         assert_eq!(output.kind, OutputKind::Done);
         assert_eq!(output.detail["code"], 0);
         assert_eq!(output.detail["stdout"], "hello\n");
@@ -288,11 +322,10 @@ mod tests {
     fn a_failure_carries_the_exit_code_and_stderr() {
         let workspace = Workspace::new("fail");
         let shell = Shell::in_workspace(&workspace.0);
-        let output = shell.act(&shell_action(&[
-            "/bin/sh",
-            "-c",
-            "echo to-stderr >&2; exit 3",
-        ]));
+        let output = shell.act(
+            &shell_action(&["/bin/sh", "-c", "echo to-stderr >&2; exit 3"]),
+            &Reports::default(),
+        );
         assert_eq!(output.detail["code"], 3);
         assert_eq!(output.detail["stderr"], "to-stderr\n");
     }
@@ -303,7 +336,10 @@ mod tests {
         let workspace = Workspace::new("relative");
         let shell = Shell::in_workspace(&workspace.0);
         let marker = workspace.0.join("marker.txt");
-        let output = shell.act(&shell_action(&["/bin/sh", "-c", "echo x > marker.txt"]));
+        let output = shell.act(
+            &shell_action(&["/bin/sh", "-c", "echo x > marker.txt"]),
+            &Reports::default(),
+        );
         assert_eq!(output.detail["code"], 0);
         assert_eq!(
             std::fs::read_to_string(&marker).expect("the marker is readable"),
@@ -315,19 +351,27 @@ mod tests {
     fn an_empty_argv_is_reported_not_run() {
         let workspace = Workspace::new("empty");
         let shell = Shell::in_workspace(&workspace.0);
-        let output = shell.act(&shell_action(&[]));
+        let reports = Reports::default();
+        let output = shell.act(&shell_action(&[]), &reports);
         assert_eq!(output.kind, OutputKind::Error);
         assert_eq!(output.detail["reason"], "malformed argv");
+        assert!(
+            reports.details().is_empty(),
+            "a command that does not run is not reported"
+        );
     }
 
     #[test]
     fn an_argv_with_a_null_byte_is_reported_not_run() {
         let workspace = Workspace::new("null");
         let shell = Shell::in_workspace(&workspace.0);
-        let output = shell.act(&Command {
-            action: ACTION.to_owned(),
-            detail: json!({"argv": ["/bin/sh\u{0}"]}),
-        });
+        let output = shell.act(
+            &Command {
+                action: ACTION.to_owned(),
+                detail: json!({"argv": ["/bin/sh\u{0}"]}),
+            },
+            &Reports::default(),
+        );
         assert_eq!(output.kind, OutputKind::Error);
         assert_eq!(output.detail["reason"], "malformed argv");
     }
@@ -344,7 +388,10 @@ mod tests {
         // absolute path, because the capability clears the environment and a
         // name would not resolve.
         let yes = helper_path("yes").expect("`yes` exists on a supported host");
-        let output = shell.act(&shell_action(&[yes.to_string_lossy().as_ref(), "aaaa"]));
+        let output = shell.act(
+            &shell_action(&[yes.to_string_lossy().as_ref(), "aaaa"]),
+            &Reports::default(),
+        );
 
         assert_eq!(output.detail["timed_out"], true, "the runaway is killed");
         assert_eq!(output.detail["truncated"], true, "the output is cut");
@@ -367,7 +414,10 @@ mod tests {
     fn a_command_that_returns_before_the_timeout_is_not_killed() {
         let workspace = Workspace::new("quick");
         let shell = Shell::in_workspace(&workspace.0).with_timeout(Duration::from_secs(30));
-        let output = shell.act(&shell_action(&["/bin/sh", "-c", "sleep 0.05; exit 0"]));
+        let output = shell.act(
+            &shell_action(&["/bin/sh", "-c", "sleep 0.05; exit 0"]),
+            &Reports::default(),
+        );
         assert_eq!(output.detail["code"], 0);
         assert_eq!(output.detail["timed_out"], false);
     }
@@ -382,10 +432,13 @@ mod tests {
         // harmlessly: the point is the count, not what they say.
         let mut argv = vec!["/bin/sh", "-c", "exit 0"];
         argv.resize(256, "");
-        let output = shell.act(&Command {
-            action: ACTION.to_owned(),
-            detail: json!({"argv": argv}),
-        });
+        let output = shell.act(
+            &Command {
+                action: ACTION.to_owned(),
+                detail: json!({"argv": argv}),
+            },
+            &Reports::default(),
+        );
         assert_eq!(
             output.detail["code"], 0,
             "exactly 256 argv entries is legal: {output:?}",
@@ -401,10 +454,13 @@ mod tests {
         let shell = Shell::in_workspace(&workspace.0);
         let mut argv = vec!["/bin/sh", "-c", "exit 0"];
         argv.resize(257, "");
-        let output = shell.act(&Command {
-            action: ACTION.to_owned(),
-            detail: json!({"argv": argv}),
-        });
+        let output = shell.act(
+            &Command {
+                action: ACTION.to_owned(),
+                detail: json!({"argv": argv}),
+            },
+            &Reports::default(),
+        );
         assert_eq!(output.kind, OutputKind::Error);
         assert_eq!(output.detail["reason"], "malformed argv");
     }
@@ -427,11 +483,10 @@ mod tests {
         // The capability clears the environment, so a tool does not resolve by
         // name; the helper is located here, on the host, and named absolutely.
         let cat = helper_path("cat").expect("`cat` exists on a supported host");
-        let output = shell.act(&shell_action(&[
-            "/bin/sh",
-            "-c",
-            &format!("{} cap-in", cat.display()),
-        ]));
+        let output = shell.act(
+            &shell_action(&["/bin/sh", "-c", &format!("{} cap-in", cat.display())]),
+            &Reports::default(),
+        );
         let stdout = output.detail["stdout"].as_str().expect("a string");
         assert_eq!(
             stdout.len(),
@@ -465,12 +520,31 @@ mod tests {
         // the boundary from both directions.
         let workspace = Workspace::new("under-cap");
         let shell = Shell::in_workspace(&workspace.0);
-        let output = shell.act(&shell_action(&["/bin/sh", "-c", "echo hi"]));
+        let output = shell.act(
+            &shell_action(&["/bin/sh", "-c", "echo hi"]),
+            &Reports::default(),
+        );
         assert_eq!(output.detail["truncated"], false);
         assert_eq!(output.detail["stdout"], "hi\n");
         let total = output.detail["stdout_total_bytes"]
             .as_u64()
             .expect("a number");
         assert_eq!(total, 3, "echo hi writes 3 bytes");
+    }
+
+    #[test]
+    fn a_command_is_reported_before_it_runs() {
+        // A command may run for minutes, so a watcher sees what is running while
+        // it runs, rather than only the result when it ends.
+        let workspace = Workspace::new("report");
+        let shell = Shell::in_workspace(&workspace.0);
+        let reports = Reports::default();
+        let output = shell.act(&shell_action(&["/bin/sh", "-c", "echo hi"]), &reports);
+        assert_eq!(output.kind, OutputKind::Done);
+        assert_eq!(
+            reports.details(),
+            vec![json!({"argv": ["/bin/sh", "-c", "echo hi"]})],
+            "the argv is reported once, before the command runs"
+        );
     }
 }

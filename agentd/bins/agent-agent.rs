@@ -12,7 +12,7 @@ use clap::Parser;
 use serde_json::json;
 
 use agentd_agent::contract::{Command, Output, OutputKind};
-use agentd_agent::loopcore::{self, AgentConfig, Capability};
+use agentd_agent::loopcore::{self, AgentConfig, Capability, Reporter};
 use agentd_agent::shell::{ACTION as SHELL, Shell};
 
 /// The purpose-built agent for one session.
@@ -44,11 +44,12 @@ impl Capability for Dispatch {
     fn act(
         &self,
         command: &Command,
+        reporter: &dyn Reporter,
     ) -> Output {
         match self {
             Self::Shell(shell) => {
                 if command.action == SHELL {
-                    return shell.act(command);
+                    return shell.act(command, reporter);
                 }
                 unknown(command)
             },
