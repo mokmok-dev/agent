@@ -26,8 +26,13 @@ exclude_globs = ["agent/src/wal/proofs.rs"]
 # segment for the record about to be written, so rotating would close and reopen
 # the same `segment-{seq:020}.log` name; the guard's presence or absence is
 # unobservable. The oversized-first-record test pins the intended layout anyway.
+#
+# `Tunnel::flush` delegates to a `TcpStream`, whose `flush` does nothing, and it
+# is only ever reached after a `write` that has already applied the same deadline
+# check. Replacing its body with `Ok(())` therefore cannot change an outcome.
 exclude_re = [
   "replace < with .* in recover_from",
   "replace <impl LaunchedProcess for Process>::kill",
+  "replace <impl Write for Tunnel>::flush",
   "replace > with >= in .*write_batch",
 ]

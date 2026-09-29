@@ -10,9 +10,11 @@
     reason = "integration test code may panic when a fixture fails"
 )]
 
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -168,7 +170,23 @@ impl Agent {
         workspace: &Path,
         from_seq: u64,
     ) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_agent-agent"))
+        Self::start_with(server, session, workspace, from_seq, &[], &[])
+    }
+
+    /// Start the agent with extra arguments and environment.
+    ///
+    /// A session's model endpoint arrives this way: the daemon passes the flags and
+    /// the proxy, and the key is already in the child's environment.
+    fn start_with(
+        server: &BusServer,
+        session: &str,
+        workspace: &Path,
+        from_seq: u64,
+        args: &[String],
+        env: &[(&str, String)],
+    ) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agent-agent"));
+        command
             .arg("--socket")
             .arg(&server.socket)
             .arg("--session")
@@ -176,10 +194,19 @@ impl Agent {
             .arg("--workdir")
             .arg(workspace)
             .arg("--from-seq")
-            .arg(from_seq.to_string())
-            .env("RUST_LOG", "info")
-            .spawn()
-            .expect("the agent binary starts");
+            .arg(from_seq.to_string());
+        for arg in args {
+            command.arg(arg);
+        }
+        // The test run's own proxy variables must not decide what the child does.
+        for name in PROXY_ENV {
+            command.env_remove(name);
+        }
+        command.env("RUST_LOG", "info");
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        let child = command.spawn().expect("the agent binary starts");
         Self { child }
     }
 }
@@ -429,5 +456,245 @@ fn an_agent_reports_a_command_before_it_runs() {
     assert!(
         at("progress") < at("done"),
         "the report comes before the result"
+    );
+}
+
+/// The variables a client reads to find its proxy.
+const PROXY_ENV: [&str; 4] = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
+
+/// A proxy that records the `CONNECT` it is asked for, answers it, and then sends
+/// nonsense.
+///
+/// It stands in for the session's egress proxy without any TLS at all: what the
+/// agent does *before* the tunnel matters here — the address it asks for and the
+/// token it authenticates with — and the nonsense makes the handshake fail, which
+/// is the failure the task reports.
+struct RecordingProxy {
+    /// The port it listens on.
+    port: u16,
+    /// The head of the `CONNECT` it was asked for.
+    head: Arc<Mutex<Option<String>>>,
+}
+
+impl RecordingProxy {
+    /// Serve one tunnel.
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
+        let port = listener.local_addr().expect("has an address").port();
+        let head = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&head);
+        std::thread::spawn(move || {
+            let Ok((mut client, _)) = listener.accept() else {
+                return;
+            };
+            if let Ok(read) = read_head(&mut client) {
+                *sink.lock().expect("unpoisoned") = Some(read);
+            }
+            let _ = client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n");
+            let _ = client.write_all(b"not the endpoint");
+            let _ = client.flush();
+        });
+        Self { port, head }
+    }
+
+    /// The URL the sandbox would inject for this proxy, carrying `token`.
+    fn url(
+        &self,
+        token: &str,
+    ) -> String {
+        format!("http://agent:{token}@127.0.0.1:{}", self.port)
+    }
+
+    /// The `CONNECT` head this proxy was asked for.
+    fn head(&self) -> String {
+        self.head
+            .lock()
+            .expect("unpoisoned")
+            .clone()
+            .expect("the proxy was asked for a tunnel")
+    }
+}
+
+/// Read a head, up to and including its blank line.
+fn read_head(stream: &mut impl Read) -> std::io::Result<String> {
+    let mut head = Vec::new();
+    let mut byte = [0_u8; 1];
+    loop {
+        if stream.read(&mut byte)? == 0 {
+            return Err(std::io::Error::other("the connection ended early"));
+        }
+        head.push(byte[0]);
+        if head.ends_with(b"\r\n\r\n") {
+            return Ok(String::from_utf8_lossy(&head).into_owned());
+        }
+        if head.len() > 16 * 1024 {
+            return Err(std::io::Error::other("the head is too large"));
+        }
+    }
+}
+
+/// Run the agent with `args`, and return its status and its stderr, bounded.
+fn run_agent(args: &[&str]) -> (std::process::ExitStatus, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agent-agent"))
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the agent binary starts");
+    // Bounded while reading: a child that writes without end must not grow this
+    // test's memory. See decision-trail row 14.
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("stderr is piped")
+        .take(4096)
+        .read_to_string(&mut stderr)
+        .expect("reads stderr");
+    let status = child.wait().expect("waits for the child");
+    (status, stderr)
+}
+
+#[test]
+fn an_agent_without_an_endpoint_reports_task_as_unknown() {
+    // The client landing leaves the binary's behaviour unchanged: without the flags
+    // there is no model, and `task` is an unknown action like any other.
+    let server = BusServer::start("no-endpoint");
+    let observer = server.client();
+    let (handler, seen) = recorder();
+    observer.subscribe(0, handler).expect("subscribes");
+    let workspace = Workspace::new("no-endpoint");
+
+    let client = server.client();
+    client
+        .publish(incoming(
+            "agent.session.command",
+            "s-t",
+            json!({"action": "task", "detail": {"task": "count the files"}}),
+        ))
+        .expect("publishes the command");
+
+    let _agent = Agent::start(&server, "s-t", &workspace.0, 0);
+    let output = await_event(&seen, "the unknown action's output", |event| {
+        is_output(event, "s-t", "error")
+    });
+    assert_eq!(output.data.as_ref().expect("data")["action"], "task");
+    assert_eq!(
+        output.data.as_ref().expect("data")["detail"]["reason"],
+        "the agent has no capability for this action",
+        "without an endpoint, `task` answers like any unknown action"
+    );
+}
+
+#[test]
+fn an_agent_with_an_endpoint_asks_the_proxy_for_it_with_the_bearer_header() {
+    // The wiring: the three flags build the client, the proxy comes from the
+    // environment, and the `CONNECT` carries the form the sandbox's proxy
+    // authenticates. The tunnel then answers nonsense, so the handshake fails —
+    // which the task reports, naming the endpoint that could not be reached.
+    let server = BusServer::start("endpoint");
+    let observer = server.client();
+    let (handler, seen) = recorder();
+    observer.subscribe(0, handler).expect("subscribes");
+    let workspace = Workspace::new("endpoint");
+
+    let client = server.client();
+    client
+        .publish(incoming(
+            "agent.session.command",
+            "s-e",
+            json!({"action": "task", "detail": {"task": "say hello"}}),
+        ))
+        .expect("publishes the command");
+
+    let proxy = RecordingProxy::start();
+    let _agent = Agent::start_with(
+        &server,
+        "s-e",
+        &workspace.0,
+        0,
+        &[
+            "--model".to_owned(),
+            "grok-4.7".to_owned(),
+            "--base-url".to_owned(),
+            "https://api.x.ai/v1".to_owned(),
+            "--env-key".to_owned(),
+            "PROVIDER_KEY".to_owned(),
+        ],
+        &[
+            ("PROVIDER_KEY", "the-key".to_owned()),
+            ("HTTPS_PROXY", proxy.url("proxy-token")),
+        ],
+    );
+
+    let output = await_event(&seen, "the failed task's output", |event| {
+        is_output(event, "s-e", "error")
+    });
+    let detail = &output.data.as_ref().expect("data")["detail"];
+    assert_eq!(
+        detail["reason"], "the model call failed",
+        "the task reports what the model call did: {detail}"
+    );
+    assert!(
+        detail["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("the endpoint could not be reached")),
+        "the report names the endpoint: {detail}"
+    );
+
+    let head = proxy.head();
+    assert!(
+        head.starts_with("CONNECT api.x.ai:443"),
+        "the proxy is asked for the endpoint, which is not resolved here: {head}"
+    );
+    assert!(
+        head.contains("Proxy-Authorization: Bearer proxy-token"),
+        "the tunnel is authenticated as the sandbox expects: {head}"
+    );
+}
+
+#[test]
+fn an_agent_with_a_partial_endpoint_does_not_start() {
+    // The three flags belong together, and the failure belongs at startup rather
+    // than at the first task. Each of the three alone is a partial set.
+    for partial in [
+        vec!["--model", "grok-4.7"],
+        vec!["--base-url", "https://api.x.ai/v1"],
+        vec!["--env-key", "PROVIDER_KEY"],
+    ] {
+        let mut args = vec!["--socket", "/nonexistent/bus.sock", "--session", "s"];
+        args.extend(partial.iter().copied());
+        let (status, stderr) = run_agent(&args);
+        assert!(
+            !status.success(),
+            "a partial endpoint must not start: {args:?}"
+        );
+        assert!(
+            stderr.contains("--model, --base-url, and --env-key"),
+            "stderr was: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn an_agent_whose_key_variable_is_unset_does_not_start() {
+    // The report names the variable, never a value.
+    let (status, stderr) = run_agent(&[
+        "--socket",
+        "/nonexistent/bus.sock",
+        "--session",
+        "s",
+        "--model",
+        "grok-4.7",
+        "--base-url",
+        "https://api.x.ai/v1",
+        "--env-key",
+        "A_KEY_NO_TEST_SETS",
+    ]);
+    assert!(!status.success(), "a missing key must not start");
+    assert!(
+        stderr.contains("A_KEY_NO_TEST_SETS"),
+        "stderr names the variable: {stderr}"
     );
 }

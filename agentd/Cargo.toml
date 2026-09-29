@@ -12,13 +12,22 @@ path = "bins/agent-agent.rs"
 agent = { path = "../agent" }
 anyhow.workspace = true
 clap.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
+# Self-signed certificates for the integration tests, so the client's TLS and
+# hostname verification run against a real handshake with no network.
+rcgen = { version = "0.14.10", default-features = false, features = [
+  "crypto",
+  "pem",
+  "ring",
+] }
 tokio = { workspace = true, features = [
   "macros",
   "net",

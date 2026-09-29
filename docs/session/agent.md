@@ -138,6 +138,53 @@ The provider's credentials are the agent's own and stay in its environment: the
 client runs inside the sandbox, so the tunnel stays opaque and TLS stays end to
 end. See [sandbox network](../sandbox/network.md).
 
+## The Client
+
+The first client is an OpenAI-compatible `chat/completions` endpoint, in
+`agentd/src/openai/`. It is one implementation of the `Model` seam, so nothing
+above it learns what a `role`, a `tool_call`, or a `Bearer` header is: `wire` owns
+the mapping and `http` owns the transport.
+
+`wire` maps the agent's four message shapes onto the protocol's and back. One
+detail is worth naming: this protocol carries a tool call's arguments as a **JSON
+string**, so the mapping serializes them on the way out and parses them back on the
+way in. A string that is not JSON is handed on as a string, and the capability
+reports it as a malformed command rather than the turn failing, so the model can
+correct itself. The reply types accept fields the agent does not read (`id`,
+`usage`, ...), because the reply is the provider's document and a provider may add
+to it.
+
+`http` is written out rather than delegated, for two reasons the session imposes.
+The egress proxy authenticates a `CONNECT` with `Proxy-Authorization: Bearer
+<token>`, and no off-the-shelf client sends that header: they turn the proxy URL's
+userinfo into `Basic`, which the proxy answers `407`, or they offer no way to set
+it. And no CA file is readable inside the sandbox, so the trust store is compiled
+into the binary (`webpki-roots`) rather than read from disk. Everything else about
+the transport is deliberately small: one request, one reply, `Connection: close`,
+HTTP/1.1, and no ALPN.
+
+Every bound is enforced **while reading**: the head at 16 KiB, the body at a
+mebibyte, and the whole exchange under one deadline (60 seconds by default). A
+reply larger than the cap is refused rather than cut, because a truncated JSON
+document is not a reply. This is row 18's rule applied to HTTP, and row 14's
+incident is why it is a rule at all.
+
+Only `https` is accepted, for the reason the settings file refuses `http`: the
+proxy speaks `CONNECT` alone and the tunnel is opaque, so TLS stays end to end and
+a plaintext endpoint has no route at all.
+
+The binary names the endpoint on its command line — `--model`, `--base-url`, and
+`--env-key`, which belong together — reads the key's value from the environment
+variable `--env-key` names, and finds its proxy in `HTTPS_PROXY`, `ALL_PROXY`, or
+`HTTP_PROXY`. Without those flags there is no model and `task` is an unknown
+action, which is what a session with no endpoint has. `NO_PROXY` is not read: the
+endpoint is never the command's own loopback, and a request that goes to the proxy
+when the proxy is reachable is the only route a session has anyway.
+
+The reply is not streamed. The seam answers with a whole turn, the capability
+reports each turn's prose as progress, and the deadline bounds one turn; a
+streamed reply would need a different seam.
+
 ## The Policy Grants the Bus Socket
 
 `sandbox`'s `NetworkPolicy.unix_sockets` is a list of socket paths the command

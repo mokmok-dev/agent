@@ -13,6 +13,7 @@
 pub mod contract;
 pub mod loopcore;
 pub mod model;
+pub mod openai;
 pub mod shell;
 pub mod task;
 

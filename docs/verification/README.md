@@ -96,7 +96,9 @@ client in `agent/src/client.rs`, and the agent loop in `agentd/src/`:
 | `agentd::contract` | Both payloads round-trip through JSON; a command without `detail` parses with a null one; an unknown field is rejected. |
 | `agentd::shell` | Over a real `/bin/sh`: a command runs in the workspace, reports its exit code and output, and a relative path resolves there; an empty argv, an overlong argv, and a null byte are reported rather than run, and a command that is refused is not reported at all; the argv is reported before the command runs; a command that writes without end has exactly the cap retained, reports `truncated` and its total, and is killed at the timeout; a command that returns before the timeout is not killed. |
 | `agentd::task` | The model-driven capability against a scripted model, so nothing needs a network: a task the model answers with no tool call is `done` and reports the answer and the turn count; the task and the one `shell` tool are offered to the model, with the tool's schema naming `argv`; a tool the model asks for runs in the session's workspace and its output is fed back under the id of the call that asked for it; a turn that speaks while calling a tool is reported as progress; a model that never stops calling a tool is stopped at the turn bound, and at a bound of zero the model is never asked; a model that fails is reported with its own reason and the turn it failed on; a command with no `task`, or one that is not a string, is reported not run and the model is never asked; an unknown tool reaches the model as a reason and the task continues; a result is bounded before it crosses into the model, marked when it was cut, neither stream can crowd the other out of the model's view, and a cut lands on a character boundary. |
-| `agentd::loopcore` | Over the real bus server, with the agent binary as a separate process: a `shell` command is answered with an output event carrying the command's stdout and exit code, and is announced with a progress event carrying its argv **before** that result arrives; the command runs in the session's workspace (a relative write reaches the host); a command published while no agent runs is answered once one starts (replay from the cursor); a command addressed to another session produces no output and runs nothing; an unknown action is reported as an error rather than ignored. |
+| `agentd::loopcore` | Over the real bus server, with the agent binary as a separate process: a `shell` command is answered with an output event carrying the command's stdout and exit code, and is announced with a progress event carrying its argv **before** that result arrives; the command runs in the session's workspace (a relative write reaches the host); a command published while no agent runs is answered once one starts (replay from the cursor); a command addressed to another session produces no output and runs nothing; an unknown action is reported as an error rather than ignored; without the endpoint flags `task` is one of those unknown actions, and with them the agent asks the proxy for the endpoint with the sandbox's `Bearer` form and reports the handshake failure that follows. Two further binaries' runs are pinned without a socket: a partial endpoint flag set, and an `--env-key` naming an unset variable, each refuse to start and say which by name (never a key's value). |
+| `agentd::openai` | The client against a scripted provider over real sockets: a turn's request carries the base URL's path, the `Host` authority, `Authorization: Bearer <key>`, `application/json`, the model, `stream: false`, the messages, and the tools; a reply maps to the content and the tool calls, including arguments as a JSON string and arguments that are not JSON; a chunked reply, a reply framed by its declared length, a reply that ends with the connection, and a reply carrying fields this project does not know all read; a tool-call turn with `content: null` is `""` plus its calls; a provider error is reported with the provider's own message and a non-JSON one with a bounded excerpt of what arrived; a reply with no choices and a reply that is not JSON are refused; and neither the key nor the proxy token appears in a `Debug` string. |
+| `agentd::openai (transport)` | Against a throwaway `CONNECT` proxy and a throwaway HTTPS upstream whose certificate `rcgen` mints in the test: the proxy is asked for `CONNECT host:port` with `Proxy-Authorization: Bearer <token>`, and a proxy that wants another token refuses with `407`; a client with no proxy reaches the endpoint directly; a certificate the client was not told to trust, and a tunnel that is not TLS at all, are refused; a reply whose declared length or actual bytes exceed the cap is refused, as is a body that runs past it; a stalled endpoint hits the deadline rather than waiting; a `localhost` certificate verifies against the name the client asked for. The parsers carry their own cases: a head split across reads, a bare-LF head, a malformed head line, a non-numeric `Content-Length`, a non-hexadecimal chunk size, a chunk without its line break, a truncated body, a read timeout named as the deadline, and a proxy URL or base URL a session could not use. |
 
 `agent/tests/wal.rs`, `agent/tests/store.rs`, and `agent/tests/cloudevent.rs`
 hold the reference-model proptests; `agent/tests/verify_cli.rs` and
@@ -125,17 +127,17 @@ more than one crate; the tables above are the record for now.
 
 The session manager in [docs/session](../session/README.md) is built in the
 `daemon` crate, and the agent program in `agentd`. Milestones 1 through 5 have
-landed, and milestone 6's first unit has landed too: the `Capability` seam gained
-a progress channel, and the agent gained a model-driven `task` capability with the
-`Model` seam it drives, in `agentd/src/model.rs` and `agentd/src/task.rs`. The
-next unit landed after it: the operator declares the OpenAI-compatible endpoints
-in a settings file, and the session's egress allowlist is derived from them, in
-`daemon/src/settings.rs` and `daemon/src/image.rs`. The provider client that
-carries the `task` capability to a real model — and the image arguments it needs —
-is the next unit, and its rows land with it; until then the capability is verified
-against a scripted model, which needs no network. The task action is deliberately
-not yet wired into the `agent-agent` binary, so the binary's behaviour is
-unchanged.
+landed, and milestone 6's units are landing in order: the `Capability` seam gained
+a progress channel, the agent gained a model-driven `task` capability with the
+`Model` seam it drives (`agentd/src/model.rs`, `agentd/src/task.rs`), the operator
+declares the OpenAI-compatible endpoints in a settings file whose `base_url`s derive
+the session's egress allowlist (`daemon/src/settings.rs`, `daemon/src/image.rs`),
+the daemon composes a session's argv and model environment from that file
+(`daemon/src/manager.rs`), and the first `Model` implementation landed as the
+OpenAI-compatible client (`agentd/src/openai/`). The binary wires `task` when the
+session's settings name an endpoint, so a session without one answers `task` as an
+unknown action exactly as before. Still to come: the workspace convention and the
+task events.
 
 Kani is expensive, so its harnesses are kept to the properties only it can
 establish: exhaustive bounds safety over attacker-controlled bytes. A property
