@@ -6,13 +6,18 @@
 //!
 //! Milestone 5 is the **loop and the contract**: connect, subscribe, react to a
 //! command, publish output, and acknowledge progress so nothing is lost across a
-//! restart. What the agent does with a command is [`run`]'s handler, which a
-//! later milestone extends into the coding agent.
+//! restart. Milestone 6 adds the capabilities that decide what a command does:
+//! [`shell`], which runs an argv in the session's workspace, and [`task`], which
+//! drives a model through [`model::Model`] with `shell` as its one tool.
 
 pub mod contract;
 pub mod loopcore;
+pub mod model;
 pub mod shell;
+pub mod task;
 
 pub use contract::{Command, Output, OutputKind};
 pub use loopcore::{AgentConfig, Error};
+pub use model::{Message, Model, Response, Tool, ToolCall};
 pub use shell::{ACTION as SHELL_ACTION, Shell};
+pub use task::{ACTION as TASK_ACTION, Task};
