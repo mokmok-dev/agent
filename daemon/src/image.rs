@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use sandbox::policy::{EnvVar, FsEntry, FsPolicy, HostPort, NetworkPolicy, Policy, ShellPolicy};
 
+use crate::session::SessionId;
+
 /// The template a session is created from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentImage {
@@ -21,6 +23,10 @@ pub struct AgentImage {
     /// The environment variables the program receives. The host environment is
     /// never inherited; this is the whole allowlist.
     pub env: Vec<EnvVar>,
+    /// Whether this image runs the project's agent, which discovers its session
+    /// from the flags the daemon passes at launch. An image that is not one runs
+    /// exactly the arguments it carries, which is what a script does.
+    agent: bool,
 }
 
 impl AgentImage {
@@ -32,6 +38,20 @@ impl AgentImage {
             args: Vec::new(),
             rules: Vec::new(),
             env: Vec::new(),
+            agent: false,
+        }
+    }
+
+    /// An image for the project's agent, running `program`.
+    ///
+    /// The agent is told where its session is at launch; see
+    /// [`AgentImage::session_args`]. [`crate::settings`] builds one of these for a
+    /// session whose settings name an endpoint.
+    #[must_use]
+    pub fn agent(program: impl Into<PathBuf>) -> Self {
+        Self {
+            agent: true,
+            ..Self::new(program)
         }
     }
 
@@ -147,6 +167,33 @@ impl AgentImage {
     pub fn egress_rules(&self) -> Vec<HostPort> {
         self.rules.clone()
     }
+
+    /// The argv a session on `workspace` runs this image with.
+    ///
+    /// An image of the project's agent is told where its session is: the bus socket
+    /// it subscribes on, the id that scopes its input and output, and the workspace
+    /// its commands run in. Any other image runs exactly the arguments it carries,
+    /// so a script is unaffected.
+    #[must_use]
+    pub fn session_args(
+        &self,
+        id: &SessionId,
+        bus_socket: &Path,
+        workspace: &Path,
+    ) -> Vec<String> {
+        let mut args = self.args.clone();
+        if self.agent {
+            args.extend([
+                "--socket".to_owned(),
+                bus_socket.display().to_string(),
+                "--session".to_owned(),
+                id.as_str().to_owned(),
+                "--workdir".to_owned(),
+                workspace.display().to_string(),
+            ]);
+        }
+        args
+    }
 }
 
 #[cfg(test)]
@@ -183,6 +230,53 @@ mod tests {
         assert_eq!(
             image.egress_rules(),
             vec![HostPort::new("models.internal", 8443)]
+        );
+    }
+
+    #[test]
+    fn an_agent_image_is_told_which_session_it_acts_for() {
+        // The agent discovers its session from these flags, which the daemon passes
+        // because the image is fixed before a session exists.
+        let image = AgentImage::agent("/usr/bin/agent-agent");
+        let id = SessionId::new("s-1").expect("valid id");
+        assert_eq!(
+            image.session_args(&id, Path::new("/run/bus.sock"), Path::new("/work/run-1")),
+            [
+                "--socket",
+                "/run/bus.sock",
+                "--session",
+                "s-1",
+                "--workdir",
+                "/work/run-1"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_agent_image_keeps_the_arguments_it_carries() {
+        let image = AgentImage::agent("/usr/bin/agent-agent")
+            .with_arg("--from-seq")
+            .with_arg("7");
+        let id = SessionId::new("s-1").expect("valid id");
+        let args = image.session_args(&id, Path::new("/run/bus.sock"), Path::new("/work/run-1"));
+        assert_eq!(&args[..2], ["--from-seq", "7"]);
+        assert_eq!(
+            args.len(),
+            8,
+            "its own arguments come first, then the session's"
+        );
+    }
+
+    #[test]
+    fn a_script_image_runs_only_what_it_carries() {
+        let image = AgentImage::new("/bin/sh")
+            .with_arg("-c")
+            .with_arg("echo hi");
+        let id = SessionId::new("s-1").expect("valid id");
+        assert_eq!(
+            image.session_args(&id, Path::new("/run/bus.sock"), Path::new("/work/run-1")),
+            ["-c", "echo hi"],
+            "an image that is not the agent is not told about a session"
         );
     }
 

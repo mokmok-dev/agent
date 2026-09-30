@@ -317,6 +317,44 @@ fn opening_a_session_starts_the_process_and_publishes_started() {
 }
 
 #[test]
+fn an_agent_image_is_launched_with_its_session_arguments() {
+    // An image is fixed before a session exists, so the session's own flags are
+    // added at launch. Without them the agent has no bus socket to subscribe on and
+    // no workspace to act in.
+    let server = BusServer::start("argv");
+    let (fake, boxed) = launcher(true);
+    let manager = manager(&server, boxed);
+    let workspace = Workspace::new("argv");
+    let id = SessionId::new("s-argv").expect("valid id");
+
+    manager
+        .open_session(
+            &server.client(),
+            &id,
+            &AgentImage::agent("/usr/bin/agent-agent"),
+            &workspace.0,
+        )
+        .expect("opens");
+
+    let args = {
+        let requests = fake.requests.lock().unwrap_or_else(PoisonError::into_inner);
+        requests.first().expect("one launch").args.clone()
+    };
+    assert_eq!(
+        args,
+        [
+            "--socket",
+            server.socket.to_str().expect("utf8"),
+            "--session",
+            "s-argv",
+            "--workdir",
+            workspace.0.to_str().expect("utf8")
+        ],
+        "the agent is told which session it acts for"
+    );
+}
+
+#[test]
 fn a_host_without_a_backend_fails_the_session_closed() {
     // No confinement, so no session: the manager must not run the agent.
     let server = BusServer::start("nobackend");

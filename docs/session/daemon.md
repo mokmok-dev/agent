@@ -96,12 +96,16 @@ flowchart TD
    socket's directory with a `deny` entry.
 7. Resolve the program, the supervisor, and the forwarder on the trusted side,
    and refuse any binary inside a write root.
-8. Spawn the confined process. See
+8. Compose the argv: an image of the project's agent is told which session it acts
+   for — the bus socket, the session id, and the workspace — because the image is
+   fixed before a session exists. Any other image runs exactly the arguments it
+   carries. See [agent.md](./agent.md#the-image-at-launch).
+9. Spawn the confined process. See
    [session agent.md](./agent.md#the-policy-grants-the-bus-socket).
-9. Move the session to `Running`, register the proxy's serve loop, and publish
-   `agent.session.started`.
+10. Move the session to `Running`, register the proxy's serve loop, and publish
+    `agent.session.started`.
 
-Steps 1 through 7 are pure setup and can fail without a process to reap. Step 8
+Steps 1 through 8 are pure setup and can fail without a process to reap. Step 9
 is the first step that can leave a running process, and from there teardown is
 `Session::shutdown`. See [lifecycle.md](./lifecycle.md#teardown).
 

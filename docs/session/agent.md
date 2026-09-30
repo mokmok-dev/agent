@@ -178,7 +178,9 @@ declared endpoint's `base_url`; a host declared by two endpoints is one rule, an
 an endpoint on a non-default port is a rule of its own.
 
 ```toml
-# The key is the model id sent to the API.
+# The model a session uses, and the id sent to the API.
+default = "grok-4.7"
+
 [model."grok-4.7"]
 base_url = "https://api.x.ai/v1"
 env_key = "XAI_API_KEY"
@@ -188,7 +190,8 @@ The file is `$XDG_CONFIG_HOME/agent/config.toml`, falling back to
 `$HOME/.config/agent/config.toml`. It is the only scope: a project-side file
 would let a repository grant its own agent egress. A file that is absent declares
 no endpoint, and a session with no endpoint reaches nothing — the same
-fail-closed default an empty allowlist has.
+fail-closed default an empty allowlist has. A file that declares endpoints must
+name which one a session uses, because the agent is told exactly one model.
 
 Only `https` is accepted. The egress proxy speaks `CONNECT` alone and the sandbox
 gives the command no route but that proxy, so a plaintext endpoint cannot be
@@ -196,12 +199,27 @@ reached at all; the URL is refused when the file is read rather than at a call
 that would look like a network outage. See
 [sandbox network](../sandbox/network.md).
 
-The daemon reads the file and the agent never does: the endpoint's `env_key`
-names the variable in the agent's own environment, which the image carries as an
-`env` entry when the client that calls the endpoint lands. The value is the
-agent's own — the daemon never holds it, and the tunnel never sees it. Deriving
-the rule from the same `base_url` the client calls is what keeps the allowlist and
-the endpoint from disagreeing. See [daemon.md](./daemon.md).
+The daemon reads the file and the agent never does. Deriving the rule from the same
+`base_url` the client calls is what keeps the allowlist and the endpoint from
+disagreeing. See [daemon.md](./daemon.md).
+
+## The Image at Launch
+
+An image is fixed before a session exists, so a session's own arguments are added
+when the daemon launches it. An image of the project's agent is told three things:
+the bus socket it subscribes on (`--socket`), the session id that scopes its input
+and output (`--session`), and the workspace its commands run in (`--workdir`). An
+image that is not the agent runs exactly the arguments it carries, which is what a
+script does; `AgentImage::agent` is what marks the difference, and it is the
+settings that build an agent image.
+
+The settings also carry what the agent needs to reach its model: `--model`,
+`--base-url`, and `--env-key` in its arguments, and the key's **value** in its
+environment, under the name `env_key` gives. The daemon's binary reads that value
+from its own environment and the session inherits it, so the agent holds the
+credential and the daemon holds no copy of it beyond the launch: the settings file
+names the variable and never the value, no report carries it, and the proxy cannot
+see it because the tunnel is opaque and TLS is end to end.
 
 ## The Output Contract
 
