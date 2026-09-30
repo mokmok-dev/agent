@@ -85,7 +85,8 @@ client in `agent/src/client.rs`, and the agent loop in `agentd/src/`:
 | `egress::forwarder` | The CLI parser accepts `--socket`/`--port` in either order and rejects a missing, unknown, non-numeric, out-of-range, or zero argument; binding port zero reports a real ephemeral port. Over a real socket: a client's bytes round-trip to the socket and back, a half-close still receives the reply, and the built `egress-forward` binary reports its port and bridges bytes. |
 | `daemon::session` | A `SessionId` accepts ASCII letters, digits, `.`, `_`, and `-` up to 128 characters, and rejects an empty, overlong, or unsafe one; its subject names the session. A session starts in `Starting`. Only `Running` reaches `Stopped` through `Stopping`, or reaches `Exited`; a setup error moves `Starting` to `Failed`. A terminal state is never left, so a failed session never reports `Running`, an exited one cannot be stopped, and a second stop is refused. The registry refuses a duplicate id and a workspace a live session already holds, and reaching a terminal state releases the workspace, so a client can reopen it. |
 | `daemon::bus` | Against the real bus server over a Unix socket: a published event is committed and read back with the bus-owned `source` and `sequence`; a subscriber receives a live event; one connection both publishes and receives; the `Publisher` bridge mints distinct request ids and publishes an `egress.requested` whose `traceparent` survives; a producer-set `source` is refused and commits nothing; and a reconnect with the same subscriber id resumes from `max(from_seq, cursor)`. |
-| `daemon::image` | An image grants egress only when it names a host, each allowed host becoming port 443. The policy binds the workspace read-write and makes it the working directory, grants the agent's program directory read-only, grants the bus socket, and masks each existing `deny_under` path while skipping a missing one. |
+| `daemon::image` | An image grants egress only when it carries a rule: `allowing` names a host at port 443 and `allowing_destination` keeps the port it is given. The policy binds the workspace read-write and makes it the working directory, grants the agent's program directory read-only, grants the bus socket, and masks each existing `deny_under` path while skipping a missing one. |
+| `daemon::settings` | The settings file declares OpenAI-compatible endpoints and the session's egress rules are derived from them. `https://api.x.ai/v1`, and its no-path, trailing-slash, query, and fragment forms, all become `api.x.ai:443`; an explicit port is kept; an uppercase scheme and host are folded, so a differently-cased spelling of one host is one rule; every declared endpoint contributes a rule, the same host on two ports is two, and an endpoint's `base_url` and `env_key` survive the parse. A `http`, schemeless, credentialed, hostless, bracketed-IPv6, whitespace-bearing, or unusable-port URL is refused with its own error, as is an empty or `=`-bearing `env_key`, a missing field, and an unknown field. A missing file is empty settings; a directory in place of a file, and text that is not TOML, are errors. `config_path` prefers an absolute `XDG_CONFIG_HOME`, falls back to `$HOME/.config`, ignores a relative XDG directory, and is `None` without either. |
 | `daemon::manager` | Against the real bus server, with a fake launcher: opening a session attaches the resources, moves it to `Running`, publishes `started`, and builds the policy the launcher receives (workspace writable, bus socket granted); a host whose launcher cannot confine fails the session `NoBackend` without launching anything; a failed session releases its workspace for a reopen; a second session on a live workspace is `WorkspaceBusy`; stopping kills the process and publishes `stopped`; a second stop is refused; an agent program inside the workspace is refused; and an exit releases the workspace. |
 | `daemon::helper` | A helper binary resolves from an override, then a sibling of the daemon, then `PATH`; a binary inside a write root is refused; one missing binary fails the whole resolution; an empty `PATH` entry is not searched. |
 | `daemon::bus::mint_token` | `mint_token` returns a fresh 26-character ULID each call, so two proxies never share a credential. |
@@ -127,11 +128,14 @@ The session manager in [docs/session](../session/README.md) is built in the
 landed, and milestone 6's first unit has landed too: the `Capability` seam gained
 a progress channel, and the agent gained a model-driven `task` capability with the
 `Model` seam it drives, in `agentd/src/model.rs` and `agentd/src/task.rs`. The
-provider client that makes that capability reach a real model — and the image
-arguments and allowlist entry it needs — is the next unit, and its rows land with
-it; until then the capability is verified against a scripted model, which needs no
-network. The task action is deliberately not yet wired into the `agent-agent`
-binary, so the binary's behaviour is unchanged by that unit.
+next unit landed after it: the operator declares the OpenAI-compatible endpoints
+in a settings file, and the session's egress allowlist is derived from them, in
+`daemon/src/settings.rs` and `daemon/src/image.rs`. The provider client that
+carries the `task` capability to a real model — and the image arguments it needs —
+is the next unit, and its rows land with it; until then the capability is verified
+against a scripted model, which needs no network. The task action is deliberately
+not yet wired into the `agent-agent` binary, so the binary's behaviour is
+unchanged.
 
 Kani is expensive, so its harnesses are kept to the properties only it can
 establish: exhaustive bounds safety over attacker-controlled bytes. A property

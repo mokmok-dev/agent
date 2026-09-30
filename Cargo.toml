@@ -20,6 +20,13 @@ anyhow = "1.0.100"
 serde_json = "1.0.145"
 thiserror = "2.0.20"
 time = { version = "0.3.44", features = ["serde-well-known"] }
+# The settings file. Only `parse` and `serde` are enabled: `display` and the
+# writer it pulls exist to *encode* TOML, which nothing here does.
+toml = { version = "1.1.6", default-features = false, features = [
+  "parse",
+  "serde",
+  "std",
+] }
 # Structured logging and spans. `tracing` alone has no build script and depends
 # only on `tracing-core`, so it does not disturb the Kani `--lib` build. The
 # subscriber that installs a global logger lives in the binary, not the library.

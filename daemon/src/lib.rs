@@ -17,6 +17,7 @@ pub mod image;
 pub mod launcher;
 pub mod manager;
 pub mod session;
+pub mod settings;
 
 pub use bus::{BusClient, BusPublisher};
 pub use egress::Egress;
@@ -25,6 +26,7 @@ pub use image::AgentImage;
 pub use launcher::{LaunchRequest, LaunchedProcess, Launcher, SandboxLauncher};
 pub use manager::{Manager, ManagerConfig};
 pub use session::{Session, SessionId, SessionRegistry, State};
+pub use settings::{Endpoint, Settings, config_path};
 
 /// Everything that can go wrong in a session operation.
 #[derive(Debug, thiserror::Error)]

@@ -228,15 +228,13 @@ fn a_listed_destination_tunnels_bytes() {
 
     let upstream = Upstream::echo("BANNER\n");
     let port = upstream.port;
-    // The image allows the loopback host at port 443; add the real port by
-    // building the grant directly, because `allowing` fixes port 443.
-    let rules = sandbox::egress::DestinationSet::of(vec![sandbox::policy::HostPort::new(
-        "127.0.0.1",
-        port,
-    )]);
+    // The image carries the destination at the upstream's real port, which is the
+    // shape the settings file derives from an endpoint's `base_url`.
+    let image = AgentImage::new("/bin/true")
+        .allowing_destination(sandbox::policy::HostPort::new("127.0.0.1", port));
 
-    let egress = Egress::start_with_rules(
-        rules,
+    let egress = Egress::start(
+        &image,
         root.join("egress.sock"),
         &HostCapability::PrivateNetworkNamespace,
         &bus,
@@ -274,12 +272,10 @@ fn a_live_tunnel_does_not_block_the_next_connection() {
 
     let upstream = Upstream::echo("OPEN\n");
     let port = upstream.port;
-    let rules = sandbox::egress::DestinationSet::of(vec![sandbox::policy::HostPort::new(
-        "127.0.0.1",
-        port,
-    )]);
-    let egress = Egress::start_with_rules(
-        rules,
+    let image = AgentImage::new("/bin/true")
+        .allowing_destination(sandbox::policy::HostPort::new("127.0.0.1", port));
+    let egress = Egress::start(
+        &image,
         root.join("egress.sock"),
         &HostCapability::PrivateNetworkNamespace,
         &bus,
