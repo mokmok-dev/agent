@@ -226,16 +226,18 @@ bus. Neither gains a dependency on the other.
    replaces it without touching the loop.
 6. Coding agent image. The provider host on the allowlist, the workspace
    convention, and the task events. This is where the authority-socket question
-   in [lifecycle.md](./lifecycle.md#authority) becomes a requirement. Two units
+   in [lifecycle.md](./lifecycle.md#authority) becomes a requirement. Three units
    have **landed**: the operator declares the OpenAI-compatible endpoints in a
-   settings file (`$XDG_CONFIG_HOME/agent/config.toml`), and the session's egress
-   allowlist is derived from each `base_url` rather than declared beside it
-   (`daemon/src/settings.rs`); and the daemon composes a session's argv and model
-   environment from that file, so an agent image is launched with the flags that
-   name its model, its endpoint, and the variable holding its key. See
-   [agent.md](./agent.md#the-settings-and-the-egress-allowlist) and
-   [agent.md](./agent.md#the-image-at-launch). The provider client that calls that
-   endpoint, the workspace convention, and the task events remain.
+   settings file (`$XDG_CONFIG_HOME/agent/config.toml`), whose `base_url`s derive
+   the session's egress allowlist (`daemon/src/settings.rs`); the daemon composes a
+   session's argv and model environment from that file, so an agent image is
+   launched with the flags that name its model, its endpoint, and the variable
+   holding its key; and the agent drives that endpoint through the session's egress
+   proxy, in `agentd/src/openai/`. See
+   [agent.md](./agent.md#the-settings-and-the-egress-allowlist),
+   [agent.md](./agent.md#the-image-at-launch), and
+   [agent.md](./agent.md#the-client). The workspace convention and the task events
+   remain.
 
 ## Open Questions
 

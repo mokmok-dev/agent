@@ -14,6 +14,14 @@ futures-util = { version = "0.3.34", default-features = false, features = [
   "sink",
 ] }
 proptest = "1.11.0"
+# TLS for the agent's model client. `ring` is the crypto provider: it needs a C
+# compiler, which the dev shell and the crane build both have, and it stays out
+# of Kani's scope because only the `agent` crate is Kani-built.
+rustls = { version = "0.23.45", default-features = false, features = [
+  "ring",
+  "std",
+  "tls12",
+] }
 serde = { version = "1.0.228", features = ["derive"] }
 # `anyhow` is for binaries only; every library here uses `thiserror`.
 anyhow = "1.0.100"
@@ -60,6 +68,9 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
   "handshake",
 ] }
 ulid = "3.0.0"
+# Mozilla's roots, compiled into the binary. The session's policy grants no CA
+# file, so the client cannot read the system store; see `docs/session/agent.md`.
+webpki-roots = "1.0.9"
 
 [workspace.metadata.crane]
 name = "agent"
