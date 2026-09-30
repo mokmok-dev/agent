@@ -20,6 +20,7 @@ use agentd_agent::loopcore::{self, AgentConfig, Capability, Reporter};
 use agentd_agent::openai::{self, Client, Config as ModelConfig};
 use agentd_agent::shell::{ACTION as SHELL, Shell};
 use agentd_agent::task::{ACTION as TASK, Task};
+use zeroize::Zeroizing;
 
 /// The variables an HTTP client reads to find its proxy, in the order it reads
 /// them. The sandbox sets all three to the same value.
@@ -133,7 +134,8 @@ fn task(
     };
 
     // The value is read here and never logged: the report a failed call produces
-    // names the variable, not the key.
+    // names the variable, not the key. The string the environment gives back is
+    // moved into the client, which holds it as a secret that is wiped when it drops.
     let api_key = std::env::var(env_key)
         .map_err(|_| anyhow!("`{env_key}` is not set, so this agent has no key"))?;
     let mut config = ModelConfig::new(base_url.clone(), model.clone(), api_key);
@@ -149,13 +151,19 @@ fn task(
 
 /// The proxy to reach the endpoint through, from the environment.
 ///
-/// The sandbox sets all three names to the same value when it grants egress. A
-/// process with none of them has no proxy configured, which is when connecting
-/// directly is right. `NO_PROXY` is deliberately not read: it names the command's
-/// own loopback, which is never the endpoint.
+/// The sandbox sets all three names to the same value when it grants egress, and
+/// that value carries the proxy's token. A process with none of them has no proxy
+/// configured, which is when connecting directly is right. `NO_PROXY` is
+/// deliberately not read: it names the command's own loopback, which is never the
+/// endpoint.
+///
+/// The URL is wiped once it has been parsed. The environment block itself keeps its
+/// own copy, which this process cannot scrub: `std::env::remove_var` is `unsafe` in
+/// edition 2024, and this workspace denies `unsafe` everywhere.
 fn proxy() -> anyhow::Result<Option<openai::Proxy>> {
     for name in PROXY_ENV {
         if let Ok(url) = std::env::var(name) {
+            let url = Zeroizing::new(url);
             return Ok(Some(openai::Proxy::parse(&url)?));
         }
     }

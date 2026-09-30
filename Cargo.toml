@@ -68,6 +68,11 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
   "handshake",
 ] }
 ulid = "3.0.0"
+# Secrets read from the environment (a provider key, a proxy token) are held in a
+# wrapper that cannot be printed and is wiped when it drops; `zeroize` is named
+# separately for the buffers that carry a secret on their way out.
+secrecy = "0.10.3"
+zeroize = "1.9.0"
 # Mozilla's roots, compiled into the binary. The session's policy grants no CA
 # file, so the client cannot read the system store; see `docs/session/agent.md`.
 webpki-roots = "1.0.9"
