@@ -16,7 +16,9 @@
 //! owns the grammar and the application; this module owns the path policy, the
 //! caps, and the reasons the model is told.
 
+use std::fmt::Write as _;
 use std::io::Read;
+use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 
 use diffy::Patch;
@@ -37,6 +39,10 @@ const MAX_PATCH_PLAN_BYTES: usize = 8_388_608;
 const NOT_TEXT_PATCH: &str = "the diff is not a text patch this tool applies";
 /// The reason a diff that does not parse is refused.
 const NOT_UNIFIED: &str = "the diff is not a unified diff";
+/// The reason a `--- ` header with no `+++ ` line is refused.
+const FILE_HEADER_INCOMPLETE: &str = "a file header is missing its `+++` line";
+/// The reason a hunk body line that no header precedes is refused.
+const BODY_WITHOUT_HEADER: &str = "a hunk line has no header";
 
 /// What a patch will do, once every path resolved and every file applied.
 ///
@@ -115,6 +121,198 @@ impl Refused {
     }
 }
 
+/// One hunk header, parsed from `@@ -<start>[,<count>] +<start>[,<count>] @@<rest>`.
+#[derive(Debug)]
+struct HunkHeader<'a> {
+    /// The old start number, as written.
+    old_start: &'a str,
+    /// The new start number, as written.
+    new_start: &'a str,
+    /// Everything from the second `@@` on, verbatim.
+    after: &'a str,
+}
+
+impl<'a> HunkHeader<'a> {
+    /// Parse `line` as a hunk header, or `None` when it is not that shape.
+    fn parse(line: &'a str) -> Option<Self> {
+        let rest = line.strip_prefix("@@ ")?;
+        let (old_start, rest) = parse_side(rest, '-')?;
+        let rest = rest.strip_prefix(' ')?;
+        let (new_start, rest) = parse_side(rest, '+')?;
+        if !rest.starts_with(" @@") {
+            return None;
+        }
+        Some(Self {
+            old_start,
+            new_start,
+            after: rest,
+        })
+    }
+
+    /// Render this header with the counts taken from the body.
+    fn render(
+        &self,
+        old: usize,
+        new: usize,
+    ) -> String {
+        let mut out = String::with_capacity(self.old_start.len() + self.new_start.len() + 16);
+        out.push_str("@@ -");
+        out.push_str(self.old_start);
+        push_count(&mut out, old);
+        out.push_str(" +");
+        out.push_str(self.new_start);
+        push_count(&mut out, new);
+        out.push_str(self.after);
+        out
+    }
+}
+
+/// Parse one `-<start>[,<count>]` or `+<start>[,<count>]` side.
+///
+/// Returns the start as written and the rest. The count is validated but
+/// discarded: the rewrite derives it from the body.
+fn parse_side(
+    input: &str,
+    sign: char,
+) -> Option<(&str, &str)> {
+    let input = input.strip_prefix(sign)?;
+    let end = input.find(|byte: char| !byte.is_ascii_digit())?;
+    if end == 0 {
+        return None;
+    }
+    let (start, rest) = input.split_at(end);
+    let rest = match rest.strip_prefix(',') {
+        Some(digits) => {
+            let end = digits
+                .find(|byte: char| !byte.is_ascii_digit())
+                .unwrap_or(digits.len());
+            if end == 0 {
+                return None;
+            }
+            &digits[end..]
+        },
+        None => rest,
+    };
+    Some((start, rest))
+}
+
+/// Write a hunk count: `,<count>` for zero or more than one, nothing for one.
+fn push_count(
+    out: &mut String,
+    count: usize,
+) {
+    if count != 1 {
+        let _ = write!(out, ",{count}");
+    }
+}
+
+/// Whether `line` begins a hunk body line.
+const fn is_body_line(line: &str) -> bool {
+    matches!(line.as_bytes().first(), Some(b' ' | b'+' | b'-' | b'\\'))
+}
+
+/// Whether the next two lines at `rest` are a `--- `/`+++ ` header pair, which is
+/// where one section ends and the next begins.
+fn at_section_boundary<'a, I>(rest: &Peekable<I>) -> bool
+where
+    I: Iterator<Item = &'a str> + Clone,
+{
+    let mut look = rest.clone();
+    let current = look.peek().copied();
+    let _ = look.next();
+    let next = look.peek().copied();
+    current.is_some_and(|line| line.starts_with("--- "))
+        && next.is_some_and(|line| line.starts_with("+++ "))
+}
+
+/// Add one body line's contribution to each side.
+///
+/// A context line counts for both sides, a removal for the old side, an addition
+/// for the new side, and a `\ No newline at end of file` marker for neither.
+const fn count_line(
+    line: &str,
+    old: &mut usize,
+    new: &mut usize,
+) {
+    match line.as_bytes().first() {
+        Some(b' ') => {
+            *old += 1;
+            *new += 1;
+        },
+        Some(b'-') => *old += 1,
+        Some(b'+') => *new += 1,
+        _ => {},
+    }
+}
+
+/// Count and copy the body that follows a hunk header.
+///
+/// The body is the contiguous run of body lines, so a count the header wrote
+/// never bounds it and a miscount is repaired from the whole body. A trailing
+/// `\ No newline at end of file` marker counts for neither side.
+fn scan_body<'a, I>(
+    rest: &mut Peekable<I>,
+    out: &mut String,
+) -> (usize, usize)
+where
+    I: Iterator<Item = &'a str> + Clone,
+{
+    let mut old = 0;
+    let mut new = 0;
+    while let Some(line) = rest.peek().copied() {
+        if !is_body_line(line) || at_section_boundary(rest) {
+            break;
+        }
+        let _ = rest.next();
+        count_line(line, &mut old, &mut new);
+        out.push_str(line);
+    }
+    (old, new)
+}
+
+/// Rewrite every hunk header's counts from its body.
+///
+/// Every byte that is not a hunk header is copied through untouched, so the
+/// diff's content cannot change. A header that does not parse is copied through
+/// and left to `diffy`, which refuses it with its own text.
+///
+/// # Errors
+///
+/// Returns a [`Refused`] when a `--- ` header has no `+++ ` line after it, or a
+/// body line appears where no hunk header precedes it.
+fn recount(source: &str) -> Result<String, Refused> {
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source.split_inclusive('\n').peekable();
+    while let Some(line) = rest.next() {
+        if line.starts_with("@@") {
+            let mut body = String::new();
+            match HunkHeader::parse(line) {
+                Some(header) => {
+                    let (old, new) = scan_body(&mut rest, &mut body);
+                    out.push_str(&header.render(old, new));
+                },
+                // A header this cannot read is copied with its body untouched, so
+                // `diffy` reports it with its own byte offset.
+                None => out.push_str(line),
+            }
+            out.push_str(&body);
+        } else if line.starts_with("--- ") {
+            if !rest.peek().is_some_and(|next| next.starts_with("+++ ")) {
+                return Err(Refused::new(FILE_HEADER_INCOMPLETE));
+            }
+            out.push_str(line);
+            if let Some(next) = rest.next() {
+                out.push_str(next);
+            }
+        } else if is_body_line(line) {
+            return Err(Refused::new(BODY_WITHOUT_HEADER));
+        } else {
+            out.push_str(line);
+        }
+    }
+    Ok(out)
+}
+
 /// Build the plan for `source`, writing nothing.
 ///
 /// # Errors
@@ -122,7 +320,8 @@ impl Refused {
 /// Returns a [`Refused`] when the diff is empty, oversized, not text, not a
 /// unified text patch, names too many or no files, holds a path the guard
 /// refuses, a base that cannot be read under its cap, or a hunk that does not
-/// apply.
+/// apply. It also refuses a skeleton the recount cannot account for: a `--- `
+/// header with no `+++ ` line, or a body line with no header before it.
 pub fn build(
     coding: &Coding,
     source: &str,
@@ -145,9 +344,13 @@ pub fn build(
         return Err(Refused::new(NOT_TEXT_PATCH));
     }
 
+    // The counts are derived from the body before `diffy` reads them, because
+    // `diffy` treats a declared count as the hunk's extent and tolerates the
+    // rest of the body as junk. The recount also checks the skeleton.
+    let recounted = recount(source)?;
     let mut files: Vec<FileChange> = Vec::new();
     let mut plan_bytes: usize = 0;
-    for parsed in PatchSet::parse(source, ParseOptions::unidiff()) {
+    for parsed in PatchSet::parse(&recounted, ParseOptions::unidiff()) {
         let file = parsed.map_err(|error| Refused::with_error(NOT_UNIFIED, error.to_string()))?;
         if files.len() >= MAX_PATCH_FILES {
             return Err(Refused::new("the diff names too many files"));
@@ -637,18 +840,235 @@ mod tests {
     }
 
     #[test]
-    fn a_hunk_whose_counts_lie_is_refused() {
+    fn a_hunk_whose_counts_lie_is_recounted_and_patched() {
         let workspace = Workspace::new("lying");
+        workspace.write("f", "a\n");
         let coding = belt(&workspace);
-        let refused = build(&coding, "--- f\n+++ f\n@@ -1,2 +1,2 @@\n a\n").expect_err("refused");
-        assert_eq!(refused.to_string(), "the diff is not a unified diff");
-        assert!(
-            refused
-                .error()
-                .is_some_and(|error| error.contains("hunk header does not match")),
-            "diffy's parse error is carried: {:?}",
-            refused.error()
+        let plan = build(&coding, "--- f\n+++ f\n@@ -1,2 +1,2 @@\n a\n")
+            .expect("the lying count is repaired");
+        assert_eq!(plan.commit().expect("commits"), 1);
+        assert_eq!(workspace.read("f"), "a\n", "the no-op patch applied");
+    }
+
+    #[test]
+    fn a_count_off_by_one_is_recounted_and_applied() {
+        let workspace = Workspace::new("off-by-one");
+        let coding = belt(&workspace);
+
+        // The old count is one too few; the new count is exact, so it bounds.
+        workspace.write("few.txt", "one\ntwo\nthree\n");
+        let few =
+            "--- a/few.txt\n+++ b/few.txt\n@@ -1,2 +1,3 @@\n one\n-two\n-three\n+TWO\n+THREE\n";
+        build(&coding, few)
+            .expect("the too-few count applies")
+            .commit()
+            .expect("commits");
+        assert_eq!(workspace.read("few.txt"), "one\nTWO\nTHREE\n");
+
+        // The old count is one too many, so the body under-runs and is recounted.
+        workspace.write("many.txt", "one\ntwo\nthree\n");
+        let many =
+            "--- a/many.txt\n+++ b/many.txt\n@@ -1,4 +1,3 @@\n one\n-two\n-three\n+TWO\n+THREE\n";
+        build(&coding, many)
+            .expect("the too-many count applies")
+            .commit()
+            .expect("commits");
+        assert_eq!(workspace.read("many.txt"), "one\nTWO\nTHREE\n");
+    }
+
+    #[test]
+    fn omitted_counts_in_a_four_line_body_are_recounted() {
+        // `diffy` would satisfy `-1 +1` with the first line and drop the rest;
+        // an omitted count carries no bound, so the whole body is counted.
+        let workspace = Workspace::new("omitted-counts");
+        workspace.write("f.txt", "one\ntwo\nthree\n");
+        let coding = belt(&workspace);
+        let diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n one\n-two\n+TWO\n three\n";
+        build(&coding, diff)
+            .expect("the four-line body applies")
+            .commit()
+            .expect("commits");
+        assert_eq!(workspace.read("f.txt"), "one\nTWO\nthree\n");
+    }
+
+    #[test]
+    fn a_creation_with_a_wrong_added_count_creates_the_content() {
+        let workspace = Workspace::new("create-recount");
+        let coding = belt(&workspace);
+        let diff = "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+one\n+two\n";
+        build(&coding, diff)
+            .expect("the count is recounted to two")
+            .commit()
+            .expect("commits");
+        assert_eq!(workspace.read("new.txt"), "one\ntwo\n");
+    }
+
+    #[test]
+    fn a_deletion_with_a_wrong_removed_count_removes_the_file() {
+        let workspace = Workspace::new("delete-recount");
+        workspace.write("f.txt", "one\ntwo\n");
+        let coding = belt(&workspace);
+        let diff = "--- a/f.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-one\n-two\n";
+        build(&coding, diff)
+            .expect("the count is recounted to two")
+            .commit()
+            .expect("commits");
+        assert!(!workspace.path("f.txt").exists(), "the file is gone");
+    }
+
+    #[test]
+    fn two_hunks_in_one_section_are_both_recounted_and_applied() {
+        let workspace = Workspace::new("two-hunks");
+        workspace.write("f.txt", "one\ntwo\nthree\nfour\nfive\nsix\n");
+        let coding = belt(&workspace);
+        let diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,3 @@\n one\n-two\n+TWO\n three\n@@ -4,2 +4,3 @@\n four\n-five\n+FIVE\n six\n";
+        build(&coding, diff)
+            .expect("both hunks apply")
+            .commit()
+            .expect("commits");
+        assert_eq!(
+            workspace.read("f.txt"),
+            "one\nTWO\nthree\nfour\nFIVE\nsix\n"
         );
+    }
+
+    #[test]
+    fn two_sections_are_both_recounted_and_applied() {
+        let workspace = Workspace::new("two-sections");
+        workspace.write("a.txt", "one\ntwo\nthree\n");
+        workspace.write("b.txt", "x\n");
+        let coding = belt(&workspace);
+        let diff = "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,3 @@\n one\n-two\n+TWO\n three\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-x\n+y\n";
+        build(&coding, diff)
+            .expect("both sections apply")
+            .commit()
+            .expect("commits");
+        assert_eq!(workspace.read("a.txt"), "one\nTWO\nthree\n");
+        assert_eq!(workspace.read("b.txt"), "y\n");
+    }
+
+    #[test]
+    fn a_body_line_that_begins_with_dashes_is_not_a_section() {
+        // `--- gone` is a removal of `-- gone`; the next line is a context line,
+        // not the `+++ ` of a file header, so the body continues.
+        let workspace = Workspace::new("dashes");
+        workspace.write("f.txt", "before\n-- gone\nafter\n");
+        let coding = belt(&workspace);
+        let diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,2 @@\n before\n--- gone\n after\n";
+        build(&coding, diff)
+            .expect("the dashed body line applies")
+            .commit()
+            .expect("commits");
+        assert_eq!(workspace.read("f.txt"), "before\nafter\n");
+    }
+
+    #[test]
+    fn a_no_newline_marker_counts_for_neither_side() {
+        let workspace = Workspace::new("no-newline");
+        workspace.write("f.txt", "old");
+        let coding = belt(&workspace);
+        let diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n";
+        build(&coding, diff)
+            .expect("the markers count for neither side")
+            .commit()
+            .expect("commits");
+        assert_eq!(workspace.read("f.txt"), "new");
+    }
+
+    #[test]
+    fn a_stray_body_line_is_absorbed_into_the_hunk() {
+        // The body is contiguous, so the trailing `-two` is counted with the
+        // rest and the header grows to `@@ -1,4 +1,3 @@`; it is not refused.
+        let workspace = Workspace::new("stray");
+        workspace.write("f.txt", "one\ntwo\nthree\ntwo\n");
+        let coding = belt(&workspace);
+        let diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n-two\n";
+        build(&coding, diff)
+            .expect("the trailing body line is absorbed")
+            .commit()
+            .expect("commits");
+        assert_eq!(workspace.read("f.txt"), "one\nTWO\nthree\n");
+    }
+
+    #[test]
+    fn a_count_too_small_on_both_sides_is_recounted_and_patched() {
+        // `diffy` would refuse `@@ -1,2 +1,2 @@` over this three-line body;
+        // the counts are derived from the body and the hunk applies.
+        let workspace = Workspace::new("both-too-few");
+        workspace.write("f.txt", "one\ntwo\nthree\n");
+        let coding = belt(&workspace);
+        let diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n one\n two\n three\n";
+        build(&coding, diff)
+            .expect("the lying count is repaired")
+            .commit()
+            .expect("commits");
+        assert_eq!(workspace.read("f.txt"), "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn a_blank_line_inside_a_hunk_is_refused() {
+        let workspace = Workspace::new("blank-inside");
+        let coding = belt(&workspace);
+        let diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1,4 +1,4 @@\n one\n-two\n\n+TWO\n three\n";
+        refuses(&coding, diff, "a hunk line has no header");
+    }
+
+    #[test]
+    fn a_file_header_without_its_plus_line_is_refused() {
+        let workspace = Workspace::new("missing-plus");
+        let coding = belt(&workspace);
+        refuses(
+            &coding,
+            "--- a/f.txt\n@@ -1 +1 @@\n-a\n+b\n",
+            "a file header is missing its `+++` line",
+        );
+    }
+
+    #[test]
+    fn blank_and_metadata_lines_between_sections_still_apply() {
+        let workspace = Workspace::new("between-sections");
+        let coding = belt(&workspace);
+        let diff = "diff --git a/a.txt b/a.txt\nindex 111..222 100644\n--- /dev/null\n+++ b/a.txt\n@@ -0,0 +1 @@\n+a\n\nindex 333..444 100644\n--- /dev/null\n+++ b/b.txt\n@@ -0,0 +1 @@\n+b\n";
+        build(&coding, diff)
+            .expect("the filler lines are copied through")
+            .commit()
+            .expect("commits");
+        assert_eq!(workspace.read("a.txt"), "a\n");
+        assert_eq!(workspace.read("b.txt"), "b\n");
+    }
+
+    #[test]
+    fn a_section_heading_after_the_hunk_header_is_preserved() {
+        let workspace = Workspace::new("heading");
+        workspace.write("f.txt", "old\n");
+        let coding = belt(&workspace);
+        let diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@ keep this heading\n-old\n+new\n";
+        build(&coding, diff)
+            .expect("the heading is preserved")
+            .commit()
+            .expect("commits");
+        assert_eq!(workspace.read("f.txt"), "new\n");
+    }
+
+    #[test]
+    fn the_size_cap_is_checked_before_the_skeleton() {
+        // A diff that is both oversized and has a skeleton the recount would
+        // refuse is refused for its size, proving the recount runs after the cap.
+        let workspace = Workspace::new("size-first");
+        let coding = belt(&workspace);
+        let mut diff = String::from("--- a/f.txt\n--- not-a-plus-line\n");
+        diff.push_str(&" ".repeat(MAX_DIFF_BYTES));
+        assert!(diff.len() > MAX_DIFF_BYTES);
+        refuses(&coding, &diff, "the diff is larger than the limit");
+    }
+
+    #[test]
+    fn recount_rewrites_each_header_from_its_body() {
+        // One crafted input holds an omitted count, a count above one, a zero
+        // count, a section heading, and a `\ No newline` marker.
+        let input = "--- a/f.txt\n+++ b/f.txt\n@@ -10 +20,5 @@ keep this heading\n context\n-old\n+new\n\\ No newline at end of file\n@@ -1,4 +3 @@\n-a\n-b\n-c\n-d\n";
+        let expected = "--- a/f.txt\n+++ b/f.txt\n@@ -10,2 +20,2 @@ keep this heading\n context\n-old\n+new\n\\ No newline at end of file\n@@ -1,4 +3,0 @@\n-a\n-b\n-c\n-d\n";
+        assert_eq!(recount(input).expect("recounts"), expected);
     }
 
     #[test]
