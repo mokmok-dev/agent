@@ -226,22 +226,24 @@ bus. Neither gains a dependency on the other.
    replaces it without touching the loop.
 6. Coding agent image. The provider host on the allowlist, the workspace
    convention, and the task events. This is where the authority-socket question
-   in [lifecycle.md](./lifecycle.md#authority) becomes a requirement. Four units
+   in [lifecycle.md](./lifecycle.md#authority) becomes a requirement. Five units
    have **landed**: the operator declares the OpenAI-compatible endpoints in a
    settings file (`$XDG_CONFIG_HOME/agent/config.toml`), whose `base_url`s derive
    the session's egress allowlist (`daemon/src/settings.rs`); the daemon composes a
    session's argv and model environment from that file, so an agent image is
    launched with the flags that name its model, its endpoint, and the variable
    holding its key; the agent drives that endpoint through the session's egress
-   proxy, in `agentd/src/openai/`; and the coding belt lands `read`, `code_search`,
+   proxy, in `agentd/src/openai/`; the coding belt lands `read`, `code_search`,
    `patch`, and `shell` behind a `--mode` a client may switch while the session
    runs, its `patch` applying a unified diff in process with no `git` and no
-   repository (`agentd/src/coding.rs`, `agentd/src/patch.rs`). See
+   repository (`agentd/src/coding.rs`, `agentd/src/patch.rs`); and the workspace
+   convention reads the root's `AGENTS.md` once, bounded, into the system prompt
+   (`agentd/src/coding.rs`). See
    [agent.md](./agent.md#the-settings-and-the-egress-allowlist),
    [agent.md](./agent.md#the-image-at-launch),
+   [agent.md](./agent.md#the-workspace-convention),
    [agent.md](./agent.md#the-coding-belt), and
-   [agent.md](./agent.md#the-client). The workspace convention and the task events
-   remain.
+   [agent.md](./agent.md#the-client). The task events remain.
 
 ## Open Questions
 
@@ -261,3 +263,7 @@ bus. Neither gains a dependency on the other.
 - What stops two sessions from binding the same workspace root read-write at
   once? The registry can refuse a second live session on one root, or allow it
   and let the two agents race.
+- Can a session be stopped from writing the `AGENTS.md` that steers the next one?
+  The policy binds the workspace read-write, so a `readwrite` session may write
+  its own instructions and the next session reads them. A kernel-enforced
+  read-only entry over that one file is the candidate fix.

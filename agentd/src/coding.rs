@@ -22,6 +22,12 @@
 //! text, every path is resolved and every file applied into a plan before any write
 //! happens. The unified diff stays the wire format the model speaks, and a session's
 //! workspace needs no `git` and no repository.
+//!
+//! A workspace may carry `AGENTS.md` at its root, and the belt reads it once, when
+//! it is built, for the system prompt. The read is bounded and guarded the way every
+//! other read here is, and a file that is present and is not text refuses the belt,
+//! because running a workspace's work without the rules it states is worse than not
+//! running. See `docs/session/agent.md`.
 
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read};
@@ -52,6 +58,11 @@ pub const ACTION_MODE: &str = "mode";
 
 /// How long a child the toolbelt spawns may run before it is killed.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The file a workspace may carry the agent's instructions in, at its root.
+const INSTRUCTIONS: &str = "AGENTS.md";
+/// The most bytes of that file a session gives the model.
+const MAX_INSTRUCTION_BYTES: usize = 8 * 1024;
 
 /// The most lines a `read` may return.
 const MAX_READ_LINES: usize = 2_000;
@@ -143,6 +154,18 @@ pub enum Error {
     /// The workspace root could not be canonicalized as a directory.
     #[error("the workspace root could not be resolved: {0}")]
     Root(#[source] std::io::Error),
+    /// The workspace's `AGENTS.md` exists but could not be read.
+    #[error("the workspace's `AGENTS.md` could not be read: {0}")]
+    Instructions(#[source] std::io::Error),
+    /// The workspace's `AGENTS.md` does not resolve inside the workspace.
+    #[error("the workspace's `AGENTS.md` resolves outside the workspace")]
+    InstructionsOutside,
+    /// The workspace's `AGENTS.md` is not a regular file.
+    #[error("the workspace's `AGENTS.md` is not a regular file")]
+    InstructionsNotFile,
+    /// The workspace's `AGENTS.md` is not text.
+    #[error("the workspace's `AGENTS.md` is not text")]
+    InstructionsNotText,
 }
 
 /// The coding capability: `read`, `code_search`, `patch`, and `shell` over one
@@ -151,6 +174,9 @@ pub enum Error {
 pub struct Coding {
     /// The canonical workspace root every path is resolved against.
     root: PathBuf,
+    /// The system prompt section the workspace's own instructions become, read once
+    /// when the belt was built, or `None` when the workspace carries none.
+    instructions: Option<String>,
     /// The session's mode. Switchable while the session runs, so every reader goes
     /// through this one cell: the tool list, the prompt, and the gate cannot drift.
     mode: Mutex<Mode>,
@@ -161,9 +187,14 @@ pub struct Coding {
 impl Coding {
     /// A belt over `root` in `mode`.
     ///
+    /// The workspace's own instructions are read here, so a workspace whose
+    /// instructions cannot be read refuses the belt rather than starting without them.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::Root`] when `root` cannot be canonicalized as a directory.
+    /// Returns [`Error::Root`] when `root` cannot be canonicalized as a directory,
+    /// [`Error::Instructions`] when the workspace's `AGENTS.md` cannot be read, and
+    /// [`Error::InstructionsNotText`] when what it holds is not text.
     pub fn new(
         root: impl Into<PathBuf>,
         mode: Mode,
@@ -175,8 +206,12 @@ impl Coding {
                 "the workspace root is not a directory",
             )));
         }
+        // Read here rather than at the first task, so a workspace whose instructions
+        // cannot be read refuses the belt at startup, where the operator sees it.
+        let instructions = read_instructions(&root)?;
         Ok(Self {
             root,
+            instructions,
             mode: Mutex::new(mode),
             timeout: DEFAULT_TIMEOUT,
         })
@@ -226,7 +261,8 @@ impl Coding {
             .collect()
     }
 
-    /// What the agent tells the model about itself, for the currently offered set.
+    /// What the agent tells the model about itself, for the currently offered set,
+    /// with the workspace's own instructions appended when it carries any.
     #[must_use]
     pub fn system_prompt(&self) -> String {
         let mode = self.mode();
@@ -249,11 +285,15 @@ impl Coding {
                 .join(" and ");
             format!("This session may change the workspace, through {writers}.")
         };
-        format!(
+        let base = format!(
             "You are the agent for one session, working in that session's workspace. \
 You have these tools: {names}. {clause} Use them to inspect the workspace; when the \
 task is complete, reply with your answer and no tool call."
-        )
+        );
+        match &self.instructions {
+            Some(instructions) => format!("{base}\n\n{instructions}"),
+            None => base,
+        }
     }
 
     /// Whether the belt currently offers `action`.
@@ -265,6 +305,83 @@ task is complete, reply with your answer and no tool call."
         Spec::from_action(action)
             .is_some_and(|spec| offered(mode).any(|candidate| candidate == spec))
     }
+}
+
+/// Read the instructions a workspace's own `AGENTS.md` carries, as the system
+/// prompt section they become.
+///
+/// An absent file is no instructions, which is what a workspace that does not state
+/// any has. The file is resolved through the belt's own guard, so a symlink that
+/// leaves the workspace is refused here as it is for the tools, and only a regular
+/// file is read, so a device or a named pipe cannot hold the agent at startup. A file
+/// that is present and whose bytes are not text refuses the belt, because a session
+/// that cannot honour the rules its workspace states must not run.
+///
+/// # Errors
+///
+/// Returns [`Error::InstructionsOutside`] when the path does not resolve inside the
+/// workspace, [`Error::InstructionsNotFile`] when what is there is not a regular
+/// file, [`Error::Instructions`] when it cannot be read, and
+/// [`Error::InstructionsNotText`] when what it holds is not text.
+fn read_instructions(root: &Path) -> Result<Option<String>, Error> {
+    let path = resolve_under(root, Path::new(INSTRUCTIONS))
+        .map_err(|_| Error::InstructionsOutside)?
+        .0;
+    let metadata = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        // Nothing at the path is no instructions, and neither is a link that points at
+        // nothing: there is no text either way.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(Error::Instructions(error)),
+    };
+    if !metadata.is_file() {
+        return Err(Error::InstructionsNotFile);
+    }
+    // The window is one byte wider than the cap, so a file of exactly the cap is not
+    // mistaken for one over it, and the read is bounded while it is read.
+    let file = std::fs::File::open(&path).map_err(Error::Instructions)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_INSTRUCTION_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(Error::Instructions)?;
+    let window = &bytes[..MAX_INSTRUCTION_BYTES.min(bytes.len())];
+    let text = match std::str::from_utf8(window) {
+        Ok(text) => text,
+        // A character the window ends in the middle of is the cap's doing, and the
+        // bytes it split are dropped with the rest. Anything else that is not text is
+        // the file's own, and refuses the belt. What is kept is text by definition, but
+        // it is checked rather than assumed.
+        Err(error) if error.error_len().is_none() && window.len() < bytes.len() => {
+            std::str::from_utf8(&window[..error.valid_up_to()])
+                .map_err(|_| Error::InstructionsNotText)?
+        },
+        Err(_) => return Err(Error::InstructionsNotText),
+    };
+    // A NUL is what `read` calls not text, and a file encoded for something other than
+    // a model to read is worse than no instructions at all.
+    if text.contains('\0') {
+        return Err(Error::InstructionsNotText);
+    }
+    // An empty file states nothing, the same as an absent one.
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    // The cut is stated, so a model does not read a partial file as the whole of its
+    // instructions, and the operator sees in the log that theirs was cut.
+    let note = if bytes.len() > MAX_INSTRUCTION_BYTES {
+        tracing::warn!(
+            file = INSTRUCTIONS,
+            "the workspace instructions are longer than the {MAX_INSTRUCTION_BYTES} bytes a session reads"
+        );
+        format!(
+            "\n\n(That file is longer than the {MAX_INSTRUCTION_BYTES} bytes a session reads, so its remainder is not shown.)"
+        )
+    } else {
+        String::new()
+    };
+    Ok(Some(format!(
+        "The workspace's `{INSTRUCTIONS}` gives these instructions for work in it:\n{text}{note}"
+    )))
 }
 
 /// Answer the `mode` action: `detail` is absent, `null`, or `{}` to report the
@@ -1406,6 +1523,237 @@ mod tests {
     }
 
     #[test]
+    fn the_workspace_instructions_reach_the_system_prompt() {
+        let workspace = Workspace::new("instructions");
+        workspace.write(INSTRUCTIONS, "Run the tests before you answer.\n");
+        let prompt = belt(&workspace, Mode::ReadWrite).system_prompt();
+        assert!(
+            prompt.contains("Run the tests before you answer."),
+            "the workspace's instructions are in the prompt: {prompt}"
+        );
+        assert!(
+            prompt.contains(INSTRUCTIONS),
+            "the prompt names the file they came from: {prompt}"
+        );
+        assert!(
+            !prompt.contains("remainder is not shown"),
+            "a file under the cap is not marked as cut: {prompt}"
+        );
+    }
+
+    #[test]
+    fn an_absent_or_empty_instruction_file_leaves_the_prompt_alone() {
+        let absent = Workspace::new("instructions-absent");
+        let empty = Workspace::new("instructions-empty");
+        empty.write(INSTRUCTIONS, "\n  \n");
+        for coding in [
+            belt(&absent, Mode::ReadWrite),
+            belt(&empty, Mode::ReadWrite),
+        ] {
+            let prompt = coding.system_prompt();
+            assert!(
+                !prompt.contains(INSTRUCTIONS),
+                "no instruction file is named: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_instructions_are_read_once_when_the_belt_is_built() {
+        let workspace = Workspace::new("instructions-once");
+        workspace.write(INSTRUCTIONS, "The first rule.\n");
+        let coding = belt(&workspace, Mode::ReadWrite);
+        workspace.write(INSTRUCTIONS, "The second rule.\n");
+        let prompt = coding.system_prompt();
+        assert!(prompt.contains("The first rule."), "prompt was: {prompt}");
+        assert!(
+            !prompt.contains("The second rule."),
+            "a rewrite of the file does not reach a live session: {prompt}"
+        );
+    }
+
+    #[test]
+    fn an_instruction_file_of_exactly_the_cap_is_complete_and_one_byte_more_is_cut() {
+        let complete = Workspace::new("instructions-cap");
+        complete.write(INSTRUCTIONS, &"a".repeat(MAX_INSTRUCTION_BYTES));
+        let prompt = belt(&complete, Mode::ReadWrite).system_prompt();
+        assert!(
+            prompt.contains(&"a".repeat(MAX_INSTRUCTION_BYTES)),
+            "a file of exactly the cap is kept whole"
+        );
+        assert!(
+            !prompt.contains("remainder is not shown"),
+            "and is not marked as cut: {prompt}"
+        );
+
+        let over = Workspace::new("instructions-over-cap");
+        over.write(INSTRUCTIONS, &"a".repeat(MAX_INSTRUCTION_BYTES + 1));
+        let prompt = belt(&over, Mode::ReadWrite).system_prompt();
+        assert!(
+            prompt.contains(&"a".repeat(MAX_INSTRUCTION_BYTES)),
+            "the cap is kept"
+        );
+        assert!(
+            prompt.contains("remainder is not shown"),
+            "a file over the cap is marked as cut: {prompt}"
+        );
+    }
+
+    #[test]
+    fn a_cut_lands_on_a_character_boundary() {
+        let workspace = Workspace::new("instructions-boundary");
+        let mut content = "a".repeat(MAX_INSTRUCTION_BYTES - 1);
+        content.push('é');
+        workspace.write(INSTRUCTIONS, &content);
+        let prompt = belt(&workspace, Mode::ReadWrite).system_prompt();
+        assert!(
+            !prompt.contains('é'),
+            "the character the cap split is dropped rather than halved: {prompt}"
+        );
+        assert!(
+            prompt.contains("remainder is not shown"),
+            "the file is marked as cut: {prompt}"
+        );
+    }
+
+    #[test]
+    fn an_instruction_file_that_is_not_a_regular_file_refuses_the_belt() {
+        let workspace = Workspace::new("instructions-unreadable");
+        std::fs::create_dir(workspace.0.join(INSTRUCTIONS)).expect("creates the directory");
+        let error = Coding::new(&workspace.0, Mode::ReadWrite).expect_err("the belt is refused");
+        assert!(
+            matches!(error, Error::InstructionsNotFile),
+            "a directory in place of the instructions refuses the belt, got: {error}"
+        );
+    }
+
+    #[test]
+    fn an_instruction_file_that_leaves_the_workspace_refuses_the_belt() {
+        let workspace = Workspace::new("instructions-symlink");
+        let outside = std::env::temp_dir().join(format!(
+            "agent-coding-instructions-outside-{}",
+            std::process::id()
+        ));
+        std::fs::write(&outside, "Rules from outside the workspace.\n").expect("writes outside");
+        std::os::unix::fs::symlink(&outside, workspace.0.join(INSTRUCTIONS)).expect("links it");
+        let error = Coding::new(&workspace.0, Mode::ReadWrite).expect_err("the belt is refused");
+        assert!(
+            matches!(error, Error::InstructionsOutside),
+            "a link out of the workspace refuses the belt, got: {error}"
+        );
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn an_instruction_file_that_is_not_text_refuses_the_belt() {
+        let workspace = Workspace::new("instructions-binary");
+        workspace.write_bytes(INSTRUCTIONS, &[0xff, 0xfe, 0x00, 0x01]);
+        let error = Coding::new(&workspace.0, Mode::ReadWrite).expect_err("the belt is refused");
+        assert!(
+            matches!(error, Error::InstructionsNotText),
+            "a file that is not text refuses the belt, got: {error}"
+        );
+    }
+
+    #[test]
+    fn an_instruction_file_with_a_nul_refuses_the_belt() {
+        let workspace = Workspace::new("instructions-nul");
+        workspace.write_bytes(INSTRUCTIONS, b"rule\0tail");
+        let error = Coding::new(&workspace.0, Mode::ReadWrite).expect_err("the belt is refused");
+        assert!(
+            matches!(error, Error::InstructionsNotText),
+            "a NUL is what `read` calls not text, got: {error}"
+        );
+    }
+
+    #[test]
+    fn the_bytes_the_cap_cut_off_are_not_judged() {
+        // What the window holds is what the model gets, so a sequence that is invalid
+        // beyond the cap is cut away with the rest rather than refusing the file.
+        let workspace = Workspace::new("instructions-tail");
+        let mut content = vec![b'a'; MAX_INSTRUCTION_BYTES - 1];
+        content.extend_from_slice(&[0xC3, 0x28]);
+        workspace.write_bytes(INSTRUCTIONS, &content);
+        let prompt = belt(&workspace, Mode::ReadWrite).system_prompt();
+        assert!(
+            prompt.contains(&"a".repeat(MAX_INSTRUCTION_BYTES - 1)),
+            "the text before the split is kept"
+        );
+        assert!(
+            prompt.contains("remainder is not shown"),
+            "and the cut is still stated: {prompt}"
+        );
+    }
+
+    #[test]
+    fn an_instruction_file_that_ends_mid_character_refuses_the_belt() {
+        let workspace = Workspace::new("instructions-partial");
+        // A whole file whose last character is incomplete: nothing cut it, so the file
+        // itself is not text.
+        let mut content = b"rule".to_vec();
+        content.push(0xC3);
+        workspace.write_bytes(INSTRUCTIONS, &content);
+        let error = Coding::new(&workspace.0, Mode::ReadWrite).expect_err("the belt is refused");
+        assert!(
+            matches!(error, Error::InstructionsNotText),
+            "a file that ends in half a character is not text, got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_cut_does_not_excuse_text_that_is_not_text() {
+        let workspace = Workspace::new("instructions-binary-over-cap");
+        let mut content = vec![0xff];
+        content.extend_from_slice("a".repeat(MAX_INSTRUCTION_BYTES).as_bytes());
+        workspace.write_bytes(INSTRUCTIONS, &content);
+        let error = Coding::new(&workspace.0, Mode::ReadWrite).expect_err("the belt is refused");
+        assert!(
+            matches!(error, Error::InstructionsNotText),
+            "only the character the cap split is forgiven, got: {error}"
+        );
+    }
+
+    #[test]
+    fn an_instruction_file_that_links_inside_the_workspace_is_read() {
+        let workspace = Workspace::new("instructions-symlink-inside");
+        workspace.write("rules.md", "Rules from the workspace.\n");
+        std::os::unix::fs::symlink("rules.md", workspace.0.join(INSTRUCTIONS)).expect("links it");
+        let prompt = belt(&workspace, Mode::ReadWrite).system_prompt();
+        assert!(
+            prompt.contains("Rules from the workspace."),
+            "a link inside the workspace is instructions like any other: {prompt}"
+        );
+    }
+
+    #[test]
+    fn a_nested_instruction_file_is_not_read() {
+        let workspace = Workspace::new("instructions-nested");
+        workspace.write("sub/AGENTS.md", "Rules the agent does not read.\n");
+        let prompt = belt(&workspace, Mode::ReadWrite).system_prompt();
+        assert!(
+            !prompt.contains("Rules the agent does not read."),
+            "only the root's file is instructions: {prompt}"
+        );
+    }
+
+    #[test]
+    fn the_instructions_outlive_a_mode_switch() {
+        let workspace = Workspace::new("instructions-mode");
+        workspace.write(INSTRUCTIONS, "Always run the tests.\n");
+        let coding = belt(&workspace, Mode::ReadWrite);
+        assert_eq!(coding.set_mode(Mode::ReadOnly), Mode::ReadWrite);
+        let prompt = coding.system_prompt();
+        assert!(
+            prompt.contains("Always run the tests."),
+            "the instructions stay: {prompt}"
+        );
+        assert!(
+            prompt.contains("read-only"),
+            "and the mode clause follows them: {prompt}"
+        );
+    }
+
+    #[test]
     fn the_mode_query_reports_the_mode_without_changing_it() {
         let workspace = Workspace::new("mode-query");
         let coding = belt(&workspace, Mode::ReadWrite);
@@ -2176,6 +2524,8 @@ mod tests {
     #[test]
     fn the_bounds_are_pinned() {
         assert_eq!(DEFAULT_TIMEOUT, Duration::from_secs(300));
+        assert_eq!(INSTRUCTIONS, "AGENTS.md");
+        assert_eq!(MAX_INSTRUCTION_BYTES, 8 * 1024);
         assert_eq!(MAX_READ_LINES, 2_000);
         assert_eq!(MAX_READ_BYTES, 8 * 1024);
         assert_eq!(MAX_READ_LINE_BYTES, 4 * 1024);
