@@ -1,10 +1,22 @@
 //! The in-process unified-diff applier behind the `patch` action.
 //!
-//! [`build`] parses the diff with `diffy`, resolves every path through
-//! `coding`'s guard, reads each base under a byte cap, and applies every hunk,
-//! holding the whole result as a [`Plan`] before anything is written.
-//! [`Plan::commit`] then writes it. No refusal can follow a write, and no write
-//! can follow a refusal.
+//! [`build`] recounts the diff's hunk counts, parses it with `diffy`, resolves
+//! every path through `coding`'s guard, reads each base under a byte cap, and
+//! applies every hunk, holding the whole result as a [`Plan`] before anything is
+//! written. [`Plan::commit`] then writes it. No refusal can follow a write, and no
+//! write can follow a refusal.
+//!
+//! The counts and the skeleton are this module's, because a model cannot count
+//! hunk lines and `diffy` treats a declared count as the hunk's extent: a header
+//! that undercounts its body makes it apply a no-op and report success. `recount`
+//! derives every count from the hunk's contiguous body and refuses a skeleton it
+//! cannot account for. `diffy` owns the hunk bodies and the application.
+//!
+//! One guess is unavoidable and worth naming. A hunk body containing a line that
+//! starts `--- ` immediately followed by one that starts `+++ ` is read as the
+//! next section's header pair, because a contiguous body cannot otherwise be told
+//! from a section. The pair's paths are then resolved like any other, so a diff
+//! that did this has to name files that already exist to be misread.
 //!
 //! All-or-nothing holds in the strong sense only until `commit` starts: a
 //! `commit` that fails part-way (an OS error on the third file) can leave the
@@ -12,9 +24,7 @@
 //! rolled back.
 //!
 //! The unified diff stays the wire format the model speaks, and the applier is in
-//! process, so a session's workspace needs no `git` and no repository. `diffy`
-//! owns the grammar and the application; this module owns the path policy, the
-//! caps, and the reasons the model is told.
+//! process, so a session's workspace needs no `git` and no repository.
 
 use std::fmt::Write as _;
 use std::io::Read;
