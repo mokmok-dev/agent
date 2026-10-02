@@ -193,13 +193,23 @@ replays it from the log and converges on the same mode.
 `patch` takes `{"diff": "..."}`, a unified diff as `git diff` writes one, and
 applies it in process. No `git` program and no repository is involved, so a
 session's workspace need not be a checkout. The unified diff is only the format
-the model and the agent agree on; `diffy` parses it and applies its hunks.
+the model and the agent agree on; this crate reads its skeleton and derives each
+hunk's counts, and `diffy` applies the hunks.
 
-The parse is the syntax check. It refuses a diff whose hunk header does not match
-its hunks, a diff that is not a unified diff, and a binary patch, each with a terse
-reason the model is told and, where the library adds evidence, the library's own
-text beside it. Compiling the patched file would need a toolchain per language and
-a policy for files that do not parse, and a session has no toolchain.
+The counts are read from the body, the way `git apply --recount` does. A model
+cannot count hunk lines, and `diffy` takes a declared count as the hunk's extent,
+so a header that undercounts its body makes it ignore the rest and report success.
+A probe on this host showed exactly that. The recount writes every header's counts
+from the hunk's own contiguous body and changes nothing else, not one content byte
+and not a start number, because `diffy` finds a hunk by its context.
+
+The same walk refuses a skeleton it cannot account for, a `--- ` header with no
+`+++ ` line and a body line with no header before it, so a mistyped diff fails
+loudly instead of half-applying. `diffy` then parses the recounted text and applies
+its hunks, refusing a binary patch and a hunk whose context does not match, each
+with a terse reason the model is told and, where the library adds evidence, the
+library's own text beside it. Compiling the patched file would need a toolchain per
+language and a policy for files that do not parse, and a session has no toolchain.
 
 Path safety is the belt's own rule. `diffy` does not resolve paths, and no external
 program checks them here, so the belt resolves every path the diff names against
