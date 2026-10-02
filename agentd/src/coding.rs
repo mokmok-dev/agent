@@ -738,17 +738,18 @@ fn search_file(
         ctx.truncated = true;
         return;
     }
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return;
+    // A file too large to hold whole, one that is not a regular file, and one that
+    // cannot be opened are left out together and counted together: a half-searched
+    // file would report a match count that is not the truth, and one increment is one
+    // behaviour to test.
+    let worth_reading = std::fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= MAX_SEARCH_FILE_BYTES as u64);
+    let file = if worth_reading {
+        std::fs::File::open(path).ok()
+    } else {
+        None
     };
-    if !metadata.is_file() {
-        return;
-    }
-    if metadata.len() > MAX_SEARCH_FILE_BYTES as u64 {
-        ctx.skipped += 1;
-        return;
-    }
-    let Ok(file) = std::fs::File::open(path) else {
+    let Some(file) = file else {
         ctx.skipped += 1;
         return;
     };
@@ -1620,6 +1621,7 @@ mod tests {
         assert_eq!(escaped_len("\n"), 2);
         assert_eq!(escaped_len("\""), 2);
         assert_eq!(escaped_len("\u{1f}"), 6);
+        assert_eq!(escaped_len(" "), 1, "a space is not a control character");
     }
 
     #[test]
@@ -1687,6 +1689,12 @@ mod tests {
             json!({"path": "f.txt", "line_count": MAX_READ_LINES}),
         );
         assert_eq!(output.detail["truncated"], true);
+        let returned = output.detail["lines"].as_u64().expect("a count");
+        assert_eq!(
+            output.detail["next_line"],
+            json!(returned + 1),
+            "the window resumes at the line after the last one returned"
+        );
         let serialized = serde_json::to_string(&output.detail).expect("serializes");
         assert!(
             serialized.len() <= MAX_READ_BYTES,
@@ -1859,6 +1867,29 @@ mod tests {
     }
 
     #[test]
+    fn the_match_text_cap_stops_a_match_that_would_pass_it() {
+        // The report cap keeps the last match that fits and refuses the one after it,
+        // so a check that only stops when both of its bounds are reached keeps it.
+        let workspace = Workspace::new("search-text-over");
+        let mut body = String::new();
+        for _ in 0..40 {
+            body.push_str(&"x".repeat(MAX_SEARCH_LINE_BYTES));
+            body.push('\n');
+        }
+        body.push_str(&"x".repeat(300));
+        body.push('\n');
+        workspace.write("f.txt", &body);
+        let coding = belt(&workspace, Mode::ReadOnly);
+        let output = act(&coding, ACTION_CODE_SEARCH, json!({"pattern": "x"}));
+        assert_eq!(
+            output.detail["matches"].as_array().expect("an array").len(),
+            40,
+            "the match that would pass the text cap is refused"
+        );
+        assert_eq!(output.detail["truncated"], true);
+    }
+
+    #[test]
     fn a_search_deeper_than_the_depth_cap_is_marked_and_the_shallower_one_is_found() {
         // The walk descends to the cap and stops there: a match at the cap is found,
         // a match one level below it is not, and the result says it was cut short.
@@ -1892,6 +1923,25 @@ mod tests {
         let output = act(&coding, ACTION_CODE_SEARCH, json!({"pattern": "x"}));
         assert_eq!(output.detail["skipped"], 0, "the cap itself is searched");
         assert_eq!(output.detail["files"], 1);
+    }
+
+    #[test]
+    fn the_walk_stops_at_the_entry_cap_and_marks_it() {
+        // The entry cap is what bounds a walk that never matches. Reaching it is the
+        // only way to tell a counted walk from an uncounted one, which is why this
+        // fixture is the largest in the suite.
+        let workspace = Workspace::new("search-entry-cap");
+        for index in 0..=MAX_SEARCH_FILES {
+            workspace.write(&format!("f{index:05}.txt"), "");
+        }
+        let coding = belt(&workspace, Mode::ReadOnly);
+        let output = act(&coding, ACTION_CODE_SEARCH, json!({"pattern": "needle"}));
+        assert_eq!(
+            output.detail["files"],
+            json!(MAX_SEARCH_FILES - 1),
+            "the walk stops at the cap, before the file it would open next"
+        );
+        assert_eq!(output.detail["truncated"], true);
     }
 
     #[test]

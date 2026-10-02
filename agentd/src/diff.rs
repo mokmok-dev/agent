@@ -106,43 +106,42 @@ pub fn parse(diff: &str) -> Result<Parsed, Error> {
         lines.pop();
     }
 
+    // The walk consumes one line per iteration, and a hunk consumes its own body
+    // from the same iterator, so no branch has an index of its own to keep straight.
     let mut raw: Vec<File> = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i];
+    let mut rest = lines.iter().copied().peekable();
+    while let Some(line) = rest.next() {
         if let Some(old_raw) = line.strip_prefix("--- ") {
             if old_raw.starts_with('"') {
                 return Err(Error(NOT_TEXT_PATCH));
             }
             let old = header_path(old_raw);
-            i += 1;
 
-            let Some(new_line) = lines.get(i) else {
-                return Err(Error("a file header is missing its `+++` line"));
-            };
-            let Some(new_raw) = new_line.strip_prefix("+++ ") else {
+            let Some(new_raw) = rest.next().and_then(|line| line.strip_prefix("+++ ")) else {
                 return Err(Error("a file header is missing its `+++` line"));
             };
             if new_raw.starts_with('"') {
                 return Err(Error(NOT_TEXT_PATCH));
             }
             let new = header_path(new_raw);
-            i += 1;
 
             if old.is_none() && new.is_none() {
                 return Err(Error("a file header names no file"));
             }
 
             let mut hunks = 0_usize;
-            while lines.get(i).is_some_and(|line| line.starts_with("@@ ")) {
-                let (old_count, new_count) = parse_hunk(lines[i])?;
-                i += 1;
-                i = consume_hunk(&lines, i, old_count, new_count)?;
+            while let Some(header) = rest.peek().copied() {
+                if !header.starts_with("@@ ") {
+                    break;
+                }
+                let _ = rest.next();
+                let (old_count, new_count) = parse_hunk(header)?;
+                consume_hunk(&mut rest, old_count, new_count)?;
                 hunks += 1;
 
                 // The counts were satisfied; a body line here means the header
                 // undercounted rather than that the hunk ended.
-                if let Some(follow) = lines.get(i)
+                if let Some(follow) = rest.peek().copied()
                     && !follow.starts_with("--- ")
                     && matches!(follow.as_bytes().first(), Some(b' ' | b'-' | b'+'))
                 {
@@ -156,11 +155,9 @@ pub fn parse(diff: &str) -> Result<Parsed, Error> {
                 return Err(Error("the diff names too many files"));
             }
             raw.push(File { old, new });
-        } else if METADATA.iter().any(|prefix| line.starts_with(prefix)) {
-            i += 1;
         } else if RENAME.iter().any(|prefix| line.starts_with(prefix)) {
             return Err(Error(NOT_TEXT_PATCH));
-        } else {
+        } else if !METADATA.iter().any(|prefix| line.starts_with(prefix)) {
             return Err(Error("the diff is not a unified diff"));
         }
     }
@@ -209,18 +206,19 @@ fn count_of(spec: &str) -> Result<u64, Error> {
     count.parse::<u64>().map_err(|_| Error(MALFORMED))
 }
 
-/// Consume exactly `old_count` and `new_count` body lines from `lines`, starting
-/// at `start`, and return the index just past them.
-fn consume_hunk(
-    lines: &[&str],
-    mut i: usize,
+/// Consume exactly `old_count` and `new_count` body lines from `rest`.
+fn consume_hunk<'a, I>(
+    rest: &mut std::iter::Peekable<I>,
     old_count: u64,
     new_count: u64,
-) -> Result<usize, Error> {
+) -> Result<(), Error>
+where
+    I: Iterator<Item = &'a str>,
+{
     let mut old_left = old_count;
     let mut new_left = new_count;
     while old_left > 0 || new_left > 0 {
-        let Some(body) = lines.get(i) else {
+        let Some(body) = rest.next() else {
             return Err(Error(MISMATCH));
         };
         match body.as_bytes().first().copied() {
@@ -236,17 +234,16 @@ fn consume_hunk(
             Some(b' ' | b'-' | b'+') => return Err(Error(MISMATCH)),
             _ => return Err(Error(NO_PREFIX)),
         }
-        i += 1;
     }
     // A `\ No newline at end of file` marker names the line before it, so one
     // may trail the hunk after its counts are already satisfied.
-    while lines
-        .get(i)
+    while rest
+        .peek()
         .is_some_and(|line| line.as_bytes().first() == Some(&b'\\'))
     {
-        i += 1;
+        let _ = rest.next();
     }
-    Ok(i)
+    Ok(())
 }
 
 /// The one strip level that fits every section, or a refusal when the sections
