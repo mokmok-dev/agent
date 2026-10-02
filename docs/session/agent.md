@@ -387,6 +387,45 @@ deployment's settings rather than to a session's identity, and the daemon's poli
 binds the workspace read-write today, so a session starts `readwrite` and a client
 may switch it while the session runs.
 
+## The Workspace Convention
+
+A session acts on one workspace: the root the daemon binds read-write and passes to
+the agent as `--workdir`. The convention for that root is small, and it exists so a
+project can state its own rules to the agent without the agent deciding them for
+itself.
+
+- The root is the only tree the agent reads and writes, and it is the program's
+  working directory. Nothing else about it is special: the agent needs no `git`, and
+  a session's workspace need not be a repository.
+- A workspace may carry **`AGENTS.md`** at its root, and the agent reads it once, when
+  the session's belt is built, for the model's system prompt. The file is the
+  project's own channel because a project documents its rules in its repository,
+  while the operator's settings name the machines a session may reach.
+- Only the root's file is read. A nested `AGENTS.md` is a file like any other, because
+  reading them all would need a search order, a merge rule, and an unbounded walk.
+- The read is bounded **while it is read**, at 8 KiB, and the path goes through the
+  same guard the belt's tools use: a link that leaves the workspace is refused, and
+  only a regular file is opened, so a directory or a named pipe cannot hold the agent
+  at startup where it waits on a read.
+- A longer file is cut on a character boundary and the cut is stated in the prompt, so
+  a model does not read a partial file as the whole of its instructions; the
+  operator's log says the same thing. What the window holds is what must be text, so
+  bytes the cap cut off are not judged.
+- An absent file states nothing, and neither does an empty one. A file that is present
+  and is not text **refuses** the belt, and the session does not run: a session that
+  cannot honour the rules its workspace states is worse than one that does not start.
+  Text is what `read` calls text, UTF-8 that holds no NUL, and the one character the
+  cap split in half is the cap's doing rather than the file's.
+- The instructions are read once, at startup, so they are fixed for the session's
+  lifetime the way its policy is. A mode switch does not re-read them, and nothing
+  re-reads them between tasks.
+
+The last point is a contract rather than a boundary. The policy binds the workspace
+read-write, so a session in `readwrite` may write its own instruction file and the
+next session would read what this one wrote. A kernel-enforced read-only entry over
+that one file is the candidate fix, and the question is open in
+[README.md](./README.md#open-questions).
+
 ## The Output Contract
 
 An agent publishes events. The contract names the types, so a consumer reads the
