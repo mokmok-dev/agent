@@ -698,3 +698,279 @@ fn an_agent_whose_key_variable_is_unset_does_not_start() {
         "stderr names the variable: {stderr}"
     );
 }
+
+/// Whether `event` is an output for `session` of `kind` about `action`.
+fn is_output_for(
+    event: &CloudEvent,
+    session: &str,
+    kind: &str,
+    action: &str,
+) -> bool {
+    is_output(event, session, kind)
+        && event
+            .data
+            .as_ref()
+            .is_some_and(|data| data["action"] == json!(action))
+}
+
+#[test]
+fn an_agent_reads_a_file_with_the_read_action() {
+    let server = BusServer::start("read");
+    let observer = server.client();
+    let (handler, seen) = recorder();
+    observer.subscribe(0, handler).expect("subscribes");
+    let workspace = Workspace::new("read");
+    std::fs::write(workspace.0.join("f.txt"), "hello from a file\n").expect("writes the file");
+
+    let client = server.client();
+    client
+        .publish(incoming(
+            "agent.session.command",
+            "s-r",
+            json!({"action": "read", "detail": {"path": "f.txt"}}),
+        ))
+        .expect("publishes the command");
+
+    let _agent = Agent::start(&server, "s-r", &workspace.0, 0);
+
+    let output = await_event(&seen, "the read's output", |event| {
+        is_output_for(event, "s-r", "done", "read")
+    });
+    assert_eq!(output.data.as_ref().expect("data")["kind"], "done");
+    assert_eq!(
+        output.data.as_ref().expect("data")["detail"]["content"],
+        "hello from a file\n",
+        "the file's content is returned"
+    );
+}
+
+#[test]
+fn an_agent_finds_a_line_with_code_search() {
+    let server = BusServer::start("search");
+    let observer = server.client();
+    let (handler, seen) = recorder();
+    observer.subscribe(0, handler).expect("subscribes");
+    let workspace = Workspace::new("search");
+    std::fs::write(workspace.0.join("f.txt"), "alpha\nneedle here\nbeta\n")
+        .expect("writes the file");
+
+    let client = server.client();
+    client
+        .publish(incoming(
+            "agent.session.command",
+            "s-cs",
+            json!({"action": "code_search", "detail": {"pattern": "needle"}}),
+        ))
+        .expect("publishes the command");
+
+    let _agent = Agent::start(&server, "s-cs", &workspace.0, 0);
+
+    let output = await_event(&seen, "the search's output", |event| {
+        is_output_for(event, "s-cs", "done", "code_search")
+    });
+    let detail = &output.data.as_ref().expect("data")["detail"];
+    assert_eq!(detail["matches"][0]["path"], "f.txt");
+    assert_eq!(detail["matches"][0]["line"], 2);
+    assert_eq!(detail["matches"][0]["text"], "needle here");
+}
+
+#[test]
+fn an_agent_applies_a_patch_without_git() {
+    // The applier is in process, so no `--git` flag is passed and the workspace is
+    // not a repository.
+    let server = BusServer::start("patch");
+    let observer = server.client();
+    let (handler, seen) = recorder();
+    observer.subscribe(0, handler).expect("subscribes");
+    let workspace = Workspace::new("patch");
+    std::fs::write(workspace.0.join("f.txt"), "hello\n").expect("writes the file");
+
+    let client = server.client();
+    client
+        .publish(incoming(
+            "agent.session.command",
+            "s-pa",
+            json!({
+                "action": "patch",
+                "detail": {
+                    "diff": "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-hello\n+world\n",
+                },
+            }),
+        ))
+        .expect("publishes the command");
+
+    let _agent = Agent::start(&server, "s-pa", &workspace.0, 0);
+
+    let output = await_event(&seen, "the patch's output", |event| {
+        is_output_for(event, "s-pa", "done", "patch")
+    });
+    assert_eq!(
+        output.data.as_ref().expect("data")["detail"]["files"],
+        json!(["f.txt"])
+    );
+    assert_eq!(
+        output.data.as_ref().expect("data")["detail"]["files_changed"],
+        1
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.0.join("f.txt")).expect("the file is on the host"),
+        "world\n",
+        "the patch changed the file on disk"
+    );
+}
+
+#[test]
+fn a_mode_command_switches_to_readonly_and_gates_the_writers() {
+    // A mode switch lands between commands: the loop is synchronous. The patch and
+    // the shell are then refused with the mode named, while a read still answers.
+    let server = BusServer::start("mode");
+    let observer = server.client();
+    let (handler, seen) = recorder();
+    observer.subscribe(0, handler).expect("subscribes");
+    let workspace = Workspace::new("mode");
+    std::fs::write(workspace.0.join("f.txt"), "hello\n").expect("writes the file");
+
+    let client = server.client();
+    for command in [
+        json!({"action": "mode", "detail": {"mode": "readonly"}}),
+        json!({
+            "action": "patch",
+            "detail": {"diff": "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-hello\n+world\n"},
+        }),
+        json!({"action": "shell", "detail": {"argv": ["/bin/sh", "-c", "echo hi"]}}),
+        json!({"action": "read", "detail": {"path": "f.txt"}}),
+        json!({"action": "mode", "detail": null}),
+        json!({"action": "mode", "detail": {"mode": "readwrite"}}),
+        json!({
+            "action": "patch",
+            "detail": {"diff": "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-hello\n+world\n"},
+        }),
+    ] {
+        client
+            .publish(incoming("agent.session.command", "s-md", command))
+            .expect("publishes a command");
+    }
+
+    let _agent = Agent::start(&server, "s-md", &workspace.0, 0);
+
+    let switched = await_event(&seen, "the switch's output", |event| {
+        is_output_for(event, "s-md", "done", "mode")
+    });
+    assert_eq!(
+        switched.data.as_ref().expect("data")["detail"],
+        json!({"mode": "readonly", "changed": true})
+    );
+
+    let patch = await_event(&seen, "the patch refusal", |event| {
+        is_output_for(event, "s-md", "error", "patch")
+    });
+    assert_eq!(
+        patch.data.as_ref().expect("data")["detail"]["reason"],
+        "`patch` is not available in readonly mode"
+    );
+
+    let shell = await_event(&seen, "the shell refusal", |event| {
+        is_output_for(event, "s-md", "error", "shell")
+    });
+    assert_eq!(
+        shell.data.as_ref().expect("data")["detail"]["reason"],
+        "`shell` is not available in readonly mode"
+    );
+
+    let read = await_event(&seen, "the read's output", |event| {
+        is_output_for(event, "s-md", "done", "read")
+    });
+    assert_eq!(
+        read.data.as_ref().expect("data")["detail"]["content"],
+        "hello\n",
+        "a read still answers in readonly mode"
+    );
+
+    let query = await_event(&seen, "the mode query's output", |event| {
+        is_output_for(event, "s-md", "done", "mode")
+            && event.data.as_ref().expect("data")["detail"]["changed"] == json!(false)
+    });
+    assert_eq!(
+        query.data.as_ref().expect("data")["detail"]["mode"],
+        json!("readonly"),
+        "an absent detail reports the mode without changing it"
+    );
+
+    let applied = await_event(&seen, "the patch after the switch back", |event| {
+        is_output_for(event, "s-md", "done", "patch")
+    });
+    assert_eq!(
+        applied.data.as_ref().expect("data")["detail"]["files_changed"],
+        1,
+        "a switch back to readwrite offers `patch` again"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.0.join("f.txt")).expect("the file is on the host"),
+        "world\n",
+        "the second patch landed"
+    );
+}
+
+#[test]
+fn a_readonly_agent_refuses_shell_and_patch_but_reads() {
+    let server = BusServer::start("readonly");
+    let observer = server.client();
+    let (handler, seen) = recorder();
+    observer.subscribe(0, handler).expect("subscribes");
+    let workspace = Workspace::new("readonly");
+    std::fs::write(workspace.0.join("f.txt"), "hello\n").expect("writes the file");
+
+    let client = server.client();
+    for command in [
+        json!({"action": "shell", "detail": {"argv": ["/bin/sh", "-c", "echo hi"]}}),
+        json!({
+            "action": "patch",
+            "detail": {
+                "diff": "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-hello\n+world\n",
+            },
+        }),
+        json!({"action": "read", "detail": {"path": "f.txt"}}),
+    ] {
+        client
+            .publish(incoming("agent.session.command", "s-ro", command))
+            .expect("publishes a command");
+    }
+
+    let _agent = Agent::start_with(
+        &server,
+        "s-ro",
+        &workspace.0,
+        0,
+        &["--mode".to_owned(), "readonly".to_owned()],
+        &[],
+    );
+
+    let shell = await_event(&seen, "the shell refusal", |event| {
+        is_output_for(event, "s-ro", "error", "shell")
+    });
+    assert_eq!(
+        shell.data.as_ref().expect("data")["detail"]["reason"],
+        "`shell` is not available in readonly mode"
+    );
+
+    let patch = await_event(&seen, "the patch refusal", |event| {
+        is_output_for(event, "s-ro", "error", "patch")
+    });
+    assert_eq!(
+        patch.data.as_ref().expect("data")["detail"]["reason"],
+        "`patch` is not available in readonly mode"
+    );
+
+    let read = await_event(&seen, "the read's output", |event| {
+        is_output_for(event, "s-ro", "done", "read")
+    });
+    assert_eq!(
+        read.data.as_ref().expect("data")["detail"]["content"],
+        "hello\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.0.join("f.txt")).expect("the file is on the host"),
+        "hello\n",
+        "nothing changed the file"
+    );
+}

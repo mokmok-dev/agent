@@ -71,9 +71,10 @@ Milestone 5 implements this as the `agentd` crate: a
 [contract](#the-output-contract) of two event types, and a loop that connects,
 subscribes as `agent-<id>`, dedupes on the event id (delivery is at-least-once),
 acts on a command through a `Capability` seam, publishes the output, and
-acknowledges what it processed. The `agent-agent` binary runs it with a `shell`
-capability, which runs an argv in the session's workspace, and a `task`
-capability, which drives a model and offers `shell` as its one tool.
+acknowledges what it processed. The `agent-agent` binary runs it with a coding
+belt, which reads, searches, patches, and runs commands in the session's
+workspace, and a `task` capability, which drives a model and offers that belt as
+its tools. The belt is the subject of [The Coding Belt](#the-coding-belt).
 
 ## The Shell Capability
 
@@ -114,9 +115,9 @@ conversation is four things — a system instruction, the task, what the model
 said, and what a tool returned — and a type that names them cannot carry a field
 its role has no meaning for.
 
-The capability offers `shell` as its one tool today, which is what makes a task's
-commands inherit the session's confinement and the bounded output above. It never
-spawns a process itself.
+The capability offers the session's coding belt, which is what makes a task's
+tools inherit the session's confinement, its mode, and the bounded output above.
+It never spawns a process itself.
 
 **Everything that crosses into the model's context is bounded**, for the reason
 the shell capability bounds a command's output: a model's context is a resource
@@ -137,6 +138,97 @@ ending.
 The provider's credentials are the agent's own and stay in its environment: the
 client runs inside the sandbox, so the tunnel stays opaque and TLS stays end to
 end. See [sandbox network](../sandbox/network.md).
+
+## The Coding Belt
+
+The agent offers the model a small set of tools over its workspace, and the
+**mode** decides which. `read` returns a window of lines from one file.
+`code_search` finds a literal substring in the workspace's files. `patch` applies
+a unified diff. `shell` runs a program. The binary takes
+`--mode readonly|readwrite` as the mode a session starts in, defaulting to
+`readwrite`, and a client switches it while the session runs.
+
+A read-only belt offers `read` and `code_search` alone, so nothing it offers can
+change the workspace. The mode is the agent's **capability set**, a contract with
+the model and with bus clients. It is not a kernel guarantee. The session policy
+still binds the workspace read-write, `Policy::validate` requires a writable
+workdir, and the policy's mount set is frozen at spawn, so a guaranteed read-only
+workspace is a change in `sandbox` and `daemon`. A switch changes what the belt
+offers, and it cannot widen what the kernel allows.
+
+The belt holds the mode in one cell, and the model's tool schemas, the bus
+dispatch, and the system prompt all derive from it, so a schema cannot name a tool
+the belt would refuse and a tool cannot be forgotten in the prompt. An action the
+belt does not offer is answered with a reason rather than run, so a client and an
+agent of different versions do not crash each other.
+
+Every path a tool is given resolves against the canonical workspace root. An empty
+path, an absolute path, a `..` component, a NUL byte, and a symlink that leaves the
+workspace are refused, and a write may not name `.git`. Every read of a file is
+bounded while it is read. `read` returns at most 2000 lines or 8 KiB of content and
+pages with `start_line`; `code_search` bounds its walk by entries, depth, matches,
+and text, and reports `truncated` when it stopped early, so a partial search is not
+read as the whole workspace.
+
+### The Mode Action
+
+A client switches the mode by publishing an `agent.session.<id>.command` whose
+action is `mode`. Its `detail` is absent, `null`, or `{}` to report the mode
+without changing it, and `{"mode": "readonly"}` or `{"mode": "readwrite"}` to
+switch it. The output names the resulting mode and whether the call changed it, so
+a repeated switch is `done` with `changed` false rather than an error.
+
+The model cannot call it. The action is not one of the belt's tools, so it never
+appears in the schemas the model is offered, and a model that names it is told the
+agent has no tool by that name. Moving a session to `readwrite` is a decision the
+client makes.
+
+The loop is synchronous, so a switch lands between commands. A task in flight
+finishes under the mode it started with, and the next command, and the next task's
+tool list, see the new one. The command is durable, so an agent that restarts
+replays it from the log and converges on the same mode.
+
+### The Patch Tool
+
+`patch` takes `{"diff": "..."}`, a unified diff as `git diff` writes one, and
+applies it in process. No `git` program and no repository is involved, so a
+session's workspace need not be a checkout. The unified diff is only the format
+the model and the agent agree on; this crate reads its skeleton and derives each
+hunk's counts, and `diffy` applies the hunks.
+
+The counts are read from the body, the way `git apply --recount` does. A model
+cannot count hunk lines, and `diffy` takes a declared count as the hunk's extent,
+so a header that undercounts its body makes it ignore the rest and report success.
+A probe on this host showed exactly that. The recount writes every header's counts
+from the hunk's own contiguous body and changes nothing else, not one content byte
+and not a start number, because `diffy` finds a hunk by its context.
+
+The same walk refuses a skeleton it cannot account for, a `--- ` header with no
+`+++ ` line and a body line with no header before it, so a mistyped diff fails
+loudly instead of half-applying. `diffy` then parses the recounted text and applies
+its hunks, refusing a binary patch and a hunk whose context does not match, each
+with a terse reason the model is told and, where the library adds evidence, the
+library's own text beside it. Compiling the patched file would need a toolchain per
+language and a policy for files that do not parse, and a session has no toolchain.
+
+Path safety is the belt's own rule. `diffy` does not resolve paths, and no external
+program checks them here, so the belt resolves every path the diff names against
+the canonical workspace root and refuses an absolute path, a `..` component, a NUL
+byte, a symlink that leaves the workspace, and a write under `.git`. A path drops
+one leading `a/` or `b/` component if it carries one, and the decision is per path,
+so a diff that mixes prefixed and unprefixed headers still applies and
+`--- sub/f.txt` resolves to `sub/f.txt`.
+
+`patch` writes nothing until the whole diff is known to apply. It parses the diff,
+resolves every path, reads each base file under its cap, and applies every hunk,
+holding the result as a plan; only a complete plan is written, so a refusal never
+follows a write. A write that fails part-way, from an operating-system error, can
+leave the files before it written, and the output reports that.
+
+Every bound is explicit. The diff text is at most 256 KiB, a patch names at most
+64 files, one base file is at most 1 MiB, and the final texts together are at most
+8 MiB. A base is refused rather than truncated, because half a base would corrupt
+the file an applier writes.
 
 ## The Client
 
@@ -290,6 +382,11 @@ credential and the daemon holds no copy of it beyond the launch: the settings fi
 names the variable and never the value, no report carries it, and the proxy cannot
 see it because the tunnel is opaque and TLS is end to end.
 
+One flag of the agent's is **not** injected: `--mode`. The mode belongs to the
+deployment's settings rather than to a session's identity, and the daemon's policy
+binds the workspace read-write today, so a session starts `readwrite` and a client
+may switch it while the session runs.
+
 ## The Output Contract
 
 An agent publishes events. The contract names the types, so a consumer reads the
@@ -334,3 +431,6 @@ same connection, so a dead bus is reported by that publish instead.
 - No terminal. Its standard input and output are not its interface.
 - No memory or CPU ceiling. The kernel does not enforce one, so the policy does
   not claim one.
+- No kernel guarantee for its mode. A read-only belt is a contract with the model
+  and with clients, and a switch cannot widen what the policy froze at spawn. See
+  [The Coding Belt](#the-coding-belt).

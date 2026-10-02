@@ -12,6 +12,7 @@ path = "bins/agent-agent.rs"
 agent = { path = "../agent" }
 anyhow.workspace = true
 clap.workspace = true
+diffy.workspace = true
 rustls.workspace = true
 secrecy.workspace = true
 serde.workspace = true

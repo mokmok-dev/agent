@@ -1,24 +1,26 @@
 //! The agent binary.
 //!
-//! argv: `agent-agent --socket <bus.sock> --session <id> [--workdir <dir>]`,
-//! plus `--model <id> --base-url <url> --env-key <NAME>` when the session's
-//! settings name a model endpoint.
+//! argv: `agent-agent --socket <bus.sock> --session <id> [--workdir <dir>]
+//! [--mode readonly|readwrite]`, plus
+//! `--model <id> --base-url <url> --env-key <NAME>` when the session's settings
+//! name a model endpoint.
 //!
-//! The capability dispatches by action: `shell` runs a command in the session's
-//! workspace, `task` drives the model when an endpoint was given, and anything
-//! else is reported as unknown, so a client and an agent of different versions do
-//! not crash each other.
+//! The capability dispatches by action: `mode` reports or switches the session's
+//! mode, the coding belt answers `read`, `code_search`, `patch`, and `shell` in
+//! the session's workspace, `task` drives the model when an endpoint was given,
+//! and anything else is reported as unknown, so a client and an agent of different
+//! versions do not crash each other.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Parser;
-use serde_json::json;
 
-use agentd_agent::contract::{Command, Output, OutputKind};
+use agentd_agent::coding::{ACTION_MODE as MODE, Coding, Mode, act_mode};
+use agentd_agent::contract::{Command, Output};
 use agentd_agent::loopcore::{self, AgentConfig, Capability, Reporter};
 use agentd_agent::openai::{self, Client, Config as ModelConfig};
-use agentd_agent::shell::{ACTION as SHELL, Shell};
 use agentd_agent::task::{ACTION as TASK, Task};
 use zeroize::Zeroizing;
 
@@ -43,6 +45,9 @@ struct Cli {
     /// workspace, which the session policy has bound read-write.
     #[arg(long)]
     workdir: Option<PathBuf>,
+    /// The capability set for this session, `readonly` or `readwrite`.
+    #[arg(long, default_value = "readwrite")]
+    mode: Mode,
     /// The model id the endpoint is asked for, with `--base-url` and `--env-key`.
     #[arg(long)]
     model: Option<String>,
@@ -55,11 +60,12 @@ struct Cli {
     env_key: Option<String>,
 }
 
-/// The dispatch: one capability per action name.
+/// The dispatch: the coding belt, and the model-driven `task` when it exists.
 #[derive(Debug)]
 struct Dispatch {
-    /// The `shell` capability, which every session has.
-    shell: Shell,
+    /// The one belt the session runs under, shared with the task so a mode
+    /// switched here is the mode the task reads.
+    coding: Arc<Coding>,
     /// The model-driven `task` capability, when the session's settings named an
     /// endpoint. Without one, `task` is an unknown action like any other.
     task: Option<Task>,
@@ -71,24 +77,17 @@ impl Capability for Dispatch {
         command: &Command,
         reporter: &dyn Reporter,
     ) -> Output {
-        if command.action == SHELL {
-            return self.shell.act(command, reporter);
+        // The mode command is a session command: it is answered here, before the
+        // task and the belt, and it is not a tool the model can call.
+        if command.action == MODE {
+            return act_mode(&self.coding, &command.detail);
         }
         if command.action == TASK
             && let Some(task) = &self.task
         {
             return task.act(command, reporter);
         }
-        unknown(command)
-    }
-}
-
-/// The output for an action no capability answers.
-fn unknown(command: &Command) -> Output {
-    Output {
-        kind: OutputKind::Error,
-        action: command.action.clone(),
-        detail: json!({"reason": "the agent has no capability for this action"}),
+        self.coding.act(command, reporter)
     }
 }
 
@@ -102,9 +101,11 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let workdir = cli.workdir.clone().unwrap_or_else(|| PathBuf::from("."));
+    let coding =
+        Arc::new(Coding::new(&workdir, cli.mode).context("the workspace root is not usable")?);
     let capability = Dispatch {
-        shell: Shell::in_workspace(&workdir),
-        task: task(&cli, &workdir)?,
+        coding: Arc::clone(&coding),
+        task: task(&cli, coding)?,
     };
     let config = AgentConfig {
         bus_socket: cli.socket,
@@ -121,7 +122,7 @@ fn main() -> anyhow::Result<()> {
 /// operator can see it.
 fn task(
     cli: &Cli,
-    workdir: &std::path::Path,
+    coding: Arc<Coding>,
 ) -> anyhow::Result<Option<Task>> {
     let (Some(model), Some(base_url), Some(env_key)) = (&cli.model, &cli.base_url, &cli.env_key)
     else {
@@ -143,10 +144,7 @@ fn task(
         config = config.with_proxy(proxy);
     }
     let client = Client::new(config).context("the model endpoint is not usable")?;
-    Ok(Some(Task::new(
-        Box::new(client),
-        Shell::in_workspace(workdir),
-    )))
+    Ok(Some(Task::new(Box::new(client), coding)))
 }
 
 /// The proxy to reach the endpoint through, from the environment.
