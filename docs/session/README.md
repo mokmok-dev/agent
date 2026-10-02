@@ -234,9 +234,9 @@ bus. Neither gains a dependency on the other.
    launched with the flags that name its model, its endpoint, and the variable
    holding its key; the agent drives that endpoint through the session's egress
    proxy, in `agentd/src/openai/`; and the coding belt lands `read`, `code_search`,
-   `patch`, and `shell` behind a `--mode` that fixes what a session may do, its
-   `patch` parsing a unified diff in Rust before `git apply` applies it
-   (`agentd/src/coding.rs`, `agentd/src/diff.rs`). See
+   `patch`, and `shell` behind a `--mode` a client may switch while the session
+   runs, its `patch` applying a unified diff in process with no `git` and no
+   repository (`agentd/src/coding.rs`, `agentd/src/patch.rs`). See
    [agent.md](./agent.md#the-settings-and-the-egress-allowlist),
    [agent.md](./agent.md#the-image-at-launch),
    [agent.md](./agent.md#the-coding-belt), and

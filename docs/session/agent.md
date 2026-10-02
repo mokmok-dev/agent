@@ -145,20 +145,22 @@ The agent offers the model a small set of tools over its workspace, and the
 **mode** decides which. `read` returns a window of lines from one file.
 `code_search` finds a literal substring in the workspace's files. `patch` applies
 a unified diff. `shell` runs a program. The binary takes
-`--mode readonly|readwrite`, defaulting to `readwrite`; a read-only belt offers
-`read` and `code_search` alone, so nothing it offers can change the workspace.
+`--mode readonly|readwrite` as the mode a session starts in, defaulting to
+`readwrite`, and a client switches it while the session runs.
 
-The mode is the agent's **capability set**, a contract with the model and with bus
-clients. It is not a kernel guarantee. The session policy still binds the
-workspace read-write, and `Policy::validate` requires a writable workdir, so a
-guaranteed read-only workspace is a change in `sandbox` and `daemon`. Until that
-lands, a read-only session is confined by its belt and not by the kernel.
+A read-only belt offers `read` and `code_search` alone, so nothing it offers can
+change the workspace. The mode is the agent's **capability set**, a contract with
+the model and with bus clients. It is not a kernel guarantee. The session policy
+still binds the workspace read-write, `Policy::validate` requires a writable
+workdir, and the policy's mount set is frozen at spawn, so a guaranteed read-only
+workspace is a change in `sandbox` and `daemon`. A switch changes what the belt
+offers, and it cannot widen what the kernel allows.
 
-The belt computes its tool list once, when the agent starts. The model's tool
-schemas, the bus dispatch, and the system prompt all read that one list, so a
-schema cannot name a tool the belt would refuse and a tool cannot be forgotten in
-the prompt. An action the belt does not offer is answered with a reason rather
-than run, so a client and an agent of different versions do not crash each other.
+The belt holds the mode in one cell, and the model's tool schemas, the bus
+dispatch, and the system prompt all derive from it, so a schema cannot name a tool
+the belt would refuse and a tool cannot be forgotten in the prompt. An action the
+belt does not offer is answered with a reason rather than run, so a client and an
+agent of different versions do not crash each other.
 
 Every path a tool is given resolves against the canonical workspace root. An empty
 path, an absolute path, a `..` component, a NUL byte, and a symlink that leaves the
@@ -168,33 +170,55 @@ pages with `start_line`; `code_search` bounds its walk by entries, depth, matche
 and text, and reports `truncated` when it stopped early, so a partial search is not
 read as the whole workspace.
 
+### The Mode Action
+
+A client switches the mode by publishing an `agent.session.<id>.command` whose
+action is `mode`. Its `detail` is absent, `null`, or `{}` to report the mode
+without changing it, and `{"mode": "readonly"}` or `{"mode": "readwrite"}` to
+switch it. The output names the resulting mode and whether the call changed it, so
+a repeated switch is `done` with `changed` false rather than an error.
+
+The model cannot call it. The action is not one of the belt's tools, so it never
+appears in the schemas the model is offered, and a model that names it is told the
+agent has no tool by that name. Moving a session to `readwrite` is a decision the
+client makes.
+
+The loop is synchronous, so a switch lands between commands. A task in flight
+finishes under the mode it started with, and the next command, and the next task's
+tool list, see the new one. The command is durable, so an agent that restarts
+replays it from the log and converges on the same mode.
+
 ### The Patch Tool
 
-`patch` takes `{"diff": "..."}`, a unified diff as `git diff` writes one. The
-application parses and refuses it before `git` sees it. The parser checks the
-diff's own grammar: each file header pairs with its `+++` line, each hunk header
-parses and its declared line counts match exactly, a `\ No newline at end of file`
-marker counts for neither side, and binary patches, renames, and quoted paths are
-refused. It decides the `-p` strip level once for the whole diff, from whether the
-headers carry `a/` and `b/`, and refuses a diff whose sections disagree, because
-`git apply` is given exactly one `-p{n}`.
+`patch` takes `{"diff": "..."}`, a unified diff as `git diff` writes one, and
+applies it in process. No `git` program and no repository is involved, so a
+session's workspace need not be a checkout. The unified diff is only the format
+the model and the agent agree on; `diffy` parses it and applies its hunks.
 
-That parse is what the syntax check means here: the diff's syntax, not the target
-language's. Compiling the patched file would need a toolchain per language and a
-policy for files that do not parse, and a session has no toolchain.
+The parse is the syntax check. It refuses a diff whose hunk header does not match
+its hunks, a diff that is not a unified diff, and a binary patch, each with a terse
+reason the model is told and, where the library adds evidence, the library's own
+text beside it. Compiling the patched file would need a toolchain per language and
+a policy for files that do not parse, and a session has no toolchain.
 
-Path safety is the belt's own rule, not git's. `git apply` refuses `..` and a
-symlink out of the tree, but it accepts an absolute path header outside a
-repository, and under `-p1` it drops a directory from an unprefixed nested path
-(`--- sub/f.txt` becomes `f.txt`). The belt resolves every path the diff names
-against the workspace root and refuses any that leaves it before `git` runs.
+Path safety is the belt's own rule. `diffy` does not resolve paths, and no external
+program checks them here, so the belt resolves every path the diff names against
+the canonical workspace root and refuses an absolute path, a `..` component, a NUL
+byte, a symlink that leaves the workspace, and a write under `.git`. A path drops
+one leading `a/` or `b/` component if it carries one, and the decision is per path,
+so a diff that mixes prefixed and unprefixed headers still applies and
+`--- sub/f.txt` resolves to `sub/f.txt`.
 
-`git` then applies the whole patch atomically, so one failing hunk writes nothing
-and there is no separate `--check` pass to disagree with the real one. The binary
-names the program with `--git`, or finds one on its own `PATH` for a local run; a
-session's environment carries no `PATH`, so a daemon-launched session must pass
-the flag. Without a `git`, the belt does not offer `patch` at all, and the binary
-logs one warning at startup.
+`patch` writes nothing until the whole diff is known to apply. It parses the diff,
+resolves every path, reads each base file under its cap, and applies every hunk,
+holding the result as a plan; only a complete plan is written, so a refusal never
+follows a write. A write that fails part-way, from an operating-system error, can
+leave the files before it written, and the output reports that.
+
+Every bound is explicit. The diff text is at most 256 KiB, a patch names at most
+64 files, one base file is at most 1 MiB, and the final texts together are at most
+8 MiB. A base is refused rather than truncated, because half a base would corrupt
+the file an applier writes.
 
 ## The Client
 
@@ -348,12 +372,10 @@ credential and the daemon holds no copy of it beyond the launch: the settings fi
 names the variable and never the value, no report carries it, and the proxy cannot
 see it because the tunnel is opaque and TLS is end to end.
 
-Two flags of the agent's are **not** injected: `--mode` and `--git`. The mode
-belongs to the deployment's settings rather than to a session's identity, and the
-daemon's policy binds the workspace read-write today, so a session runs
-`readwrite`. `git` must be named absolutely, because a session's environment
-carries no `PATH` and the settings file does not name one yet, so a
-daemon-launched session does not offer the `patch` tool.
+One flag of the agent's is **not** injected: `--mode`. The mode belongs to the
+deployment's settings rather than to a session's identity, and the daemon's policy
+binds the workspace read-write today, so a session starts `readwrite` and a client
+may switch it while the session runs.
 
 ## The Output Contract
 
@@ -400,5 +422,5 @@ same connection, so a dead bus is reported by that publish instead.
 - No memory or CPU ceiling. The kernel does not enforce one, so the policy does
   not claim one.
 - No kernel guarantee for its mode. A read-only belt is a contract with the model
-  and with clients, and the session's policy is the boundary; it binds the
-  workspace read-write today. See [The Coding Belt](#the-coding-belt).
+  and with clients, and a switch cannot widen what the policy froze at spawn. See
+  [The Coding Belt](#the-coding-belt).
