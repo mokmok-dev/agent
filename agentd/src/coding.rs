@@ -1040,8 +1040,10 @@ fn resolve_under(
 fn read_line_window<R: BufRead>(reader: &mut R) -> std::io::Result<Option<(Vec<u8>, bool)>> {
     let mut buffer = Vec::new();
     let mut window = (&mut *reader).take(MAX_READ_LINE_BYTES as u64 + 1);
-    let read = window.read_until(b'\n', &mut buffer)?;
-    if read == 0 {
+    window.read_until(b'\n', &mut buffer)?;
+    // Nothing appended is the end of the input, and asking the buffer says so without
+    // a count a mutant could invert into reading forever.
+    if buffer.is_empty() {
         return Ok(None);
     }
     // The window is one byte wider than the cap, so a line of exactly the cap plus
