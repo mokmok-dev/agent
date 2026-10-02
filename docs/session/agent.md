@@ -420,11 +420,11 @@ itself.
   lifetime the way its policy is. A mode switch does not re-read them, and nothing
   re-reads them between tasks.
 
-The last point is a contract rather than a boundary. The policy binds the workspace
-read-write, so a session in `readwrite` may write its own instruction file and the
-next session would read what this one wrote. A kernel-enforced read-only entry over
-that one file is the candidate fix, and the question is open in
-[README.md](./README.md#open-questions).
+The file's ownership is a contract rather than a boundary. The policy binds the
+workspace read-write, so a session in `readwrite` may write the very file that steers
+the next one, and reading it once fixes only the session that is running. A
+kernel-enforced read-only entry over that one file is the candidate fix, and the
+question is open in [README.md](./README.md#open-questions).
 
 ## The Output Contract
 
