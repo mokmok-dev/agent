@@ -11,13 +11,12 @@
 //! workspace, and [`task`], which drives a model through [`model::Model`] with the
 //! coding belt as its tools.
 
-mod child;
 pub mod coding;
 pub mod contract;
-mod diff;
 pub mod loopcore;
 pub mod model;
 pub mod openai;
+mod patch;
 pub mod shell;
 pub mod task;
 

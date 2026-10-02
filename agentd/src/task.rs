@@ -16,6 +16,8 @@
 //! like any other, and a command that writes without end must not be able to
 //! fill it.
 
+use std::sync::Arc;
+
 use serde_json::{Value, json};
 
 use crate::coding::Coding;
@@ -46,8 +48,9 @@ const MAX_REPORT_BYTES: usize = 2 * 1024;
 pub struct Task {
     /// The model the task is driven by.
     model: Box<dyn Model>,
-    /// The tools the model is offered, and how its calls are run.
-    coding: Coding,
+    /// The tools the model is offered, and how its calls are run. Shared with the
+    /// dispatch, so a mode switched on the bus is the mode the task reads.
+    coding: Arc<Coding>,
     /// The most model turns one task may take.
     max_turns: usize,
 }
@@ -58,7 +61,7 @@ impl Task {
     #[must_use]
     pub fn new(
         model: Box<dyn Model>,
-        coding: Coding,
+        coding: Arc<Coding>,
     ) -> Self {
         Self {
             model,
@@ -399,14 +402,18 @@ mod tests {
 
     /// A task capability over a fresh workspace, driven by `answers`.
     ///
-    /// The belt has no `git`, so its tools are `read`, `code_search`, and `shell`;
-    /// every command here is well inside the belt's timeout, so no test leans on it.
+    /// The belt is read-write, so its tools are `read`, `code_search`, `patch`, and
+    /// `shell`; every command here is well inside the belt's timeout, so no test
+    /// leans on it.
     fn task(answers: Vec<Result<Response, String>>) -> (Task, std::sync::Arc<Scripted>, Workspace) {
         let workspace = Workspace::new("task");
         let model = std::sync::Arc::new(Scripted::new(answers));
-        let coding = Coding::new(&workspace.0, Mode::ReadWrite, None).expect("the workspace opens");
+        let coding = Coding::new(&workspace.0, Mode::ReadWrite).expect("the workspace opens");
         (
-            Task::new(Box::new(ArcModel(model.clone())), coding),
+            Task::new(
+                Box::new(ArcModel(model.clone())),
+                std::sync::Arc::new(coding),
+            ),
             model,
             workspace,
         )
@@ -460,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn the_offered_tools_are_read_code_search_and_shell_without_git() {
+    fn the_offered_tools_are_the_readwrite_belts_four() {
         let (task, model, _workspace) = task(vec![Ok(says("ok"))]);
         task.act(&task_action("write a file"), &Reports::default());
 
@@ -469,8 +476,8 @@ mod tests {
         let names: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
         assert_eq!(
             names,
-            ["read", "code_search", "shell"],
-            "patch needs git, which this belt has none of"
+            ["read", "code_search", "patch", "shell"],
+            "a read-write belt offers every tool"
         );
         let shell = request
             .tools
@@ -489,24 +496,24 @@ mod tests {
     }
 
     #[test]
-    fn a_readwrite_belt_with_git_offers_patch_too() {
-        let git = std::env::var("PATH")
-            .unwrap_or_default()
-            .split(':')
-            .filter(|dir| !dir.is_empty())
-            .map(|dir| PathBuf::from(dir).join("git"))
-            .find(|candidate| candidate.is_file())
-            .expect("`git` exists on a supported host");
-        let workspace = Workspace::new("task-git");
-        let model = std::sync::Arc::new(Scripted::new(vec![Ok(says("ok"))]));
-        let coding = Coding::new(&workspace.0, Mode::ReadWrite, Some(git)).expect("opens");
-        let task = Task::new(Box::new(ArcModel(model.clone())), coding);
-        task.act(&task_action("write a file"), &Reports::default());
+    fn a_model_call_named_mode_is_reported_as_an_unknown_tool() {
+        // The mode command is a session command, not a tool: a model that calls it
+        // is told there is no tool by that name and gets to correct itself.
+        let (task, model, _workspace) = task(vec![
+            Ok(asks_for("mode", json!({"mode": "readonly"}))),
+            Ok(says("I cannot switch modes")),
+        ]);
+        task.act(&task_action("go read-only"), &Reports::default());
 
         let requests = model.requests();
-        let request = requests.first().expect("the model was asked once");
-        let names: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
-        assert_eq!(names, ["read", "code_search", "patch", "shell"]);
+        let second = requests.get(1).expect("the model was asked twice");
+        match second.messages.last().expect("a tool message") {
+            Message::Tool { content, .. } => assert!(
+                content.contains("no tool by that name"),
+                "the model is told the tool is unknown: {content}"
+            ),
+            other => panic!("expected a tool message, got {other:?}"),
+        }
     }
 
     #[test]
@@ -518,7 +525,7 @@ mod tests {
         let request = requests.first().expect("the model was asked once");
         match request.messages.first().expect("a system message") {
             Message::System { content } => assert!(
-                content.contains("read, code_search, shell"),
+                content.contains("read, code_search, patch, shell"),
                 "the prompt names the offered tools: {content}"
             ),
             other => panic!("expected a system message, got {other:?}"),

@@ -68,6 +68,11 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
   "handshake",
 ] }
 ulid = "3.0.0"
+# The `patch` tool applies a unified diff in process, so a session's workspace
+# need not be a checkout and no `git` program has to exist. It is `no_std` by
+# default, so `std` is named; the `binary` feature stays off because a binary
+# patch is refused rather than applied.
+diffy = { version = "0.5.2", default-features = false, features = ["std"] }
 # Secrets read from the environment (a provider key, a proxy token) are held in a
 # wrapper that cannot be printed and is wiped when it drops; `zeroize` is named
 # separately for the buffers that carry a secret on their way out.

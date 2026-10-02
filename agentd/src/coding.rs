@@ -1,34 +1,37 @@
 //! The agent's coding toolbelt: `read`, `code_search`, and `patch` over one
-//! workspace, in one mode, with `shell` alongside them.
+//! workspace, in one **switchable** mode, with `shell` alongside them.
 //!
-//! A [`Coding`] belt is built from a workspace root, a [`Mode`], and an optional
-//! absolute `git` path. It computes the tools it offers **once**, at construction:
-//! [`Mode`] is the capability set the agent advertises to the model and to bus
-//! clients, not a kernel guarantee. The session's sandbox is the boundary that
-//! actually confines a child; see `docs/session/agent.md`. A session the daemon
-//! bound read-write stays writable at the kernel, so a read-only belt is a
-//! contract, not a wall.
+//! A [`Coding`] belt is built from a workspace root and a [`Mode`]. The mode is a
+//! mutex cell, so the tool list, the system prompt, and the action gate are all
+//! derived from it at each call: a client can switch modes mid-session without any
+//! of the three drifting from the others. [`Mode`] is the capability set the agent
+//! advertises to the model and to bus clients, not a kernel guarantee. The
+//! session's sandbox is the boundary that actually confines a child; see
+//! `docs/session/agent.md`. A session the daemon bound read-write stays writable at
+//! the kernel, so a read-only belt is a contract, not a wall. The loop is
+//! synchronous, so a switch lands between commands; a task already in flight
+//! finishes under the mode it started with.
 //!
 //! Every read of a file or a child is bounded **while it is read**: `read` and
-//! `code_search` window each line and stop on byte and count budgets, and the
-//! `shell` and `patch` arms go through [`crate::child`], whose output cap is the
-//! one the OOM incident established.
+//! `code_search` window each line and stop on byte and count budgets, the `patch`
+//! arm reads each base under a byte cap, and the `shell` arm bounds its output the
+//! way the OOM incident established.
 //!
-//! `patch` checks the diff's syntax here, resolves and refuses every path against
-//! the workspace root, reports the files it is about to touch, and only then hands
-//! the diff to `git apply` on standard input. `git apply` validates the whole patch
-//! before writing anything, so there is no separate dry run.
+//! `patch` applies a unified diff in process (see the crate-private `patch`
+//! module, which owns the path policy and the caps): `diffy` parses and applies the
+//! text, every path is resolved and every file applied into a plan before any write
+//! happens. The unified diff stays the wire format the model speaks, and a session's
+//! workspace needs no `git` and no repository.
 
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::child;
 use crate::contract::{Command, Output, OutputKind};
-use crate::diff;
 use crate::loopcore::{Capability, Reporter};
 use crate::model::Tool;
 use crate::shell::{ACTION as SHELL_ACTION, Shell};
@@ -41,6 +44,11 @@ pub const ACTION_READ: &str = "read";
 pub const ACTION_CODE_SEARCH: &str = "code_search";
 /// The `patch` action.
 pub const ACTION_PATCH: &str = "patch";
+/// The session command that reports or switches the belt's mode.
+///
+/// It is a session command, not a tool: it never appears in [`Coding::tools`], and
+/// a model that calls it is told there is no tool by that name.
+pub const ACTION_MODE: &str = "mode";
 
 /// How long a child the toolbelt spawns may run before it is killed.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -71,13 +79,11 @@ const MAX_SEARCH_TEXT_BYTES: usize = 8 * 1024;
 /// The most bytes one reported search line carries.
 const MAX_SEARCH_LINE_BYTES: usize = 200;
 
-/// The cap on what one `git apply` run may emit.
-const MAX_PATCH_OUTPUT_BYTES: usize = 4 * 1024;
-
 /// The capability contract a session runs under.
 ///
-/// A belt offers its tools once, so the model's tool list is exactly the actions
-/// the belt can dispatch: a schema can never name an action it would refuse.
+/// Every read of the mode derives the offered set from the one cell, so the
+/// model's tool list is exactly the actions the belt can dispatch at that moment:
+/// a schema can never name an action it would refuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// The belt can inspect the workspace but cannot change it.
@@ -140,23 +146,20 @@ pub enum Error {
 }
 
 /// The coding capability: `read`, `code_search`, `patch`, and `shell` over one
-/// workspace, gated by one [`Mode`].
+/// workspace, gated by one switchable [`Mode`].
 #[derive(Debug)]
 pub struct Coding {
     /// The canonical workspace root every path is resolved against.
     root: PathBuf,
-    /// The capability set the session runs under.
-    mode: Mode,
-    /// The absolute `git` a `patch` is applied with, when the host has one.
-    git: Option<PathBuf>,
+    /// The session's mode. Switchable while the session runs, so every reader goes
+    /// through this one cell: the tool list, the prompt, and the gate cannot drift.
+    mode: Mutex<Mode>,
     /// How long a spawned child may run.
     timeout: Duration,
-    /// The tools this belt offers, fixed at construction.
-    offered: Vec<Spec>,
 }
 
 impl Coding {
-    /// A belt over `root` in `mode`, applying patches with `git`.
+    /// A belt over `root` in `mode`.
     ///
     /// # Errors
     ///
@@ -164,7 +167,6 @@ impl Coding {
     pub fn new(
         root: impl Into<PathBuf>,
         mode: Mode,
-        git: Option<PathBuf>,
     ) -> Result<Self, Error> {
         let root = std::fs::canonicalize(root.into()).map_err(Error::Root)?;
         if !root.is_dir() {
@@ -173,17 +175,10 @@ impl Coding {
                 "the workspace root is not a directory",
             )));
         }
-        let offered = Spec::ALL
-            .iter()
-            .copied()
-            .filter(|spec| mode.covers(spec.required()) && (*spec != Spec::Patch || git.is_some()))
-            .collect();
         Ok(Self {
             root,
-            mode,
-            git,
+            mode: Mutex::new(mode),
             timeout: DEFAULT_TIMEOUT,
-            offered,
         })
     }
 
@@ -197,17 +192,32 @@ impl Coding {
         self
     }
 
-    /// The mode the belt runs under.
+    /// The mode the belt runs under, recovering a lock a panic poisoned.
+    ///
+    /// [`Mode`] carries no invariant a panic can break, so the value behind a
+    /// poisoned lock is still exactly what was last stored.
     #[must_use]
-    pub const fn mode(&self) -> Mode {
-        self.mode
+    pub fn mode(&self) -> Mode {
+        *self.mode.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Switch the belt to `mode`, returning the mode it had.
+    #[must_use]
+    pub fn set_mode(
+        &self,
+        mode: Mode,
+    ) -> Mode {
+        std::mem::replace(
+            &mut *self.mode.lock().unwrap_or_else(PoisonError::into_inner),
+            mode,
+        )
     }
 
     /// The tools this session offers the model, in [`Spec::ALL`] order.
     #[must_use]
     pub fn tools(&self) -> Vec<Tool> {
-        self.offered
-            .iter()
+        let mode = self.mode();
+        offered(mode)
             .map(|spec| Tool {
                 name: spec.action().to_owned(),
                 description: spec.description().to_owned(),
@@ -216,22 +226,22 @@ impl Coding {
             .collect()
     }
 
-    /// What the agent tells the model about itself, for the offered set.
+    /// What the agent tells the model about itself, for the currently offered set.
     #[must_use]
     pub fn system_prompt(&self) -> String {
-        let names = self
-            .offered
+        let mode = self.mode();
+        let offered: Vec<Spec> = offered(mode).collect();
+        let names = offered
             .iter()
             .map(|spec| spec.action())
             .collect::<Vec<_>>()
             .join(", ");
-        let clause = if self.mode.is_read_only() {
+        let clause = if mode.is_read_only() {
             "This session is read-only, so no tool can change the workspace.".to_owned()
         } else {
             // The clause names the writing tools this belt actually offers, so it
-            // stays true on a host the `patch` tool was withheld from.
-            let writers = self
-                .offered
+            // stays true for every mode.
+            let writers = offered
                 .iter()
                 .filter(|spec| spec.required() == Mode::ReadWrite)
                 .map(|spec| format!("`{}`", spec.action()))
@@ -246,12 +256,89 @@ task is complete, reply with your answer and no tool call."
         )
     }
 
-    /// Whether the belt offers `action`.
+    /// Whether the belt currently offers `action`.
     pub(crate) fn offers(
         &self,
         action: &str,
     ) -> bool {
-        Spec::from_action(action).is_some_and(|spec| self.offered.contains(&spec))
+        let mode = self.mode();
+        Spec::from_action(action)
+            .is_some_and(|spec| offered(mode).any(|candidate| candidate == spec))
+    }
+}
+
+/// Answer the `mode` action: `detail` is absent, `null`, or `{}` to report the
+/// session's mode, or `{"mode": "readonly"|"readwrite"}` to switch it.
+///
+/// The response names the resulting mode and whether this call changed it, so a
+/// client that retries an idempotent switch can tell.
+#[must_use]
+pub fn act_mode(
+    coding: &Coding,
+    detail: &Value,
+) -> Output {
+    match mode_request(detail) {
+        ModeRequest::Query => mode_output(coding.mode(), false),
+        ModeRequest::Switch(name) => match name.parse::<Mode>() {
+            Ok(mode) => {
+                let changed = coding.set_mode(mode) != mode;
+                mode_output(mode, changed)
+            },
+            Err(error) => mode_error(&error.to_string()),
+        },
+        ModeRequest::Malformed => mode_error("malformed mode"),
+    }
+}
+
+/// What a `mode` action's `detail` asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModeRequest<'a> {
+    /// Report the mode without changing it.
+    Query,
+    /// Switch to the named mode.
+    Switch(&'a str),
+    /// The detail is not one of the shapes the action accepts.
+    Malformed,
+}
+
+/// Read the `mode` action's `detail`: absent, `null`, or `{}` is a query, and an
+/// object with only a string `mode` is a switch.
+fn mode_request(detail: &Value) -> ModeRequest<'_> {
+    if detail.is_null() {
+        return ModeRequest::Query;
+    }
+    let Some(fields) = detail.as_object() else {
+        return ModeRequest::Malformed;
+    };
+    if fields.is_empty() {
+        return ModeRequest::Query;
+    }
+    if fields.len() == 1
+        && let Some(Value::String(name)) = fields.get("mode")
+    {
+        return ModeRequest::Switch(name);
+    }
+    ModeRequest::Malformed
+}
+
+/// The `Done` output for a reported or switched mode.
+fn mode_output(
+    mode: Mode,
+    changed: bool,
+) -> Output {
+    Output {
+        kind: OutputKind::Done,
+        action: ACTION_MODE.to_owned(),
+        detail: json!({"mode": mode.name(), "changed": changed}),
+    }
+}
+
+/// The `Error` output for a `mode` action that could not be answered.
+fn mode_error(reason: &str) -> Output {
+    Output {
+        kind: OutputKind::Error,
+        action: ACTION_MODE.to_owned(),
+        detail: json!({"reason": reason}),
     }
 }
 
@@ -261,26 +348,32 @@ impl Capability for Coding {
         command: &Command,
         reporter: &dyn Reporter,
     ) -> Output {
+        let mode = self.mode();
         let Some(spec) = Spec::from_action(&command.action) else {
             return refusal(
                 &command.action,
                 "the agent has no capability for this action",
             );
         };
-        if !self.offered.contains(&spec) {
-            let reason = if self.mode.covers(spec.required()) {
-                "`patch` needs `git`, which this host does not have".to_owned()
-            } else {
-                format!(
+        if !offered(mode).any(|candidate| candidate == spec) {
+            return refusal(
+                &command.action,
+                &format!(
                     "`{}` is not available in {} mode",
                     spec.action(),
-                    self.mode.name()
-                )
-            };
-            return refusal(&command.action, &reason);
+                    mode.name()
+                ),
+            );
         }
         spec.run(self, &command.detail, reporter)
     }
+}
+
+/// The specs `mode` offers: the one source of truth for the set.
+fn offered(mode: Mode) -> impl Iterator<Item = Spec> {
+    Spec::ALL
+        .into_iter()
+        .filter(move |spec| mode.covers(spec.required()))
 }
 
 /// The exhaustive routing table: one variant per action, its mode, its schema,
@@ -812,7 +905,11 @@ fn search_file(
     }
 }
 
-/// Apply a unified diff to the workspace through `git apply`.
+/// Apply a unified diff to the workspace in process.
+///
+/// The whole patch is planned by [`crate::patch::build`] before anything is
+/// written, so a refusal never follows a write; the files are reported before the
+/// plan is committed, so a watcher sees what is about to change.
 fn patch(
     coding: &Coding,
     detail: &Value,
@@ -821,80 +918,32 @@ fn patch(
     let Some(source) = detail.get("diff").and_then(Value::as_str) else {
         return refusal(ACTION_PATCH, "malformed patch");
     };
-    let parsed = match diff::parse(source) {
-        Ok(parsed) => parsed,
-        Err(error) => return refusal(ACTION_PATCH, error.reason()),
+    let plan = match crate::patch::build(coding, source) {
+        Ok(plan) => plan,
+        Err(refused) => return patch_refusal(&refused),
     };
-
-    // Resolve every path before spawning anything: a patch is all-or-nothing, and
-    // a refusal must not leave a partial change behind.
-    let mut paths: Vec<String> = Vec::new();
-    for file in &parsed.files {
-        for path in [file.old.as_deref(), file.new.as_deref()]
-            .into_iter()
-            .flatten()
-        {
-            if let Err(error) = resolve_for_write(coding, path) {
-                return refusal(ACTION_PATCH, error.reason());
-            }
-            // A modification names the same path on both sides; report it once.
-            if !paths.iter().any(|existing| existing == path) {
-                paths.push(path.to_owned());
-            }
-        }
-    }
-
-    let Some(git) = coding.git.as_deref() else {
-        return refusal(
-            ACTION_PATCH,
-            "`patch` needs `git`, which this host does not have",
-        );
-    };
+    let paths = plan.paths();
     reporter.report(json!({"files": &paths}));
-
-    // `GIT_CEILING_DIRECTORIES` is the workspace's parent, so `git apply` does not
-    // search upward for a repository outside the workspace.
-    let ceiling = coding
-        .root
-        .parent()
-        .map(|parent| parent.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let env = [
-        ("GIT_CONFIG_NOSYSTEM", "1".to_owned()),
-        ("GIT_CEILING_DIRECTORIES", ceiling),
-    ];
-    let strip = format!("-p{}", parsed.strip);
-    let outcome = match child::run_child(
-        git,
-        &["apply", "--whitespace=nowarn", strip.as_str(), "-"],
-        &coding.root,
-        &env,
-        Some(source.as_bytes()),
-        coding.timeout,
-        MAX_PATCH_OUTPUT_BYTES,
-    ) {
-        Ok(outcome) => outcome,
-        Err(error) => return refusal(ACTION_PATCH, &format!("could not start `git`: {error}")),
-    };
-    if outcome.timed_out {
-        return refusal(ACTION_PATCH, "the patch did not finish in time");
-    }
-    if outcome.code == Some(0) {
-        Output {
+    match plan.commit() {
+        Ok(files_changed) => Output {
             kind: OutputKind::Done,
             action: ACTION_PATCH.to_owned(),
-            detail: json!({"files": paths, "strip": parsed.strip, "code": 0}),
-        }
-    } else {
-        Output {
-            kind: OutputKind::Error,
-            action: ACTION_PATCH.to_owned(),
-            detail: json!({
-                "reason": "`git apply` refused the patch",
-                "code": outcome.code,
-                "stderr": outcome.stderr.text(),
-            }),
-        }
+            detail: json!({"files": paths, "files_changed": files_changed}),
+        },
+        Err(refused) => patch_refusal(&refused),
+    }
+}
+
+/// The `Error` output for a patch the plan or a write refused.
+fn patch_refusal(refused: &crate::patch::Refused) -> Output {
+    let mut detail = json!({"reason": refused.to_string()});
+    if let Some(error) = refused.error() {
+        detail["error"] = json!(error);
+    }
+    Output {
+        kind: OutputKind::Error,
+        action: ACTION_PATCH.to_owned(),
+        detail,
     }
 }
 
@@ -918,7 +967,7 @@ struct WorkspacePath(PathBuf);
 
 /// Why a path could not be resolved under the workspace.
 #[derive(Debug, thiserror::Error)]
-enum PathError {
+pub(crate) enum PathError {
     /// The path has no components.
     #[error("the path is empty")]
     Empty,
@@ -941,7 +990,7 @@ enum PathError {
 
 impl PathError {
     /// The reason, suitable for telling the model.
-    const fn reason(&self) -> &'static str {
+    pub(crate) const fn reason(&self) -> &'static str {
         match self {
             Self::Empty => "the path is empty",
             Self::Absolute => "the path is absolute",
@@ -982,10 +1031,10 @@ fn resolve(
 }
 
 /// Resolve a write path under the workspace root, additionally refusing `.git`.
-fn resolve_for_write(
+pub(crate) fn resolve_for_write(
     coding: &Coding,
     raw: &str,
-) -> Result<WorkspacePath, PathError> {
+) -> Result<PathBuf, PathError> {
     let resolved = resolve(coding, raw)?;
     if Path::new(raw)
         .components()
@@ -993,7 +1042,7 @@ fn resolve_for_write(
     {
         return Err(PathError::Protected);
     }
-    Ok(resolved)
+    Ok(resolved.0)
 }
 
 /// Canonicalize the deepest existing ancestor of `root/relative` and re-append
@@ -1178,31 +1227,12 @@ mod tests {
         }
     }
 
-    /// Locate a tool by name on the host, the way a shell would. A child's
-    /// environment is cleared, so a tool is named by absolute path.
-    fn helper_path(name: &str) -> Option<PathBuf> {
-        std::env::var("PATH")
-            .unwrap_or_default()
-            .split(':')
-            .filter(|dir| !dir.is_empty())
-            .map(|dir| Path::new(dir).join(name))
-            .find(|candidate| candidate.is_file())
-    }
-
-    /// A belt over `workspace`, with the host's `git`.
+    /// A belt over `workspace` in `mode`.
     fn belt(
         workspace: &Workspace,
         mode: Mode,
     ) -> Coding {
-        Coding::new(&workspace.0, mode, helper_path("git")).expect("the workspace opens")
-    }
-
-    /// A belt over `workspace`, with no `git`.
-    fn belt_without_git(
-        workspace: &Workspace,
-        mode: Mode,
-    ) -> Coding {
-        Coding::new(&workspace.0, mode, None).expect("the workspace opens")
+        Coding::new(&workspace.0, mode).expect("the workspace opens")
     }
 
     /// Run `action` on `coding` and return the output.
@@ -1253,20 +1283,13 @@ mod tests {
     }
 
     #[test]
-    fn a_readwrite_belt_with_git_offers_all_four() {
+    fn a_readwrite_belt_offers_all_four() {
         let workspace = Workspace::new("rw-tools");
         let coding = belt(&workspace, Mode::ReadWrite);
         assert_eq!(
             tool_names(&coding),
             ["read", "code_search", "patch", "shell"]
         );
-    }
-
-    #[test]
-    fn a_readwrite_belt_without_git_omits_patch() {
-        let workspace = Workspace::new("rw-nogit");
-        let coding = belt_without_git(&workspace, Mode::ReadWrite);
-        assert_eq!(tool_names(&coding), ["read", "code_search", "shell"]);
     }
 
     #[test]
@@ -1277,6 +1300,21 @@ mod tests {
             assert!(coding.offers(&tool.name), "{} is offered", tool.name);
         }
         assert!(!coding.offers("teleport"));
+    }
+
+    #[test]
+    fn offers_follows_the_mode_for_every_action() {
+        let workspace = Workspace::new("offers-mode");
+        let readonly = belt(&workspace, Mode::ReadOnly);
+        let readwrite = belt(&workspace, Mode::ReadWrite);
+        for action in [ACTION_READ, ACTION_CODE_SEARCH] {
+            assert!(readonly.offers(action), "readonly offers {action}");
+            assert!(readwrite.offers(action), "readwrite offers {action}");
+        }
+        for action in [ACTION_PATCH, ACTION_SHELL] {
+            assert!(!readonly.offers(action), "readonly withholds {action}");
+            assert!(readwrite.offers(action), "readwrite offers {action}");
+        }
     }
 
     #[test]
@@ -1319,18 +1357,6 @@ mod tests {
     }
 
     #[test]
-    fn a_readwrite_belt_without_git_refuses_patch() {
-        let workspace = Workspace::new("rw-nogit-patch");
-        let coding = belt_without_git(&workspace, Mode::ReadWrite);
-        let output = act(&coding, ACTION_PATCH, json!({"diff": "anything"}));
-        assert_eq!(output.kind, OutputKind::Error);
-        assert_eq!(
-            output.detail["reason"],
-            "`patch` needs `git`, which this host does not have"
-        );
-    }
-
-    #[test]
     fn an_unknown_action_is_refused() {
         let workspace = Workspace::new("unknown");
         let coding = belt(&workspace, Mode::ReadWrite);
@@ -1360,7 +1386,7 @@ mod tests {
     #[test]
     fn the_prompt_names_the_offered_tools() {
         let workspace = Workspace::new("prompt");
-        let coding = belt_without_git(&workspace, Mode::ReadOnly);
+        let coding = belt(&workspace, Mode::ReadOnly);
         let prompt = coding.system_prompt();
         assert!(prompt.contains("read, code_search"), "prompt was: {prompt}");
         assert!(
@@ -1370,22 +1396,167 @@ mod tests {
     }
 
     #[test]
-    fn a_readwrite_prompt_names_only_the_writers_the_belt_offers() {
+    fn a_readwrite_prompt_names_the_writers() {
         let workspace = Workspace::new("prompt-writers");
-        let with_git = belt(&workspace, Mode::ReadWrite).system_prompt();
+        let prompt = belt(&workspace, Mode::ReadWrite).system_prompt();
         assert!(
-            with_git.contains("through `patch` and `shell`"),
-            "both writers are named: {with_git}"
+            prompt.contains("through `patch` and `shell`"),
+            "both writers are named: {prompt}"
+        );
+    }
+
+    #[test]
+    fn the_mode_query_reports_the_mode_without_changing_it() {
+        let workspace = Workspace::new("mode-query");
+        let coding = belt(&workspace, Mode::ReadWrite);
+        let output = act_mode(&coding, &Value::Null);
+        assert_eq!(output.kind, OutputKind::Done);
+        assert_eq!(output.action, ACTION_MODE);
+        assert_eq!(
+            output.detail,
+            json!({"mode": "readwrite", "changed": false})
+        );
+        assert_eq!(coding.mode(), Mode::ReadWrite);
+    }
+
+    #[test]
+    fn an_absent_and_an_empty_mode_detail_report_the_mode() {
+        let workspace = Workspace::new("mode-empty");
+        let coding = belt(&workspace, Mode::ReadOnly);
+        for detail in [Value::Null, json!({})] {
+            let output = act_mode(&coding, &detail);
+            assert_eq!(output.kind, OutputKind::Done);
+            assert_eq!(output.detail, json!({"mode": "readonly", "changed": false}));
+        }
+    }
+
+    #[test]
+    fn a_mode_switch_changes_the_mode_and_reports_it() {
+        let workspace = Workspace::new("mode-switch");
+        let coding = belt(&workspace, Mode::ReadWrite);
+        let output = act_mode(&coding, &json!({"mode": "readonly"}));
+        assert_eq!(output.kind, OutputKind::Done);
+        assert_eq!(output.detail, json!({"mode": "readonly", "changed": true}));
+        assert_eq!(coding.mode(), Mode::ReadOnly);
+    }
+
+    #[test]
+    fn switching_to_the_current_mode_is_idempotent() {
+        let workspace = Workspace::new("mode-idempotent");
+        let coding = belt(&workspace, Mode::ReadOnly);
+        let output = act_mode(&coding, &json!({"mode": "readonly"}));
+        assert_eq!(output.kind, OutputKind::Done);
+        assert_eq!(output.detail, json!({"mode": "readonly", "changed": false}));
+        assert_eq!(coding.mode(), Mode::ReadOnly);
+    }
+
+    #[test]
+    fn a_malformed_mode_detail_is_refused() {
+        let workspace = Workspace::new("mode-malformed");
+        let coding = belt(&workspace, Mode::ReadWrite);
+        for detail in [
+            json!(7),
+            json!("readonly"),
+            json!({"mode": 7}),
+            json!({"mode": "readonly", "x": 1}),
+            json!({"other": "readonly"}),
+        ] {
+            let output = act_mode(&coding, &detail);
+            assert_eq!(output.kind, OutputKind::Error, "detail: {detail}");
+            assert_eq!(output.detail["reason"], "malformed mode");
+        }
+        assert_eq!(
+            coding.mode(),
+            Mode::ReadWrite,
+            "a malformed detail never switches"
+        );
+    }
+
+    #[test]
+    fn an_unknown_mode_name_is_refused() {
+        let workspace = Workspace::new("mode-unknown");
+        let coding = belt(&workspace, Mode::ReadWrite);
+        let output = act_mode(&coding, &json!({"mode": "sideways"}));
+        assert_eq!(output.kind, OutputKind::Error);
+        assert_eq!(
+            output.detail["reason"],
+            "`sideways` is not a mode: expected `readonly` or `readwrite`"
+        );
+        assert_eq!(coding.mode(), Mode::ReadWrite);
+    }
+
+    #[test]
+    fn a_switch_to_readonly_gates_patch_and_shell_but_not_read() {
+        let workspace = Workspace::new("mode-gate");
+        workspace.write("f.txt", "hello\n");
+        let coding = belt(&workspace, Mode::ReadWrite);
+        assert_eq!(coding.set_mode(Mode::ReadOnly), Mode::ReadWrite);
+
+        let patch = act(&coding, ACTION_PATCH, json!({"diff": "anything"}));
+        assert_eq!(patch.kind, OutputKind::Error);
+        assert_eq!(
+            patch.detail["reason"],
+            "`patch` is not available in readonly mode"
         );
 
-        let without_git = belt_without_git(&workspace, Mode::ReadWrite).system_prompt();
-        assert!(
-            without_git.contains("through `shell`"),
-            "the writer this belt has is named: {without_git}"
+        let shell = act(
+            &coding,
+            ACTION_SHELL,
+            json!({"argv": ["/bin/sh", "-c", "echo hi"]}),
+        );
+        assert_eq!(shell.kind, OutputKind::Error);
+        assert_eq!(
+            shell.detail["reason"],
+            "`shell` is not available in readonly mode"
+        );
+
+        let read = act(&coding, ACTION_READ, json!({"path": "f.txt"}));
+        assert_eq!(read.kind, OutputKind::Done);
+        assert_eq!(read.detail["content"], "hello\n");
+
+        assert_eq!(coding.set_mode(Mode::ReadWrite), Mode::ReadOnly);
+        assert!(coding.offers(ACTION_PATCH), "a switch back offers `patch`");
+    }
+
+    #[test]
+    fn the_tools_and_prompt_follow_a_switch() {
+        let workspace = Workspace::new("mode-tools");
+        let coding = belt(&workspace, Mode::ReadWrite);
+        assert_eq!(
+            tool_names(&coding),
+            ["read", "code_search", "patch", "shell"]
         );
         assert!(
-            !without_git.contains("`patch`"),
-            "a belt with no `git` must not claim the patch tool: {without_git}"
+            coding
+                .system_prompt()
+                .contains("through `patch` and `shell`"),
+            "the writers are named while writable"
+        );
+
+        assert_eq!(coding.set_mode(Mode::ReadOnly), Mode::ReadWrite);
+        assert_eq!(tool_names(&coding), ["read", "code_search"]);
+        let prompt = coding.system_prompt();
+        assert!(prompt.contains("read-only"), "prompt was: {prompt}");
+        assert!(
+            !prompt.contains("patch"),
+            "the writing tool is gone from the prompt: {prompt}"
+        );
+    }
+
+    #[test]
+    fn mode_is_not_a_tool() {
+        let workspace = Workspace::new("mode-tool");
+        let coding = belt(&workspace, Mode::ReadWrite);
+        assert!(!coding.offers(ACTION_MODE));
+        assert!(
+            !tool_names(&coding).contains(&ACTION_MODE.to_owned()),
+            "the session command never appears as a tool"
+        );
+        let output = act(&coding, ACTION_MODE, json!({}));
+        assert_eq!(output.kind, OutputKind::Error);
+        assert_eq!(
+            output.detail["reason"],
+            "the agent has no capability for this action"
         );
     }
 
@@ -1959,61 +2130,12 @@ mod tests {
     }
 
     #[test]
-    fn a_patch_applies_a_git_style_diff() {
-        let workspace = Workspace::new("patch-git");
-        workspace.write("f.txt", "hello\n");
-        let coding = belt(&workspace, Mode::ReadWrite);
-        let diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-hello\n+world\n";
-        let output = act(&coding, ACTION_PATCH, json!({"diff": diff}));
-        assert_eq!(output.kind, OutputKind::Done, "detail: {}", output.detail);
-        assert_eq!(output.detail["strip"], 1);
-        assert_eq!(output.detail["code"], 0);
-        assert_eq!(output.detail["files"], json!(["f.txt"]));
-        assert_eq!(
-            std::fs::read_to_string(workspace.0.join("f.txt")).expect("readable"),
-            "world\n"
-        );
-    }
-
-    #[test]
-    fn a_patch_applies_an_unprefixed_nested_diff() {
-        let workspace = Workspace::new("patch-nested");
-        workspace.write("sub/g.txt", "old\n");
-        let coding = belt(&workspace, Mode::ReadWrite);
-        let diff = "--- sub/g.txt\n+++ sub/g.txt\n@@ -1 +1 @@\n-old\n+new\n";
-        let output = act(&coding, ACTION_PATCH, json!({"diff": diff}));
-        assert_eq!(output.kind, OutputKind::Done, "detail: {}", output.detail);
-        assert_eq!(output.detail["strip"], 0);
-        assert_eq!(
-            std::fs::read_to_string(workspace.0.join("sub/g.txt")).expect("readable"),
-            "new\n"
-        );
-    }
-
-    #[test]
-    fn a_patch_reports_the_files_before_applying() {
-        let workspace = Workspace::new("patch-report");
+    fn the_patch_arm_reports_the_files_and_reports_done() {
+        let workspace = Workspace::new("patch-arm");
         workspace.write("f.txt", "hello\n");
         let coding = belt(&workspace, Mode::ReadWrite);
         let reports = Reports::default();
         let diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-hello\n+world\n";
-        coding.act(
-            &Command {
-                action: ACTION_PATCH.to_owned(),
-                detail: json!({"diff": diff}),
-            },
-            &reports,
-        );
-        assert_eq!(reports.details(), vec![json!({"files": ["f.txt"]})]);
-    }
-
-    #[test]
-    fn a_patch_refuses_a_lying_hunk_count_before_spawning() {
-        let workspace = Workspace::new("patch-lying");
-        workspace.write("f.txt", "a\n");
-        let coding = belt(&workspace, Mode::ReadWrite);
-        let reports = Reports::default();
-        let diff = "--- f.txt\n+++ f.txt\n@@ -1,2 +1,2 @@\n a\n";
         let output = coding.act(
             &Command {
                 action: ACTION_PATCH.to_owned(),
@@ -2021,61 +2143,34 @@ mod tests {
             },
             &reports,
         );
-        assert_eq!(output.kind, OutputKind::Error);
-        assert_eq!(
-            output.detail["reason"],
-            "a hunk header does not match its lines"
-        );
-        assert!(reports.details().is_empty(), "nothing was spawned");
+        assert_eq!(output.kind, OutputKind::Done, "detail: {}", output.detail);
+        assert_eq!(output.detail["files"], json!(["f.txt"]));
+        assert_eq!(output.detail["files_changed"], 1);
+        assert_eq!(reports.details(), vec![json!({"files": ["f.txt"]})]);
         assert_eq!(
             std::fs::read_to_string(workspace.0.join("f.txt")).expect("readable"),
-            "a\n",
-            "the file is untouched"
+            "world\n"
         );
     }
 
     #[test]
-    fn a_patch_that_escapes_the_workspace_is_refused() {
-        let workspace = Workspace::new("patch-escape");
+    fn the_patch_arm_refuses_a_bad_diff_without_reporting() {
+        let workspace = Workspace::new("patch-arm-bad");
         let coding = belt(&workspace, Mode::ReadWrite);
-        let diff = "--- ../escaped.txt\n+++ ../escaped.txt\n@@ -1 +1 @@\n-a\n+b\n";
-        let output = act(&coding, ACTION_PATCH, json!({"diff": diff}));
-        assert_eq!(output.kind, OutputKind::Error);
-        assert_eq!(
-            output.detail["reason"],
-            "the path contains a parent component"
+        let reports = Reports::default();
+        let output = coding.act(
+            &Command {
+                action: ACTION_PATCH.to_owned(),
+                detail: json!({"diff": "not a diff"}),
+            },
+            &reports,
         );
-    }
-
-    #[test]
-    fn a_patch_git_refuses_reports_its_bounded_stderr() {
-        let workspace = Workspace::new("patch-refused");
-        let coding = belt(&workspace, Mode::ReadWrite);
-        let diff = "--- a/missing.txt\n+++ b/missing.txt\n@@ -1 +1 @@\n-x\n+y\n";
-        let output = act(&coding, ACTION_PATCH, json!({"diff": diff}));
         assert_eq!(output.kind, OutputKind::Error);
-        assert_eq!(output.detail["reason"], "`git apply` refused the patch");
-        assert_ne!(output.detail["code"], 0);
+        assert_eq!(output.detail["reason"], "the diff is not a unified diff");
         assert!(
-            output.detail["stderr"]
-                .as_str()
-                .is_some_and(|stderr| !stderr.is_empty()),
-            "git's stderr is reported: {}",
-            output.detail
+            reports.details().is_empty(),
+            "a plan that is refused reports nothing"
         );
-    }
-
-    #[test]
-    fn an_already_applied_patch_fails() {
-        let workspace = Workspace::new("patch-applied");
-        workspace.write("f.txt", "hello\n");
-        let coding = belt(&workspace, Mode::ReadWrite);
-        let diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-hello\n+world\n";
-        let first = act(&coding, ACTION_PATCH, json!({"diff": diff}));
-        assert_eq!(first.kind, OutputKind::Done);
-        let second = act(&coding, ACTION_PATCH, json!({"diff": diff}));
-        assert_eq!(second.kind, OutputKind::Error);
-        assert_eq!(second.detail["reason"], "`git apply` refused the patch");
     }
 
     #[test]
@@ -2092,6 +2187,5 @@ mod tests {
         assert_eq!(MAX_SEARCH_MATCHES, 200);
         assert_eq!(MAX_SEARCH_TEXT_BYTES, 8 * 1024);
         assert_eq!(MAX_SEARCH_LINE_BYTES, 200);
-        assert_eq!(MAX_PATCH_OUTPUT_BYTES, 4 * 1024);
     }
 }

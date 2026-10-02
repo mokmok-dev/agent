@@ -1,22 +1,23 @@
 //! The agent binary.
 //!
 //! argv: `agent-agent --socket <bus.sock> --session <id> [--workdir <dir>]
-//! [--mode readonly|readwrite] [--git <path>]`, plus
+//! [--mode readonly|readwrite]`, plus
 //! `--model <id> --base-url <url> --env-key <NAME>` when the session's settings
 //! name a model endpoint.
 //!
-//! The capability dispatches by action: the coding belt answers `read`,
-//! `code_search`, `patch`, and `shell` in the session's workspace, `task` drives
-//! the model when an endpoint was given, and anything else is reported as
-//! unknown, so a client and an agent of different versions do not crash each
-//! other.
+//! The capability dispatches by action: `mode` reports or switches the session's
+//! mode, the coding belt answers `read`, `code_search`, `patch`, and `shell` in
+//! the session's workspace, `task` drives the model when an endpoint was given,
+//! and anything else is reported as unknown, so a client and an agent of different
+//! versions do not crash each other.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Parser;
 
-use agentd_agent::coding::{Coding, Mode};
+use agentd_agent::coding::{ACTION_MODE as MODE, Coding, Mode, act_mode};
 use agentd_agent::contract::{Command, Output};
 use agentd_agent::loopcore::{self, AgentConfig, Capability, Reporter};
 use agentd_agent::openai::{self, Client, Config as ModelConfig};
@@ -47,10 +48,6 @@ struct Cli {
     /// The capability set for this session, `readonly` or `readwrite`.
     #[arg(long, default_value = "readwrite")]
     mode: Mode,
-    /// The absolute `git` a `patch` is applied with. Defaults to a `git` found on
-    /// the agent's own `PATH`.
-    #[arg(long)]
-    git: Option<PathBuf>,
     /// The model id the endpoint is asked for, with `--base-url` and `--env-key`.
     #[arg(long)]
     model: Option<String>,
@@ -66,8 +63,9 @@ struct Cli {
 /// The dispatch: the coding belt, and the model-driven `task` when it exists.
 #[derive(Debug)]
 struct Dispatch {
-    /// The tools the session offers, gated by the mode and the host's `git`.
-    coding: Coding,
+    /// The one belt the session runs under, shared with the task so a mode
+    /// switched here is the mode the task reads.
+    coding: Arc<Coding>,
     /// The model-driven `task` capability, when the session's settings named an
     /// endpoint. Without one, `task` is an unknown action like any other.
     task: Option<Task>,
@@ -79,6 +77,11 @@ impl Capability for Dispatch {
         command: &Command,
         reporter: &dyn Reporter,
     ) -> Output {
+        // The mode command is a session command: it is answered here, before the
+        // task and the belt, and it is not a tool the model can call.
+        if command.action == MODE {
+            return act_mode(&self.coding, &command.detail);
+        }
         if command.action == TASK
             && let Some(task) = &self.task
         {
@@ -98,15 +101,11 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let workdir = cli.workdir.clone().unwrap_or_else(|| PathBuf::from("."));
-    let git = cli.git.clone().or_else(find_git);
-    if let Some(warning) = git_warning(cli.mode, git.as_deref()) {
-        tracing::warn!("{warning}");
-    }
     let coding =
-        Coding::new(&workdir, cli.mode, git.clone()).context("the workspace root is not usable")?;
+        Arc::new(Coding::new(&workdir, cli.mode).context("the workspace root is not usable")?);
     let capability = Dispatch {
-        coding,
-        task: task(&cli, &workdir, git)?,
+        coding: Arc::clone(&coding),
+        task: task(&cli, coding)?,
     };
     let config = AgentConfig {
         bus_socket: cli.socket,
@@ -116,31 +115,6 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The `git` to apply patches with, from the agent's own `PATH`.
-///
-/// A session's environment carries no `PATH` (`daemon/src/settings.rs` sets only
-/// the endpoint key), so inside a session the daemon must pass `--git` absolutely.
-/// This scan is for a local run.
-fn find_git() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join("git"))
-        .find(|candidate| candidate.is_file())
-}
-
-/// The warning to log when a session that could patch has no `git` to do it with.
-///
-/// A read-only session offers no writing tool, so the missing program is not news.
-const fn git_warning(
-    mode: Mode,
-    git: Option<&Path>,
-) -> Option<&'static str> {
-    if mode.is_read_only() || git.is_some() {
-        return None;
-    }
-    Some("no `git` found: the `patch` tool is not offered this session")
-}
-
 /// The model-driven capability, when the flags name an endpoint.
 ///
 /// The three flags belong together: an endpoint without a model, or a model with
@@ -148,8 +122,7 @@ const fn git_warning(
 /// operator can see it.
 fn task(
     cli: &Cli,
-    workdir: &Path,
-    git: Option<PathBuf>,
+    coding: Arc<Coding>,
 ) -> anyhow::Result<Option<Task>> {
     let (Some(model), Some(base_url), Some(env_key)) = (&cli.model, &cli.base_url, &cli.env_key)
     else {
@@ -171,7 +144,6 @@ fn task(
         config = config.with_proxy(proxy);
     }
     let client = Client::new(config).context("the model endpoint is not usable")?;
-    let coding = Coding::new(workdir, cli.mode, git).context("the workspace root is not usable")?;
     Ok(Some(Task::new(Box::new(client), coding)))
 }
 
@@ -194,39 +166,4 @@ fn proxy() -> anyhow::Result<Option<openai::Proxy>> {
         }
     }
     Ok(None)
-}
-
-#[cfg(test)]
-mod tests {
-    // Tests for the binary's own decisions: the `git` it resolves from `PATH`, and
-    // the warning it logs when a session that could patch has none.
-
-    use super::*;
-
-    #[test]
-    fn find_git_resolves_the_hosts_program() {
-        let git = find_git().expect("`git` is on a supported host's PATH");
-        assert!(
-            git.is_file(),
-            "the resolved program is a file: {}",
-            git.display()
-        );
-    }
-
-    #[test]
-    fn a_readwrite_session_without_git_is_told_why_patch_is_missing() {
-        let warning = git_warning(Mode::ReadWrite, None).expect("a warning when `git` is missing");
-        assert!(
-            warning.contains("`git`"),
-            "the warning names the program: {warning}"
-        );
-    }
-
-    #[test]
-    fn a_session_that_offers_no_writing_tool_is_not_warned_about_git() {
-        let git = Path::new("/usr/bin/git");
-        assert_eq!(git_warning(Mode::ReadOnly, Some(git)), None);
-        assert_eq!(git_warning(Mode::ReadOnly, None), None);
-        assert_eq!(git_warning(Mode::ReadWrite, Some(git)), None);
-    }
 }

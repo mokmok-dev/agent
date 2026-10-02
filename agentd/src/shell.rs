@@ -15,20 +15,19 @@
 //! The command is announced through the loop's [`Reporter`] before it is spawned,
 //! so a command that runs for minutes is visible while it runs.
 
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::path::PathBuf;
+use std::process::Command as ChildCommand;
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::child;
 use crate::contract::{Command, Output, OutputKind};
 use crate::loopcore::{Capability, Reporter};
 
 /// The default cap on captured output, one mebibyte.
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
-
-/// The most argv entries a command may carry, the program included.
-const MAX_ARGV: usize = 256;
 
 /// The action this capability answers.
 pub const ACTION: &str = "shell";
@@ -76,7 +75,7 @@ impl Capability for Shell {
         let argv: Vec<String> =
             serde_json::from_value(command.detail.get("argv").cloned().unwrap_or(Value::Null))
                 .unwrap_or_default();
-        if argv.is_empty() || argv.len() > MAX_ARGV || argv.iter().any(|arg| arg.contains('\0')) {
+        if argv.is_empty() || argv.len() > 256 || argv.iter().any(|arg| arg.contains('\0')) {
             return Output {
                 kind: OutputKind::Error,
                 action: command.action.clone(),
@@ -89,50 +88,144 @@ impl Capability for Shell {
         reporter.report(json!({"argv": &argv}));
 
         let started = Instant::now();
-        let program = Path::new(&argv[0]);
-        let rest: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+        let spawned = ChildCommand::new(&argv[0])
+            .args(&argv[1..])
+            .current_dir(&self.workdir)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
 
-        // The bounded runner drains both pipes on their own threads, so a command
-        // that writes more than a pipe buffer holds cannot block, and caps what is
-        // retained so a runaway command cannot grow the agent's memory. A command
-        // that never returns is killed at the deadline with its partial output.
-        match child::run_child(
-            program,
-            &rest,
-            &self.workdir,
-            &[],
-            None,
-            self.timeout,
-            MAX_OUTPUT_BYTES,
-        ) {
-            Ok(outcome) => {
-                let detail = json!({
-                    "code": outcome.code,
-                    "duration_ms": child::millis(outcome.duration),
-                    "stdout": outcome.stdout.text(),
-                    "stderr": outcome.stderr.text(),
-                    "stdout_total_bytes": outcome.stdout.total,
-                    "stderr_total_bytes": outcome.stderr.total,
-                    "truncated": outcome.stdout.truncated || outcome.stderr.truncated,
-                    "timed_out": outcome.timed_out,
-                });
-                Output {
-                    kind: OutputKind::Done,
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(error) => {
+                return Output {
+                    kind: OutputKind::Error,
                     action: command.action.clone(),
-                    detail,
-                }
+                    detail: json!({
+                        "reason": "could not start the command",
+                        "error": error.to_string(),
+                        "duration_ms": millis(started.elapsed()),
+                    }),
+                };
             },
-            Err(error) => Output {
-                kind: OutputKind::Error,
-                action: command.action.clone(),
-                detail: json!({
-                    "reason": "could not start the command",
-                    "error": error.to_string(),
-                    "duration_ms": child::millis(started.elapsed()),
-                }),
-            },
+        };
+
+        // Drain both pipes on their own threads, so a command that writes more
+        // than a pipe buffer holds cannot block, and cap what is retained so a
+        // runaway command cannot grow the agent's memory. Bytes past the cap are
+        // read and discarded, so the command still finishes.
+        let out_reader = child.stdout.take().map(spawn_reader);
+        let err_reader = child.stderr.take().map(spawn_reader);
+
+        let (code, timed_out) = wait_with_timeout(&mut child, self.timeout);
+        let stdout = out_reader.map(join_reader).unwrap_or_default();
+        let stderr = err_reader.map(join_reader).unwrap_or_default();
+
+        let detail = json!({
+            "code": code,
+            "duration_ms": millis(started.elapsed()),
+            "stdout": lossy(&stdout),
+            "stderr": lossy(&stderr),
+            "stdout_total_bytes": stdout.total,
+            "stderr_total_bytes": stderr.total,
+            "truncated": stdout.truncated || stderr.truncated,
+            "timed_out": timed_out,
+        });
+        Output {
+            kind: OutputKind::Done,
+            action: command.action.clone(),
+            detail,
         }
     }
+}
+
+/// What a reader thread read: the retained head, and whether it dropped a tail.
+#[derive(Debug, Default)]
+struct Captured {
+    /// The retained bytes, at most [`MAX_OUTPUT_BYTES`].
+    head: Vec<u8>,
+    /// How many bytes the command wrote in total.
+    total: u64,
+    /// Whether any bytes were dropped past the cap.
+    truncated: bool,
+}
+
+impl Captured {
+    /// The retained bytes.
+    fn bytes(&self) -> &[u8] {
+        &self.head
+    }
+}
+
+/// Read `pipe` to its end, retaining at most [`MAX_OUTPUT_BYTES`].
+///
+/// Bytes past the cap are still read and discarded, so the command never blocks
+/// on a full pipe; only the retained buffer is bounded.
+fn spawn_reader(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Captured> {
+    std::thread::spawn(move || {
+        let mut captured = Captured::default();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match pipe.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    captured.total += read as u64;
+                    let room = MAX_OUTPUT_BYTES.saturating_sub(captured.head.len());
+                    let keep = room.min(read);
+                    captured.head.extend_from_slice(&buffer[..keep]);
+                    if keep < read {
+                        captured.truncated = true;
+                    }
+                },
+            }
+        }
+        captured
+    })
+}
+
+/// Join a reader thread, yielding what it read, or nothing if it panicked.
+fn join_reader(handle: std::thread::JoinHandle<Captured>) -> Captured {
+    handle.join().unwrap_or_default()
+}
+
+/// Wait for `child`, killing it if it exceeds `timeout`.
+///
+/// Returns the exit code and whether the timeout fired. A killed child reports
+/// no code, which the output records alongside `timed_out`.
+fn wait_with_timeout(
+    child: &mut Child,
+    timeout: Duration,
+) -> (Option<i32>, bool) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return (status.code(), false),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let status = child.wait().ok();
+                    return (status.and_then(|status| status.code()), true);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            },
+            Err(_) => return (None, false),
+        }
+    }
+}
+
+/// A lossy UTF-8 view of captured output, for the event's JSON.
+fn lossy(captured: &Captured) -> String {
+    String::from_utf8_lossy(captured.bytes()).into_owned()
+}
+
+/// `duration` as whole milliseconds, saturating at the `u64` bound.
+///
+/// A duration that large is unreachable in practice, but saturating keeps the
+/// conversion total rather than a silent truncation.
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
