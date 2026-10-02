@@ -7,9 +7,9 @@
 //! results back, and stop when it answers with no tool call.
 //!
 //! The model is a [`Model`], so the whole capability is exercisable without a
-//! network. `shell` is the one tool it offers today, which is why a task's
+//! network. The tools it offers are the coding belt's, which is why a task's
 //! commands inherit the session's confinement and the same bounded output the
-//! `shell` action uses. Nothing here spawns a process itself.
+//! belt's arms use. Nothing here spawns a process itself.
 //!
 //! Everything that crosses into the model's context is bounded, for the reason
 //! [`crate::shell`] bounds a command's output: a model's context is a resource
@@ -18,10 +18,10 @@
 
 use serde_json::{Value, json};
 
+use crate::coding::Coding;
 use crate::contract::{Command, Output, OutputKind};
 use crate::loopcore::{Capability, Reporter};
 use crate::model::{Message, Model, Tool, ToolCall};
-use crate::shell::{self, Shell};
 
 /// The action this capability answers.
 pub const ACTION: &str = "task";
@@ -29,46 +29,40 @@ pub const ACTION: &str = "task";
 /// The most model turns one task may take before it is stopped.
 pub const MAX_TURNS: usize = 32;
 
-/// How much of one of a tool result's streams is fed back to the model.
+/// How much of one string in a tool result is fed back to the model.
 const MAX_TOOL_RESULT_BYTES: usize = 8 * 1024;
 
 /// How much of a whole tool result is fed back to the model.
 ///
-/// Twice the per-stream cap, plus room for the fields around the two streams, so
-/// the bound holds even for a tool whose detail has fields this does not know.
+/// Twice the per-string cap, plus room for the fields around the strings, so the
+/// bound holds even for a tool whose detail has fields this does not know.
 const MAX_TOOL_MESSAGE_BYTES: usize = 2 * MAX_TOOL_RESULT_BYTES + 1024;
 
 /// How much of the model's prose one progress report carries.
 const MAX_REPORT_BYTES: usize = 2 * 1024;
-
-/// What the agent tells the model about itself.
-const SYSTEM_PROMPT: &str = "You are the agent for one session, working in that session's workspace. \
-You have one tool, `shell`, which runs a program with arguments in the workspace and returns its exit \
-code, its standard output, and its standard error. Use it to inspect and change files. When the task is \
-complete, reply with your answer and no tool call.";
 
 /// Run the `task` action: `detail` is `{"task": "..."}`.
 #[derive(Debug)]
 pub struct Task {
     /// The model the task is driven by.
     model: Box<dyn Model>,
-    /// How the model's commands are run, in the session's workspace.
-    shell: Shell,
+    /// The tools the model is offered, and how its calls are run.
+    coding: Coding,
     /// The most model turns one task may take.
     max_turns: usize,
 }
 
 impl Task {
-    /// A task capability driven by `model`, running its commands through `shell`,
-    /// which names the workspace they run in.
+    /// A task capability driven by `model`, running its tool calls through
+    /// `coding`, which names the workspace and the toolbelt.
     #[must_use]
     pub fn new(
         model: Box<dyn Model>,
-        shell: Shell,
+        coding: Coding,
     ) -> Self {
         Self {
             model,
-            shell,
+            coding,
             max_turns: MAX_TURNS,
         }
     }
@@ -83,6 +77,16 @@ impl Task {
         self
     }
 
+    /// The tools the agent offers the model.
+    fn tools(&self) -> Vec<Tool> {
+        self.coding.tools()
+    }
+
+    /// What the agent tells the model about itself.
+    fn system_prompt(&self) -> String {
+        self.coding.system_prompt()
+    }
+
     /// Run one tool call.
     ///
     /// A name the agent does not offer is reported rather than refused, so the
@@ -93,18 +97,20 @@ impl Task {
         call: &ToolCall,
         reporter: &dyn Reporter,
     ) -> Output {
-        if call.name != shell::ACTION {
+        if !self.coding.offers(&call.name) {
             return Output {
                 kind: OutputKind::Error,
                 action: call.name.clone(),
                 detail: json!({"reason": "the agent has no tool by that name"}),
             };
         }
-        let command = Command {
-            action: shell::ACTION.to_owned(),
-            detail: json!({"argv": call.arguments.get("argv").cloned().unwrap_or(Value::Null)}),
-        };
-        self.shell.act(&command, reporter)
+        self.coding.act(
+            &Command {
+                action: call.name.clone(),
+                detail: call.arguments.clone(),
+            },
+            reporter,
+        )
     }
 }
 
@@ -118,10 +124,10 @@ impl Capability for Task {
             return failed(command, json!({"reason": "malformed task"}));
         };
 
-        let tools = tools();
+        let tools = self.tools();
         let mut messages = vec![
             Message::System {
-                content: SYSTEM_PROMPT.to_owned(),
+                content: self.system_prompt(),
             },
             Message::User {
                 content: task.to_owned(),
@@ -189,28 +195,6 @@ impl Capability for Task {
     }
 }
 
-/// The tools the agent offers the model.
-fn tools() -> Vec<Tool> {
-    vec![Tool {
-        name: shell::ACTION.to_owned(),
-        description: "Run a program with arguments in the session workspace, and return its exit \
-code, its standard output, and its standard error."
-            .to_owned(),
-        parameters: json!({
-            "type": "object",
-            "properties": {
-                "argv": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "The program and its arguments, the program first.",
-                },
-            },
-            "required": ["argv"],
-            "additionalProperties": false,
-        }),
-    }]
-}
-
 /// The output for a task that could not finish.
 fn failed(
     command: &Command,
@@ -225,21 +209,35 @@ fn failed(
 
 /// What the model is told a tool returned.
 ///
-/// The `shell` capability caps a command's output at a mebibyte, which is right
-/// for the log and far too much for a model: a few turns of it would fill any
-/// context window. Each stream is cut to [`MAX_TOOL_RESULT_BYTES`] first, so
-/// neither stream can crowd the other out of the model's view, and the whole
-/// result is then cut to [`MAX_TOOL_MESSAGE_BYTES`], so a tool whose detail this
-/// does not know is bounded too.
+/// A tool's output is capped for the log at a mebibyte, which is right for the log
+/// and far too much for a model: a few turns of it would fill any context window.
+/// Every string in the detail is cut to [`MAX_TOOL_RESULT_BYTES`] first, at any
+/// depth, so no one field -- a `read`'s content or a `code_search`'s match text --
+/// can crowd the others out; the whole result is then cut to
+/// [`MAX_TOOL_MESSAGE_BYTES`], so a tool whose detail this does not know is bounded
+/// too.
 fn tool_result(output: &Output) -> String {
     let mut detail = output.detail.clone();
-    for field in ["stdout", "stderr"] {
-        if let Some(Value::String(text)) = detail.get_mut(field) {
-            let cut = bounded(text, MAX_TOOL_RESULT_BYTES);
-            *text = cut;
-        }
-    }
+    bound_strings(&mut detail);
     bounded(&detail.to_string(), MAX_TOOL_MESSAGE_BYTES)
+}
+
+/// Cut every string in `value`, at any depth, to [`MAX_TOOL_RESULT_BYTES`].
+fn bound_strings(value: &mut Value) {
+    match value {
+        Value::String(text) => *text = bounded(text, MAX_TOOL_RESULT_BYTES),
+        Value::Array(items) => {
+            for item in items {
+                bound_strings(item);
+            }
+        },
+        Value::Object(fields) => {
+            for field in fields.values_mut() {
+                bound_strings(field);
+            }
+        },
+        _ => {},
+    }
 }
 
 /// `text` cut to at most `cap` bytes, marked when bytes were dropped.
@@ -272,6 +270,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::coding::Mode;
     use crate::model::{Error, Response};
 
     /// One request a [`Scripted`] model was given.
@@ -400,14 +399,14 @@ mod tests {
 
     /// A task capability over a fresh workspace, driven by `answers`.
     ///
-    /// The shell keeps its own timeout, which every command here is well inside:
-    /// each finishes on its own, so no test leans on the timeout.
+    /// The belt has no `git`, so its tools are `read`, `code_search`, and `shell`;
+    /// every command here is well inside the belt's timeout, so no test leans on it.
     fn task(answers: Vec<Result<Response, String>>) -> (Task, std::sync::Arc<Scripted>, Workspace) {
         let workspace = Workspace::new("task");
         let model = std::sync::Arc::new(Scripted::new(answers));
-        let shell = Shell::in_workspace(&workspace.0);
+        let coding = Coding::new(&workspace.0, Mode::ReadWrite, None).expect("the workspace opens");
         (
-            Task::new(Box::new(ArcModel(model.clone())), shell),
+            Task::new(Box::new(ArcModel(model.clone())), coding),
             model,
             workspace,
         )
@@ -461,23 +460,112 @@ mod tests {
     }
 
     #[test]
-    fn the_shell_tool_is_offered_with_a_schema_that_names_what_it_needs() {
+    fn the_offered_tools_are_read_code_search_and_shell_without_git() {
         let (task, model, _workspace) = task(vec![Ok(says("ok"))]);
         task.act(&task_action("write a file"), &Reports::default());
 
         let requests = model.requests();
         let request = requests.first().expect("the model was asked once");
-        assert_eq!(request.tools.len(), 1, "one tool is offered today");
-        let tool = request.tools.first().expect("one tool");
-        assert_eq!(tool.name, "shell");
+        let names: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
+        assert_eq!(
+            names,
+            ["read", "code_search", "shell"],
+            "patch needs git, which this belt has none of"
+        );
+        let shell = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "shell")
+            .expect("the shell tool is offered");
         assert!(
-            !tool.description.is_empty(),
+            !shell.description.is_empty(),
             "the model decides from the description"
         );
         assert_eq!(
-            tool.parameters["required"],
+            shell.parameters["required"],
             json!(["argv"]),
             "the schema names what the tool needs"
+        );
+    }
+
+    #[test]
+    fn a_readwrite_belt_with_git_offers_patch_too() {
+        let git = std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| PathBuf::from(dir).join("git"))
+            .find(|candidate| candidate.is_file())
+            .expect("`git` exists on a supported host");
+        let workspace = Workspace::new("task-git");
+        let model = std::sync::Arc::new(Scripted::new(vec![Ok(says("ok"))]));
+        let coding = Coding::new(&workspace.0, Mode::ReadWrite, Some(git)).expect("opens");
+        let task = Task::new(Box::new(ArcModel(model.clone())), coding);
+        task.act(&task_action("write a file"), &Reports::default());
+
+        let requests = model.requests();
+        let request = requests.first().expect("the model was asked once");
+        let names: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
+        assert_eq!(names, ["read", "code_search", "patch", "shell"]);
+    }
+
+    #[test]
+    fn the_prompt_names_the_offered_tools() {
+        let (task, model, _workspace) = task(vec![Ok(says("ok"))]);
+        task.act(&task_action("write a file"), &Reports::default());
+
+        let requests = model.requests();
+        let request = requests.first().expect("the model was asked once");
+        match request.messages.first().expect("a system message") {
+            Message::System { content } => assert!(
+                content.contains("read, code_search, shell"),
+                "the prompt names the offered tools: {content}"
+            ),
+            other => panic!("expected a system message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_read_tool_call_runs_through_the_task_loop() {
+        let (task, model, workspace) = task(vec![
+            Ok(asks_for("read", json!({"path": "f.txt"}))),
+            Ok(says("it reads hello")),
+        ]);
+        std::fs::write(workspace.0.join("f.txt"), "hello\n").expect("writes the file");
+        let output = task.act(&task_action("read the file"), &Reports::default());
+
+        assert_eq!(output.kind, OutputKind::Done);
+        let requests = model.requests();
+        let second = requests.get(1).expect("the model was asked twice");
+        match second.messages.last().expect("a tool message") {
+            Message::Tool { content, .. } => assert!(
+                content.contains("hello"),
+                "the file's content reaches the model: {content}"
+            ),
+            other => panic!("expected a tool message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tool_result_cuts_strings_at_any_depth() {
+        let long = "x".repeat(MAX_TOOL_RESULT_BYTES + 10);
+        let output = Output {
+            kind: OutputKind::Done,
+            action: "read".to_owned(),
+            detail: json!({
+                "content": long,
+                "nested": {"text": long},
+            }),
+        };
+        let result = tool_result(&output);
+        assert!(
+            result.len() <= MAX_TOOL_MESSAGE_BYTES,
+            "the result is bounded, was {} bytes",
+            result.len()
+        );
+        assert!(
+            result.contains("[truncated:"),
+            "the cut is marked: {result}"
         );
     }
 

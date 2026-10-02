@@ -1,24 +1,25 @@
 //! The agent binary.
 //!
-//! argv: `agent-agent --socket <bus.sock> --session <id> [--workdir <dir>]`,
-//! plus `--model <id> --base-url <url> --env-key <NAME>` when the session's
-//! settings name a model endpoint.
+//! argv: `agent-agent --socket <bus.sock> --session <id> [--workdir <dir>]
+//! [--mode readonly|readwrite] [--git <path>]`, plus
+//! `--model <id> --base-url <url> --env-key <NAME>` when the session's settings
+//! name a model endpoint.
 //!
-//! The capability dispatches by action: `shell` runs a command in the session's
-//! workspace, `task` drives the model when an endpoint was given, and anything
-//! else is reported as unknown, so a client and an agent of different versions do
-//! not crash each other.
+//! The capability dispatches by action: the coding belt answers `read`,
+//! `code_search`, `patch`, and `shell` in the session's workspace, `task` drives
+//! the model when an endpoint was given, and anything else is reported as
+//! unknown, so a client and an agent of different versions do not crash each
+//! other.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
 use clap::Parser;
-use serde_json::json;
 
-use agentd_agent::contract::{Command, Output, OutputKind};
+use agentd_agent::coding::{Coding, Mode};
+use agentd_agent::contract::{Command, Output};
 use agentd_agent::loopcore::{self, AgentConfig, Capability, Reporter};
 use agentd_agent::openai::{self, Client, Config as ModelConfig};
-use agentd_agent::shell::{ACTION as SHELL, Shell};
 use agentd_agent::task::{ACTION as TASK, Task};
 use zeroize::Zeroizing;
 
@@ -43,6 +44,13 @@ struct Cli {
     /// workspace, which the session policy has bound read-write.
     #[arg(long)]
     workdir: Option<PathBuf>,
+    /// The capability set for this session, `readonly` or `readwrite`.
+    #[arg(long, default_value = "readwrite")]
+    mode: Mode,
+    /// The absolute `git` a `patch` is applied with. Defaults to a `git` found on
+    /// the agent's own `PATH`.
+    #[arg(long)]
+    git: Option<PathBuf>,
     /// The model id the endpoint is asked for, with `--base-url` and `--env-key`.
     #[arg(long)]
     model: Option<String>,
@@ -55,11 +63,11 @@ struct Cli {
     env_key: Option<String>,
 }
 
-/// The dispatch: one capability per action name.
+/// The dispatch: the coding belt, and the model-driven `task` when it exists.
 #[derive(Debug)]
 struct Dispatch {
-    /// The `shell` capability, which every session has.
-    shell: Shell,
+    /// The tools the session offers, gated by the mode and the host's `git`.
+    coding: Coding,
     /// The model-driven `task` capability, when the session's settings named an
     /// endpoint. Without one, `task` is an unknown action like any other.
     task: Option<Task>,
@@ -71,24 +79,12 @@ impl Capability for Dispatch {
         command: &Command,
         reporter: &dyn Reporter,
     ) -> Output {
-        if command.action == SHELL {
-            return self.shell.act(command, reporter);
-        }
         if command.action == TASK
             && let Some(task) = &self.task
         {
             return task.act(command, reporter);
         }
-        unknown(command)
-    }
-}
-
-/// The output for an action no capability answers.
-fn unknown(command: &Command) -> Output {
-    Output {
-        kind: OutputKind::Error,
-        action: command.action.clone(),
-        detail: json!({"reason": "the agent has no capability for this action"}),
+        self.coding.act(command, reporter)
     }
 }
 
@@ -102,9 +98,17 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let workdir = cli.workdir.clone().unwrap_or_else(|| PathBuf::from("."));
+    let git = cli.git.clone().or_else(find_git);
+    if git.is_none() && !cli.mode.is_read_only() {
+        // A session's environment carries no `PATH`, so the daemon must name `git`
+        // absolutely; this warning is what tells the operator why `patch` is gone.
+        tracing::warn!("no `git` found: the `patch` tool is not offered this session");
+    }
+    let coding =
+        Coding::new(&workdir, cli.mode, git.clone()).context("the workspace root is not usable")?;
     let capability = Dispatch {
-        shell: Shell::in_workspace(&workdir),
-        task: task(&cli, &workdir)?,
+        coding,
+        task: task(&cli, &workdir, git)?,
     };
     let config = AgentConfig {
         bus_socket: cli.socket,
@@ -114,6 +118,18 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The `git` to apply patches with, from the agent's own `PATH`.
+///
+/// A session's environment carries no `PATH` (`daemon/src/settings.rs` sets only
+/// the endpoint key), so inside a session the daemon must pass `--git` absolutely.
+/// This scan is for a local run.
+fn find_git() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join("git"))
+        .find(|candidate| candidate.is_file())
+}
+
 /// The model-driven capability, when the flags name an endpoint.
 ///
 /// The three flags belong together: an endpoint without a model, or a model with
@@ -121,7 +137,8 @@ fn main() -> anyhow::Result<()> {
 /// operator can see it.
 fn task(
     cli: &Cli,
-    workdir: &std::path::Path,
+    workdir: &Path,
+    git: Option<PathBuf>,
 ) -> anyhow::Result<Option<Task>> {
     let (Some(model), Some(base_url), Some(env_key)) = (&cli.model, &cli.base_url, &cli.env_key)
     else {
@@ -143,10 +160,8 @@ fn task(
         config = config.with_proxy(proxy);
     }
     let client = Client::new(config).context("the model endpoint is not usable")?;
-    Ok(Some(Task::new(
-        Box::new(client),
-        Shell::in_workspace(workdir),
-    )))
+    let coding = Coding::new(workdir, cli.mode, git).context("the workspace root is not usable")?;
+    Ok(Some(Task::new(Box::new(client), coding)))
 }
 
 /// The proxy to reach the endpoint through, from the environment.
