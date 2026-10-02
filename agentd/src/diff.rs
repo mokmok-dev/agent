@@ -519,6 +519,40 @@ mod tests {
     }
 
     #[test]
+    fn a_context_line_with_no_removal_left_is_refused() {
+        // The counts are exact, and a line that would need a side already at zero is
+        // a mismatch rather than a line with an unknown prefix.
+        refuses(
+            "--- f\n+++ f\n@@ -1 +0,0 @@\n a\n",
+            "a hunk header does not match its lines",
+        );
+    }
+
+    #[test]
+    fn a_context_line_with_no_addition_left_is_refused() {
+        refuses(
+            "--- f\n+++ f\n@@ -0,0 +1 @@\n a\n",
+            "a hunk header does not match its lines",
+        );
+    }
+
+    #[test]
+    fn a_removal_with_no_removal_left_is_refused() {
+        refuses(
+            "--- f\n+++ f\n@@ -0,0 +1 @@\n-x\n",
+            "a hunk header does not match its lines",
+        );
+    }
+
+    #[test]
+    fn an_addition_with_no_addition_left_is_refused() {
+        refuses(
+            "--- f\n+++ f\n@@ -1,1 +0,0 @@\n+x\n",
+            "a hunk header does not match its lines",
+        );
+    }
+
+    #[test]
     fn a_no_newline_marker_counts_for_neither_side() {
         let parsed = accepts(
             "--- f\n+++ f\n@@ -1 +1 @@\n-a\n\\ No newline at end of file\n+b\n\\ No newline at end of file\n",

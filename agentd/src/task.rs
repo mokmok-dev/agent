@@ -570,6 +570,24 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_result_cuts_strings_inside_an_array_too() {
+        // A search's match text lives in an array of objects, which the bound has to
+        // reach as well: two strings over the per-string cap hold the whole result
+        // under the message cap, so nothing else would cut them.
+        let long = "x".repeat(MAX_TOOL_RESULT_BYTES + 108);
+        let output = Output {
+            kind: OutputKind::Done,
+            action: "code_search".to_owned(),
+            detail: json!({"matches": [{"text": long}, {"text": long}]}),
+        };
+        let result = tool_result(&output);
+        assert!(
+            result.contains("[truncated:"),
+            "the cut is marked: {result}"
+        );
+    }
+
+    #[test]
     fn a_task_runs_the_tool_the_model_asks_for() {
         let (task, model, _workspace) = task(vec![
             Ok(asks_for(

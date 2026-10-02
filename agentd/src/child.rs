@@ -48,12 +48,12 @@ pub fn capture_reader(
     let mut captured = Captured::default();
     let mut buffer = [0_u8; 8192];
     loop {
-        let Ok(read) = reader.read(&mut buffer) else {
-            return captured;
+        let read = match reader.read(&mut buffer) {
+            // The end of the input, or a pipe that broke: either way, what arrived
+            // is what the child produced.
+            Ok(0) | Err(_) => return captured,
+            Ok(read) => read,
         };
-        if read == 0 {
-            return captured;
-        }
         captured.total += read as u64;
         let room = cap.saturating_sub(captured.head.len());
         let keep = room.min(read);

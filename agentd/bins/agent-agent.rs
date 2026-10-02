@@ -99,10 +99,8 @@ fn main() -> anyhow::Result<()> {
 
     let workdir = cli.workdir.clone().unwrap_or_else(|| PathBuf::from("."));
     let git = cli.git.clone().or_else(find_git);
-    if git.is_none() && !cli.mode.is_read_only() {
-        // A session's environment carries no `PATH`, so the daemon must name `git`
-        // absolutely; this warning is what tells the operator why `patch` is gone.
-        tracing::warn!("no `git` found: the `patch` tool is not offered this session");
+    if let Some(warning) = git_warning(cli.mode, git.as_deref()) {
+        tracing::warn!("{warning}");
     }
     let coding =
         Coding::new(&workdir, cli.mode, git.clone()).context("the workspace root is not usable")?;
@@ -128,6 +126,19 @@ fn find_git() -> Option<PathBuf> {
     std::env::split_paths(&path)
         .map(|dir| dir.join("git"))
         .find(|candidate| candidate.is_file())
+}
+
+/// The warning to log when a session that could patch has no `git` to do it with.
+///
+/// A read-only session offers no writing tool, so the missing program is not news.
+const fn git_warning(
+    mode: Mode,
+    git: Option<&Path>,
+) -> Option<&'static str> {
+    if mode.is_read_only() || git.is_some() {
+        return None;
+    }
+    Some("no `git` found: the `patch` tool is not offered this session")
 }
 
 /// The model-driven capability, when the flags name an endpoint.
@@ -183,4 +194,39 @@ fn proxy() -> anyhow::Result<Option<openai::Proxy>> {
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    // Tests for the binary's own decisions: the `git` it resolves from `PATH`, and
+    // the warning it logs when a session that could patch has none.
+
+    use super::*;
+
+    #[test]
+    fn find_git_resolves_the_hosts_program() {
+        let git = find_git().expect("`git` is on a supported host's PATH");
+        assert!(
+            git.is_file(),
+            "the resolved program is a file: {}",
+            git.display()
+        );
+    }
+
+    #[test]
+    fn a_readwrite_session_without_git_is_told_why_patch_is_missing() {
+        let warning = git_warning(Mode::ReadWrite, None).expect("a warning when `git` is missing");
+        assert!(
+            warning.contains("`git`"),
+            "the warning names the program: {warning}"
+        );
+    }
+
+    #[test]
+    fn a_session_that_offers_no_writing_tool_is_not_warned_about_git() {
+        let git = Path::new("/usr/bin/git");
+        assert_eq!(git_warning(Mode::ReadOnly, Some(git)), None);
+        assert_eq!(git_warning(Mode::ReadOnly, None), None);
+        assert_eq!(git_warning(Mode::ReadWrite, Some(git)), None);
+    }
 }

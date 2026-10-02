@@ -528,7 +528,10 @@ fn read_file(
     let mut lines = 0_usize;
     let mut truncated = false;
     let mut next_line = None;
-    let mut line_index = 1_u64;
+    // The lines before the window are consumed but not retained. Counting up to
+    // `start_line` and comparing would leave state that nothing reads once the
+    // window has started, so the countdown is the whole of it.
+    let mut to_skip = start_line - 1;
 
     loop {
         if lines >= line_count {
@@ -543,11 +546,11 @@ fn read_file(
         else {
             break;
         };
-        if line_index < start_line {
+        if to_skip > 0 {
             if too_long {
                 discard_line(&mut reader).map_err(|_| format!("no file at `{raw}`"))?;
             }
-            line_index += 1;
+            to_skip -= 1;
             continue;
         }
 
@@ -573,7 +576,6 @@ fn read_file(
             truncated = true;
             discard_line(&mut reader).map_err(|_| format!("no file at `{raw}`"))?;
         }
-        line_index += 1;
     }
 
     Ok(ReadOutcome {
@@ -1228,6 +1230,26 @@ mod tests {
     }
 
     #[test]
+    fn every_tool_carries_the_description_the_model_decides_from() {
+        let workspace = Workspace::new("descriptions");
+        let coding = belt(&workspace, Mode::ReadWrite);
+        let descriptions: Vec<String> = coding
+            .tools()
+            .into_iter()
+            .map(|tool| tool.description)
+            .collect();
+        assert_eq!(
+            descriptions,
+            [
+                "Read a window of lines from a file in the workspace, with its line numbers.",
+                "Find a literal substring in the workspace's files and report each matching line.",
+                "Apply a unified diff to the workspace, checking the diff's syntax first.",
+                "Run a program with arguments in the session workspace, and return its exit code, its standard output, and its standard error.",
+            ]
+        );
+    }
+
+    #[test]
     fn a_readwrite_belt_with_git_offers_all_four() {
         let workspace = Workspace::new("rw-tools");
         let coding = belt(&workspace, Mode::ReadWrite);
@@ -1540,6 +1562,67 @@ mod tests {
     }
 
     #[test]
+    fn a_read_of_a_missing_file_is_refused() {
+        let workspace = Workspace::new("read-missing");
+        let coding = belt(&workspace, Mode::ReadOnly);
+        let output = act(&coding, ACTION_READ, json!({"path": "gone.txt"}));
+        assert_eq!(output.kind, OutputKind::Error);
+        assert_eq!(output.detail["reason"], "no file at `gone.txt`");
+    }
+
+    #[test]
+    fn a_read_of_exactly_the_byte_budget_is_not_cut() {
+        // The budget is what the content may spend after the envelope. A file whose
+        // escaped content lands exactly on it is read whole; a mutant that compares
+        // `>=` drops the last line and calls the detail truncated.
+        let workspace = Workspace::new("read-budget");
+        let lines = (MAX_READ_BYTES - READ_ENVELOPE_BYTES) / 12;
+        assert_eq!(
+            lines * 12,
+            MAX_READ_BYTES - READ_ENVELOPE_BYTES,
+            "the fixture's lines are exactly the budget"
+        );
+        workspace.write("f.txt", &"aaaaaaaaaa\n".repeat(lines));
+        let coding = belt(&workspace, Mode::ReadOnly);
+        let output = act(
+            &coding,
+            ACTION_READ,
+            json!({"path": "f.txt", "line_count": lines}),
+        );
+        assert_eq!(output.detail["lines"], json!(lines), "the whole file fits");
+        assert_eq!(output.detail["truncated"], false);
+        assert_eq!(output.detail["next_line"], Value::Null);
+    }
+
+    #[test]
+    fn a_final_line_of_exactly_the_window_without_a_newline_is_not_cut() {
+        // The window is one byte wider than the line cap, so it fills exactly when
+        // the final line is the cap and the input ends: nothing was dropped, and a
+        // mutant that compares the filled window with `>=` reports a cut.
+        let workspace = Workspace::new("read-window-eof");
+        workspace.write("f.txt", &"x".repeat(MAX_READ_LINE_BYTES));
+        let coding = belt(&workspace, Mode::ReadOnly);
+        let output = act(&coding, ACTION_READ, json!({"path": "f.txt"}));
+        assert_eq!(output.detail["lines"], 1);
+        assert_eq!(output.detail["truncated"], false, "nothing was dropped");
+        assert_eq!(
+            output.detail["content"].as_str().expect("a string").len(),
+            MAX_READ_LINE_BYTES
+        );
+    }
+
+    #[test]
+    fn an_escaped_character_costs_what_json_spends_on_it() {
+        // The budget is on the serialized detail, so the line's cost is its escaped
+        // length: a newline or a quote costs two bytes, a control character the six
+        // of `\u001f`, and anything else its own width.
+        assert_eq!(escaped_len("a"), 1);
+        assert_eq!(escaped_len("\n"), 2);
+        assert_eq!(escaped_len("\""), 2);
+        assert_eq!(escaped_len("\u{1f}"), 6);
+    }
+
+    #[test]
     fn a_read_of_a_null_byte_file_is_refused() {
         let workspace = Workspace::new("read-nul");
         workspace.write_bytes("f.bin", b"a\0b\n");
@@ -1709,6 +1792,106 @@ mod tests {
             MAX_SEARCH_LINE_BYTES,
             "the reported text is cut to the cap"
         );
+    }
+
+    #[test]
+    fn a_pattern_of_exactly_the_cap_is_searched_and_one_more_is_refused() {
+        let workspace = Workspace::new("pattern-cap");
+        workspace.write("f.txt", "needle\n");
+        let coding = belt(&workspace, Mode::ReadOnly);
+        let accepted = act(
+            &coding,
+            ACTION_CODE_SEARCH,
+            json!({"pattern": "n".repeat(MAX_PATTERN_BYTES)}),
+        );
+        assert_eq!(accepted.kind, OutputKind::Done, "the cap itself is legal");
+
+        let refused = act(
+            &coding,
+            ACTION_CODE_SEARCH,
+            json!({"pattern": "n".repeat(MAX_PATTERN_BYTES + 1)}),
+        );
+        assert_eq!(refused.kind, OutputKind::Error);
+        assert_eq!(refused.detail["reason"], "the pattern is too long");
+    }
+
+    #[test]
+    fn the_match_cap_stops_the_walk_and_marks_it() {
+        // Two files match and the first has far more matches than the cap, so a walk
+        // that only stops when every bound is reached would open the second file.
+        let workspace = Workspace::new("search-match-cap");
+        workspace.write("a.txt", &"needle here\n".repeat(MAX_SEARCH_MATCHES + 100));
+        workspace.write("b.txt", "needle here\n");
+        let coding = belt(&workspace, Mode::ReadOnly);
+        let output = act(&coding, ACTION_CODE_SEARCH, json!({"pattern": "needle"}));
+        assert_eq!(
+            output.detail["matches"].as_array().expect("an array").len(),
+            MAX_SEARCH_MATCHES
+        );
+        assert_eq!(output.detail["files"], 1, "the second file is never opened");
+        assert_eq!(output.detail["truncated"], true);
+    }
+
+    #[test]
+    fn the_match_text_cap_stops_at_the_line_that_would_pass_it() {
+        // The reported text accumulates: forty lines of the report cap plus a line of
+        // 192 bytes lands exactly on the text cap and is kept, and the one-byte line
+        // after it is not. A comparison that uses `>=` drops the 192-byte line, and
+        // one that multiplies or adds wrongly keeps the last one.
+        let workspace = Workspace::new("search-text-cap");
+        let mut body = String::new();
+        for _ in 0..40 {
+            body.push_str(&"x".repeat(MAX_SEARCH_LINE_BYTES));
+            body.push('\n');
+        }
+        body.push_str(&"x".repeat(192));
+        body.push('\n');
+        body.push_str("x\n");
+        workspace.write("f.txt", &body);
+        let coding = belt(&workspace, Mode::ReadOnly);
+        let output = act(&coding, ACTION_CODE_SEARCH, json!({"pattern": "x"}));
+        assert_eq!(
+            output.detail["matches"].as_array().expect("an array").len(),
+            41,
+            "the match that lands exactly on the cap is kept and the next is not"
+        );
+        assert_eq!(output.detail["truncated"], true);
+    }
+
+    #[test]
+    fn a_search_deeper_than_the_depth_cap_is_marked_and_the_shallower_one_is_found() {
+        // The walk descends to the cap and stops there: a match at the cap is found,
+        // a match one level below it is not, and the result says it was cut short.
+        let workspace = Workspace::new("search-depth");
+        let nested = |depth: usize| {
+            let mut path = PathBuf::new();
+            for level in 0..depth {
+                path.push(format!("d{level}"));
+            }
+            path
+        };
+        let found = format!("{}/found.txt", nested(MAX_SEARCH_DEPTH).display());
+        let lost = format!("{}/lost.txt", nested(MAX_SEARCH_DEPTH + 1).display());
+        workspace.write(&found, "needle\n");
+        workspace.write(&lost, "needle\n");
+        let coding = belt(&workspace, Mode::ReadOnly);
+        let output = act(&coding, ACTION_CODE_SEARCH, json!({"pattern": "needle"}));
+        assert_eq!(
+            output.detail["matches"],
+            json!([{"path": found, "line": 1, "text": "needle"}]),
+            "the match at the cap is found and the one below it is not"
+        );
+        assert_eq!(output.detail["truncated"], true);
+    }
+
+    #[test]
+    fn a_search_includes_a_file_of_exactly_the_size_cap() {
+        let workspace = Workspace::new("search-size-exact");
+        workspace.write("big.txt", &"x".repeat(MAX_SEARCH_FILE_BYTES));
+        let coding = belt(&workspace, Mode::ReadOnly);
+        let output = act(&coding, ACTION_CODE_SEARCH, json!({"pattern": "x"}));
+        assert_eq!(output.detail["skipped"], 0, "the cap itself is searched");
+        assert_eq!(output.detail["files"], 1);
     }
 
     #[test]
