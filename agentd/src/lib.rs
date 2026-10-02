@@ -10,6 +10,7 @@
 //! [`shell`], which runs an argv in the session's workspace, and [`task`], which
 //! drives a model through [`model::Model`] with `shell` as its one tool.
 
+mod child;
 pub mod contract;
 pub mod loopcore;
 pub mod model;
