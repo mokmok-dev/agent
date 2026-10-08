@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import fc from "fast-check";
 import { Effect, Logger, References } from "effect";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as Socket from "effect/socket/Socket";
@@ -24,24 +25,39 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+// A server that stops answering must fail a test, not hang the run. Every wait in
+// this file is bounded, so the failure lands well inside Stryker's mutant timeout.
+const bound = "1 second";
+
 const httpGet = (path: string, method = "GET") =>
-  Effect.callback<{ readonly status: number; readonly body: string }>((resume) => {
-    const req = request({ socketPath, path, method }, (res) => {
-      const chunks: Buffer[] = [];
-      res.on("data", (chunk: Buffer) => chunks.push(chunk));
-      res.on("end", () =>
-        resume(
-          Effect.succeed({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString() }),
-        ),
-      );
-    });
-    req.on("error", (error) => resume(Effect.die(error)));
-    req.end();
-  });
+  Effect.suspend(() => {
+    const req = request({ socketPath, path, method });
+    const response = Effect.callback<{ readonly status: number; readonly body: string }>(
+      (resume) => {
+        req.on("response", (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () =>
+            resume(
+              Effect.succeed({
+                status: res.statusCode ?? 0,
+                body: Buffer.concat(chunks).toString(),
+              }),
+            ),
+          );
+        });
+        req.on("error", (error) => resume(Effect.die(error)));
+        req.end();
+      },
+    );
+    // A request that outlives its effect keeps a connection open, and
+    // `http.Server.close()` then waits for it on the way out of the test.
+    return response.pipe(Effect.ensuring(Effect.sync(() => req.destroy())));
+  }).pipe(Effect.timeout(bound));
 
 const waitForReady = Effect.gen(function* () {
   let attempts = 0;
-  while (true) {
+  while (attempts < 50) {
     const ready = yield* httpGet("/health").pipe(
       Effect.map((response) => response.status === 200),
       Effect.catchCause(() => Effect.succeed(false)),
@@ -50,12 +66,10 @@ const waitForReady = Effect.gen(function* () {
       return;
     }
     attempts += 1;
-    if (attempts > 250) {
-      return yield* Effect.die(`server on ${socketPath} never became ready`);
-    }
-    yield* Effect.sleep("20 millis");
+    yield* Effect.sleep("10 millis");
   }
-});
+  return yield* Effect.die(`server on ${socketPath} never became ready`);
+}).pipe(Effect.timeout(bound));
 
 const withServer = <A, E>(use: () => Effect.Effect<A, E>) =>
   Effect.scoped(
@@ -81,7 +95,7 @@ const exchange = (frames: readonly string[]) =>
         return received;
       }),
     );
-  }).pipe(Effect.provide(NodeSocket.layerWebSocketConstructorWS));
+  }).pipe(Effect.provide(NodeSocket.layerWebSocketConstructorWS), Effect.timeout(bound));
 
 const killAfterBinding = (path: string) =>
   new Promise<void>((resolve, reject) => {
@@ -98,7 +112,54 @@ const killAfterBinding = (path: string) =>
     child.once("error", reject);
   });
 
+const clientMessage = fc.oneof(
+  fc.record({ _tag: fc.constant("Echo" as const), text: fc.string() }),
+  fc.record({ _tag: fc.constant("Ping" as const), id: fc.integer() }),
+);
+
+const wireCase = fc.oneof(
+  {
+    weight: 3,
+    arbitrary: clientMessage.map((message) => ({
+      frame: JSON.stringify(message),
+      reply:
+        message._tag === "Echo"
+          ? `{"_tag":"Echo","text":${JSON.stringify(message.text)}}`
+          : `{"_tag":"Pong","id":${JSON.stringify(message.id)}}`,
+    })),
+  },
+  {
+    weight: 1,
+    arbitrary: fc
+      .string()
+      .filter((text) => {
+        try {
+          JSON.parse(text);
+          return false;
+        } catch {
+          return true;
+        }
+      })
+      .map((frame) => ({
+        frame,
+        reply: '{"_tag":"Rejected","reason":"invalid message"}',
+      })),
+  },
+);
+
 describe("ws server", () => {
+  it("answers a generated sequence of frames in order", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.array(wireCase, { minLength: 1, maxLength: 5 }), async (cases) => {
+        const received = await Effect.runPromise(
+          withServer(() => exchange(cases.map((one) => one.frame))),
+        );
+        expect(received).toEqual(cases.map((one) => one.reply));
+      }),
+      { numRuns: 10 },
+    );
+  });
+
   it("round-trips an Echo frame", async () => {
     const received = await Effect.runPromise(
       withServer(() => exchange(['{"_tag":"Echo","text":"hello"}'])),

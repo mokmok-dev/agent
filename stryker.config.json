@@ -9,6 +9,7 @@
     "!apps/ws-server/src/main.ts"
   ],
   "coverageAnalysis": "perTest",
+  "timeoutMS": 30000,
   "ignorePatterns": [".direnv", "result", "result-*", "**/dist"],
   "thresholds": {
     "high": 100,
