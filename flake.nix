@@ -43,6 +43,8 @@
             packages = with pkgs; [
               ni
               nodejs_26
+              oxfmt
+              oxlint
               pnpm_12
             ];
           };
@@ -51,6 +53,7 @@
             hooks = {
               actionlint.enable = true;
               deadnix.enable = true;
+              oxlint.enable = true;
               statix.enable = true;
             };
           };
@@ -59,6 +62,7 @@
             projectRootFile = "flake.nix";
             programs = {
               nixfmt.enable = true;
+              oxfmt.enable = true;
             };
           };
         };
