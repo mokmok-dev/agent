@@ -5,9 +5,12 @@
   "type": "module",
   "scripts": {
     "test": "vitest run --passWithNoTests",
-    "typecheck": "tsc --build"
+    "typecheck": "tsc --build",
+    "mutate": "stryker run"
   },
   "devDependencies": {
+    "@stryker-mutator/core": "catalog:",
+    "@stryker-mutator/vitest-runner": "catalog:",
     "@types/node": "catalog:",
     "vitest": "catalog:"
   }

@@ -46,13 +46,15 @@
                 inherit (finalAttrs) src;
                 pnpm = pkgs.pnpm_12;
                 fetcherVersion = 4;
-                hash = "sha256-ChhEeNdTraNTfUIdTBEKAw+80mj4mmGI9ePLi0Ta0sM=";
+                hash = "sha256-d3WH2+I0SrQWUm7HEkm6p3OLorf6Wmi9DEjcx4SCYHo=";
               };
 
               nativeBuildInputs = [
                 pkgs.nodejs_26
                 pkgs.pnpm_12
                 pkgs.pnpmConfigHook
+                # stryker kills its test runner processes with `ps`
+                pkgs.procps
                 pkgs.typescript
               ];
 
@@ -77,6 +79,7 @@
           checks = {
             test = mkCheck "test";
             typecheck = mkCheck "typecheck";
+            mutate = mkCheck "mutate";
           };
 
           devShells.default = pkgs.mkShellNoCC {
