@@ -2,6 +2,7 @@ packages: null
 
 catalog:
   "@types/node": 26.6.4
+  vitest: 5.0.3
 
 catalogMode: strict
 

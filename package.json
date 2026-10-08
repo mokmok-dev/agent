@@ -4,9 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --build"
   },
   "devDependencies": {
-    "@types/node": "catalog:"
+    "@types/node": "catalog:",
+    "vitest": "catalog:"
   }
 }
