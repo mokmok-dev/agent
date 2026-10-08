@@ -32,22 +32,21 @@
           system,
           ...
         }:
-        {
-          _module.args.pkgs = import nixpkgs {
-            inherit system;
-          };
-
-          checks = {
-            typecheck = pkgs.stdenvNoCC.mkDerivation (finalAttrs: {
-              name = "typecheck";
+        let
+          # Every check runs one script from the repo's package.json against an
+          # unpacked source tree, so they share one derivation body.
+          mkCheck =
+            name:
+            pkgs.stdenvNoCC.mkDerivation (finalAttrs: {
+              inherit name;
               src = ./.;
 
               pnpmDeps = pkgs.fetchPnpmDeps {
-                pname = "typecheck";
+                pname = name;
                 inherit (finalAttrs) src;
                 pnpm = pkgs.pnpm_12;
                 fetcherVersion = 4;
-                hash = "sha256-7ow/bw68gA7JeRqEyfaM/y0M5NZmIeQwmAfX38thvcQ=";
+                hash = "sha256-ChhEeNdTraNTfUIdTBEKAw+80mj4mmGI9ePLi0Ta0sM=";
               };
 
               nativeBuildInputs = [
@@ -59,7 +58,7 @@
 
               buildPhase = ''
                 runHook preBuild
-                pnpm run typecheck
+                pnpm run ${name}
                 runHook postBuild
               '';
 
@@ -69,6 +68,15 @@
                 runHook postInstall
               '';
             });
+        in
+        {
+          _module.args.pkgs = import nixpkgs {
+            inherit system;
+          };
+
+          checks = {
+            test = mkCheck "test";
+            typecheck = mkCheck "typecheck";
           };
 
           devShells.default = pkgs.mkShellNoCC {
