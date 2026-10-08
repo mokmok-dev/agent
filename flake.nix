@@ -37,6 +37,40 @@
             inherit system;
           };
 
+          checks = {
+            typecheck = pkgs.stdenvNoCC.mkDerivation (finalAttrs: {
+              name = "typecheck";
+              src = ./.;
+
+              pnpmDeps = pkgs.fetchPnpmDeps {
+                pname = "typecheck";
+                inherit (finalAttrs) src;
+                pnpm = pkgs.pnpm_12;
+                fetcherVersion = 4;
+                hash = "sha256-7ow/bw68gA7JeRqEyfaM/y0M5NZmIeQwmAfX38thvcQ=";
+              };
+
+              nativeBuildInputs = [
+                pkgs.nodejs_26
+                pkgs.pnpm_12
+                pkgs.pnpmConfigHook
+                pkgs.typescript
+              ];
+
+              buildPhase = ''
+                runHook preBuild
+                pnpm run typecheck
+                runHook postBuild
+              '';
+
+              installPhase = ''
+                runHook preInstall
+                mkdir -p $out
+                runHook postInstall
+              '';
+            });
+          };
+
           devShells.default = pkgs.mkShellNoCC {
             inputsFrom = [ config.pre-commit.devShell ];
 
@@ -46,6 +80,7 @@
               oxfmt
               oxlint
               pnpm_12
+              typescript
             ];
           };
 
