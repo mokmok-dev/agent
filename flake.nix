@@ -39,6 +39,12 @@
 
           devShells.default = pkgs.mkShellNoCC {
             inputsFrom = [ config.pre-commit.devShell ];
+
+            packages = with pkgs; [
+              ni
+              nodejs_26
+              pnpm_12
+            ];
           };
 
           pre-commit.settings = {
