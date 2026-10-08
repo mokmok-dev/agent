@@ -1,0 +1,19 @@
+{
+  "name": "@agent/ws-server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@effect/platform-node": "catalog:",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "fast-check": "catalog:"
+  }
+}

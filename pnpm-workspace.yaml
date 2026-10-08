@@ -1,9 +1,29 @@
-packages: null
+packages:
+  - "apps/*"
 
 catalog:
   "@types/node": 26.6.4
-  vitest: 5.0.3
+  # stryker 10 predates vitest 5 and reports its runtime mutants as survivors
+  vitest: 4.1.11
+  effect: 4.0.2
+  "@effect/platform-node": 4.0.2
+  fast-check: 4.10.2
+  "@stryker-mutator/core": 10.0.0
+  "@stryker-mutator/vitest-runner": 10.0.0
 
 catalogMode: strict
 
 catalogPrune: true
+
+# Stryker dynamically imports `typescript` to rewrite tsconfig paths inside its
+# sandbox, so it needs a CommonJS-API TypeScript (7.x dropped `parseConfigFileTextToJson`).
+packageExtensions:
+  "@stryker-mutator/core":
+    dependencies:
+      typescript: 5.9.3
+
+# effect 4.0.2 is younger than the release age pnpm 12 will install without this
+minimumReleaseAgeExclude:
+  - "@effect/platform-node-shared@4.0.2"
+  - "@effect/platform-node@4.0.2"
+  - effect@4.0.2
