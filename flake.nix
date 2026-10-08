@@ -33,6 +33,17 @@
           ...
         }:
         let
+          # A prefetched pnpm store holds the native packages of the platform that
+          # fetched it, so each system needs the hash its own fetch produces. With
+          # one shared hash, the second system installs the first system's store
+          # and its test run fails to find a native binding. Regenerate a value by
+          # setting it to "" and copying the `got:` hash from the build log.
+          pnpmDepsHash = {
+            aarch64-darwin = "";
+            aarch64-linux = "sha256-R8fSjoyn3Me5IvWiC/2i3GxRqux3sky44DmR+1Ez6ac=";
+            x86_64-linux = "sha256-d3WH2+I0SrQWUm7HEkm6p3OLorf6Wmi9DEjcx4SCYHo=";
+          };
+
           # Every check runs one script from the repo's package.json against an
           # unpacked source tree, so they share one derivation body.
           mkCheck =
@@ -46,7 +57,7 @@
                 inherit (finalAttrs) src;
                 pnpm = pkgs.pnpm_12;
                 fetcherVersion = 4;
-                hash = "sha256-d3WH2+I0SrQWUm7HEkm6p3OLorf6Wmi9DEjcx4SCYHo=";
+                hash = pnpmDepsHash.${system};
               };
 
               nativeBuildInputs = [
