@@ -1,6 +1,7 @@
 packages: null
 
-catalog: null
+catalog:
+  "@types/node": 26.6.4
 
 catalogMode: strict
 
