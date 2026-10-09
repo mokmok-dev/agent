@@ -1,0 +1,12 @@
+stdout | apps/ws-server/src/server.test.ts > ws server > removes the socket file when the server shuts down
+[02:55:16.540] INFO (#651): listening on unix:///tmp/ws-server-Att2E8/app.sock
+
+ ✓ apps/ws-server/src/server.test.ts (14 tests) 351ms
+ ✓ apps/sandbox-broker/src/sandbox-runtime.test.ts (1 test) 1352ms
+     ✓ proves live network grants, ledger denials, next-wrap filesystem grants, and teardown  1352ms
+
+ Test Files  10 passed (10)
+      Tests  109 passed (109)
+   Start at  02:55:15
+   Duration  1.64s (transform 222ms, setup 0ms, import 1.49s, tests 1.93s, environment 1ms)
+

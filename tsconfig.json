@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.base.json",
   "files": [],
-  "references": [{ "path": "apps/ws-server" }]
+  "references": [{ "path": "apps/ws-server" }, { "path": "apps/sandbox-broker" }]
 }

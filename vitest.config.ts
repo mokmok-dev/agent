@@ -2,7 +2,7 @@ import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    exclude: [...configDefaults.exclude, ".direnv/", "**/dist/**"],
+    exclude: [...configDefaults.exclude, ".direnv/", ".stryker-tmp/", "**/dist/**"],
     testTimeout: 20000,
   },
 });

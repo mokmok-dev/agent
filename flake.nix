@@ -39,9 +39,14 @@
           # and its test run fails to find a native binding. Regenerate a value by
           # setting it to "" and copying the `got:` hash from the build log.
           pnpmDepsHash = {
-            aarch64-darwin = "sha256-GXE7WxFeyrZF9twBBxNUMh9iULhvYWVhVDfL/QIzpjA=";
-            aarch64-linux = "sha256-R8fSjoyn3Me5IvWiC/2i3GxRqux3sky44DmR+1Ez6ac=";
-            x86_64-linux = "sha256-d3WH2+I0SrQWUm7HEkm6p3OLorf6Wmi9DEjcx4SCYHo=";
+            # apps/sandbox-broker adds @anthropic-ai/sandbox-runtime to the
+            # lockfile, so every system's store dump changes. Only the
+            # x86_64-linux value is filled in here; the two aarch64 values come
+            # from a CI run on those machines, which reports them in the
+            # mismatch error.
+            aarch64-darwin = pkgs.lib.fakeHash;
+            aarch64-linux = pkgs.lib.fakeHash;
+            x86_64-linux = "sha256-keMnMeHRgoelUE46G2OegB8icOuNsFUB8WJ+I87/Hy8=";
           };
 
           # Every check runs one script from the repo's package.json against an
@@ -100,14 +105,25 @@
           devShells.default = pkgs.mkShellNoCC {
             inputsFrom = [ config.pre-commit.devShell ];
 
-            packages = with pkgs; [
-              ni
-              nodejs_26
-              oxfmt
-              oxlint
-              pnpm_12
-              typescript
-            ];
+            packages =
+              (with pkgs; [
+                ni
+                nodejs_26
+                oxfmt
+                oxlint
+                pnpm_12
+                typescript
+                # srt resolves ripgrep on every platform it sandboxes
+                ripgrep
+              ])
+              # @agent/sandbox-broker's integration test drives a real sandbox,
+              # and skips itself unless these resolve on PATH. bubblewrap and
+              # socat are linux-only in nixpkgs, and `nix flake check` evaluates
+              # every system's devShell, so naming them on darwin is an error.
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                pkgs.bubblewrap
+                pkgs.socat
+              ];
           };
 
           pre-commit.settings = {
