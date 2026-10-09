@@ -64,9 +64,13 @@
                 pkgs.nodejs_26
                 pkgs.pnpm_12
                 pkgs.pnpmConfigHook
-                # stryker kills its test runner processes with `ps`
+                # stryker kills its test runner processes with `ps`, and with
+                # `pgrep` on darwin, where both are system tools
                 pkgs.procps
                 pkgs.typescript
+              ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+                (pkgs.writeShellScriptBin "pgrep" ''exec /usr/bin/pgrep "$@"'')
               ];
 
               buildPhase = ''
