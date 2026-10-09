@@ -1,0 +1,37 @@
+########## repro/01-network-is-live.mjs
+http=403 http=403 http=403 allow list before: []
+allow list after:  ["example.com"]
+http=200 http=200 http=200 
+ok: a request before the update was refused
+ok: a request after the update was allowed, in the same process
+ok: no request before the update reached the host
+
+########## repro/02-filesystem-is-not-live.mjs
+ok: the running command was refused the write before the update
+ok: the running command never wrote, even after the update
+ok: a wrap issued after the update could write
+ok: a wrap carrying its own customConfig could write
+
+########## repro/03-custom-config-merges-per-field.mjs
+ok: the session's allowWrite applied with no patch
+ok: a patch naming another allowWrite dropped the session's
+ok: the second write was refused
+ok: the proxies were listening during the session
+ok: reset closed the proxies
+ok: reset left the config installed, so it is not a teardown signal
+
+########## repro/04-a-write-grant-needs-an-existing-path.mjs
+ok: a grant for a directory that does not exist was refused
+ok: the refusal was the read-only sandbox root
+ok: the same grant worked once the directory existed
+
+########## repro/05-the-wrapped-argv-names-a-shell.mjs
+default binShell, argv[0] = "/bin/bash"
+ok: the default wrapper names /bin/bash
+ok: spawning the default argv failed where /bin/bash is absent
+ok: the run named a shell in SHELL
+explicit binShell, argv[0] = "/nix/store/10dxp0qxqxxsyiljrh2kp0xqhz6arhcx-bash-5.3p15/bin/bash"
+ok: binShell becomes argv[0]
+code=200
+ok: spawning the explicit argv ran
+

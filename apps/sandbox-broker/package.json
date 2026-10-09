@@ -1,0 +1,16 @@
+{
+  "name": "@agent/sandbox-broker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "catalog:",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "fast-check": "catalog:"
+  }
+}

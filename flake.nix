@@ -39,9 +39,14 @@
           # and its test run fails to find a native binding. Regenerate a value by
           # setting it to "" and copying the `got:` hash from the build log.
           pnpmDepsHash = {
-            aarch64-darwin = "sha256-GXE7WxFeyrZF9twBBxNUMh9iULhvYWVhVDfL/QIzpjA=";
-            aarch64-linux = "sha256-R8fSjoyn3Me5IvWiC/2i3GxRqux3sky44DmR+1Ez6ac=";
-            x86_64-linux = "sha256-d3WH2+I0SrQWUm7HEkm6p3OLorf6Wmi9DEjcx4SCYHo=";
+            # apps/sandbox-broker adds @anthropic-ai/sandbox-runtime to the
+            # lockfile, so every system's store dump changes. Only the
+            # x86_64-linux value is filled in here; the two aarch64 values come
+            # from a CI run on those machines, which reports them in the
+            # mismatch error.
+            aarch64-darwin = pkgs.lib.fakeHash;
+            aarch64-linux = pkgs.lib.fakeHash;
+            x86_64-linux = "sha256-keMnMeHRgoelUE46G2OegB8icOuNsFUB8WJ+I87/Hy8=";
           };
 
           # Every check runs one script from the repo's package.json against an
@@ -107,6 +112,12 @@
               oxlint
               pnpm_12
               typescript
+              # @agent/sandbox-broker drives a real sandbox in
+              # apps/sandbox-broker/src/sandbox-runtime.test.ts, which skips
+              # itself unless bubblewrap, socat and ripgrep resolve on PATH.
+              bubblewrap
+              ripgrep
+              socat
             ];
           };
 

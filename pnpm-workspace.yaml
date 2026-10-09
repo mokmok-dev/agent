@@ -7,6 +7,7 @@ catalog:
   vitest: 4.1.11
   effect: 4.0.2
   "@effect/platform-node": 4.0.2
+  "@anthropic-ai/sandbox-runtime": 0.0.79
   fast-check: 4.10.2
   "@stryker-mutator/core": 10.0.0
   "@stryker-mutator/vitest-runner": 10.0.0
@@ -27,3 +28,4 @@ minimumReleaseAgeExclude:
   - "@effect/platform-node-shared@4.0.2"
   - "@effect/platform-node@4.0.2"
   - effect@4.0.2
+  - "@anthropic-ai/sandbox-runtime@0.0.79"

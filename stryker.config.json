@@ -6,7 +6,10 @@
     "apps/ws-server/src/**/*.ts",
     "!apps/ws-server/src/**/*.test.ts",
     "!apps/ws-server/src/index.ts",
-    "!apps/ws-server/src/main.ts"
+    "!apps/ws-server/src/main.ts",
+    "apps/sandbox-broker/src/**/*.ts",
+    "!apps/sandbox-broker/src/**/*.test.ts",
+    "!apps/sandbox-broker/src/index.ts"
   ],
   "coverageAnalysis": "perTest",
   "timeoutMS": 30000,
