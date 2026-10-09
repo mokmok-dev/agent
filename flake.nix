@@ -105,20 +105,25 @@
           devShells.default = pkgs.mkShellNoCC {
             inputsFrom = [ config.pre-commit.devShell ];
 
-            packages = with pkgs; [
-              ni
-              nodejs_26
-              oxfmt
-              oxlint
-              pnpm_12
-              typescript
-              # @agent/sandbox-broker drives a real sandbox in
-              # apps/sandbox-broker/src/sandbox-runtime.test.ts, which skips
-              # itself unless bubblewrap, socat and ripgrep resolve on PATH.
-              bubblewrap
-              ripgrep
-              socat
-            ];
+            packages =
+              (with pkgs; [
+                ni
+                nodejs_26
+                oxfmt
+                oxlint
+                pnpm_12
+                typescript
+                # srt resolves ripgrep on every platform it sandboxes
+                ripgrep
+              ])
+              # @agent/sandbox-broker's integration test drives a real sandbox,
+              # and skips itself unless these resolve on PATH. bubblewrap and
+              # socat are linux-only in nixpkgs, and `nix flake check` evaluates
+              # every system's devShell, so naming them on darwin is an error.
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                pkgs.bubblewrap
+                pkgs.socat
+              ];
           };
 
           pre-commit.settings = {
