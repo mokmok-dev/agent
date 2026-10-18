@@ -2,7 +2,7 @@ packages:
   - "apps/*"
 
 catalog:
-  "@types/node": 26.6.4
+  "@types/node": 26.6.5
   # stryker 10 predates vitest 5 and reports its runtime mutants as survivors
   vitest: 4.1.11
   effect: 4.0.2
