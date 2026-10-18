@@ -10,8 +10,8 @@ catalogs:
       specifier: 0.0.79
       version: 0.0.79
     '@effect/platform-node':
-      specifier: 4.0.2
-      version: 4.0.2
+      specifier: 4.0.5
+      version: 4.0.5
     '@stryker-mutator/core':
       specifier: 10.0.0
       version: 10.0.0
@@ -67,7 +67,7 @@ importers:
     dependencies:
       '@effect/platform-node':
         specifier: 'catalog:'
-        version: 4.0.2(effect@4.0.2)(redis@6.3.0)
+        version: 4.0.5(effect@4.0.2)(redis@6.3.0)
       effect:
         specifier: 'catalog:'
         version: 4.0.2
@@ -268,17 +268,17 @@ packages:
     resolution: {integrity: sha512-c+xgSWboV2pdwXP67BUWDVRHi2BO5Q3KwxyFVs7taVTY+fsK47/L51ZXQoV9rozHJDNHvJ4v4WEsI/IlxV2l2A==}
     engines: {node: ^22.18.0 || >=24.11.0}
 
-  '@effect/platform-node-shared@4.0.2':
-    resolution: {integrity: sha512-xn8aDw9p/QUPt1Yi0C3HUMcycT+MjHfAe19FDUDrUuzcwq0xxskkamVSqbdykF/Dsuus4aZTsCBZA/vkhHIfbQ==}
+  '@effect/platform-node-shared@4.0.5':
+    resolution: {integrity: sha512-a8rCdEkfZBGe9C6bsIjxVZuRp73svIyK5IHwHdDAVsvZXjrbkxusfI+rZ8WlX31RP1mKizwI/E72GQTNfdMWHw==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
-      effect: ^4.0.2
+      effect: ^4.0.5
 
-  '@effect/platform-node@4.0.2':
-    resolution: {integrity: sha512-RWesXBQStnFHdD465gR5thFKgXO7FSyCKRZ56nWXB7PedNVzr8vV0nb/3MULLdri493sMz/b/pmGBTb6K8cBjQ==}
+  '@effect/platform-node@4.0.5':
+    resolution: {integrity: sha512-v4KD5fWvEUa4QmWFpZFbBsRhmfnTP6ETCME2r9ifyXVDPjhfpxpTZl41prjgQFMqZBHdWWCl7YC5ImbXv5ui5g==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
-      effect: ^4.0.2
+      effect: ^4.0.5
       redis: '>=5.0.0 <7.0.0'
 
   '@inquirer/ansi@2.0.9':
@@ -1568,7 +1568,7 @@ snapshots:
       '@babel/helper-string-parser': 8.0.6
       '@babel/helper-validator-identifier': 8.0.6
 
-  '@effect/platform-node-shared@4.0.2(effect@4.0.2)':
+  '@effect/platform-node-shared@4.0.5(effect@4.0.2)':
     dependencies:
       '@types/ws': 8.18.2
       effect: 4.0.2
@@ -1577,9 +1577,9 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@effect/platform-node@4.0.2(effect@4.0.2)(redis@6.3.0)':
+  '@effect/platform-node@4.0.5(effect@4.0.2)(redis@6.3.0)':
     dependencies:
-      '@effect/platform-node-shared': 4.0.2(effect@4.0.2)
+      '@effect/platform-node-shared': 4.0.5(effect@4.0.2)
       effect: 4.0.2
       redis: 6.3.0
       undici: 8.11.2
