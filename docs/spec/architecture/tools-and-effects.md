@@ -1,5 +1,5 @@
 ---
-type: Architecture Decision
+type: Protocol Spec
 title: Tools and effects
 description: Every external effect is bracketed by an intent and a result, keyed for idempotency, and gated by an approval policy.
 tags: [tools, effects, idempotency, security]
