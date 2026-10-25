@@ -215,7 +215,7 @@ Three consequences follow for this design.
 
 # Consequences for the reactor
 
-- Compaction and snapshotting must not reorder events. A fold order change changes the rendered prompt, so it changes every chain entry. Snapshot format changes are versioned for the same reason.
+- Snapshotting must not reorder events. A fold order change changes the rendered prompt, so it changes every chain entry. Snapshot format changes are versioned for the same reason.
 - Prompt rendering is a pure function with its own golden tests. A rendering change that alters whitespace is a cache-invalidating event, and the test suite says so.
 - A branch's model id is part of its cache namespace. Switching models mid-branch is allowed and starts a cold prefix, which the ledger shows.
 - Forking is cheap in storage and expensive in cache pressure. The active branch limit is set with both in mind.

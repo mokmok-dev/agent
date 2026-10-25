@@ -26,7 +26,7 @@ Each entry names a decision that is expensive to reverse, the alternative that l
 | # | Decision | Alternative rejected |
 |---|---|---|
 | 1 | The append-only log is the only truth | A relational database as truth, projections written to tables |
-| 2 | Files with framed records, not SQLite | SQLite with a WAL |
+| 2 | One SQLite database | Framed files in rotated segments |
 | 3 | One writer, exclusive lock | Many writers with a broker |
 | 4 | Content hash as event id | Random ULID |
 | 5 | Canonical JSON (RFC 8785) on disk | CBOR, protobuf |
@@ -40,7 +40,7 @@ Each entry names a decision that is expensive to reverse, the alternative that l
 | 13 | 100 percent killed mutants on the logic surface | Coverage thresholds only |
 | 14 | OKF 0.2 for the spec | Plain markdown, or a wiki |
 | 15 | Fork appends a new root with a parent pointer | Rewriting or copying history |
-| 16 | Segments and snapshots, because every surveyed runtime bounds its history | One unbounded file |
+| 16 | Snapshots, so replay does not grow with history | Fold from genesis on every start |
 
 # 1. The log is the only truth
 
@@ -50,17 +50,28 @@ The rejected design keeps current state in tables and appends an audit row besid
 
 Cost accepted. Every query is a fold, so a new view costs code rather than SQL. Mitigated by snapshots and by keeping projections small.
 
-# 2. Files, not SQLite
+# 2. One SQLite database, not a framed file format
 
-SQLite would give us durability, torn-write handling, and concurrent readers from a battle-tested library. It lost on three points.
+The first draft of this bundle chose length-prefixed frames in rotated segment files. It was reversed before any code was written, and the record stays because the reasoning is what a future reader needs.
 
-- Verification. A hash-chained frame is verifiable with a scan and exportable by concatenation. SQLite integrity checking is about pages, not about the meaning of a row's history.
-- Determinism of tests. WAL checkpoint timing, busy timeouts, and page layout are inputs to behavior we would have to control. Our own frame format has three failure modes, and we test all of them at every byte offset.
-- Logic drift. A database invites putting fold logic into SQL, where the mutation gate cannot reach it and where a schema migration becomes a behavior change.
+What the custom format bought.
 
-Cost accepted. We own the durability code. That is a real risk, stated in [event store](../architecture/event-store.md), and the mitigation is fault injection rather than optimism.
+- A storage layer a mutation tool can see, since parsing, rotation, and recovery logic would live in Rust where mutants are meaningful.
+- A log that is a file, so export is a copy and verification is a scan.
 
-Falsifiable trigger. Two corruption defects traced to the store within one year means this decision is revisited, with the fault-injection suite ported to the replacement.
+What it cost.
+
+- Every durability property becomes ours to build and to prove. Frame layout and versioning, checksum policy, segment rotation with directory syncs, a tips cache checked against frames, torn-tail truncation, and an archive manifest. Those are the riskiest lines in the system, and the failure mode is silent loss of history.
+- Concurrent readers need a protocol we invent.
+- Backup needs a consistent copy of an open append-only file, which is a problem in its own right.
+
+SQLite already provides every one of those properties. Crash-safe commits through a write-ahead log, readers that see a consistent snapshot without blocking the writer, a total order, and an online backup that is consistent while the writer runs. What it does not provide is history semantics, and those stay ours. Content hashes, the chain, append-only triggers, the branch DAG, snapshots.
+
+The mutation argument was narrower than it looked. SQL text is opaque to `cargo mutants` under either design, so storage semantics need integration tests regardless. What the gate still covers is the fold, the decisions, and prompt rendering, which is where a silently wrong result is most likely.
+
+Cost accepted. A dependency on SQLite and its Rust binding, a large binary file instead of a readable one, and an export that is a query rather than a copy. In exchange, the code we would have written is code we do not own.
+
+What would reverse it. If the mutation gate turns out to be the only thing catching store defects, or if the log must be readable by a tool that cannot speak SQL. Neither is likely while one process owns the file. The earlier falsifiable trigger never fired, because the code it guarded was never written.
 
 # 3. One writer
 
@@ -78,7 +89,7 @@ Cost accepted. `id` changes if any byte changes, including `time`. Building an e
 
 # 5. Canonical JSON on disk
 
-One representation everywhere. The same bytes go into a segment, over the socket, and out of an export.
+One representation everywhere. The same bytes go into a row, over the socket, and out of an export.
 
 CBOR is smaller and has a deterministic encoding rule. Protobuf is faster to parse. Both add a second representation, and a second representation is a second place for a hash to disagree with a payload.
 
@@ -88,7 +99,7 @@ Cost accepted. JSON is roughly twice the bytes and slower to parse than CBOR. A 
 
 Events are stored once, in one physical log, and a branch is the ancestor chain of a tip.
 
-Per-branch files were rejected because a fork would copy or link a segment, and both options make the fork either expensive or subtly mutable. A merge-capable DAG was rejected separately, below.
+Per-branch files were rejected because a fork would copy or link history, and both options make the fork either expensive or subtly mutable. A merge-capable DAG was rejected separately, below.
 
 Cost accepted. Reading one branch requires resolving `prev` links, and a branch's events are interleaved with other branches in the file. Both costs are handled by the fold and by snapshots.
 
@@ -96,13 +107,15 @@ Cost accepted. Reading one branch requires resolving `prev` links, and a branch'
 
 Merging timelines requires deciding which of two conflicting external effects stands. In an agent runtime, both effects already happened, so no log-based rule can resolve them.
 
+There is a second reason, and it is the stronger one. A prompt is a linear token sequence, and a node with two parents has no canonical linearization. Any merge would have to pick an order, and that order becomes part of every prompt after it, so the same history would render differently depending on the traversal the fold happened to take. The prefix chain would stop being stable, which breaks the one mechanism the branching exists to exploit.
+
 Cost accepted. A winning experiment is promoted forward as new events rather than merged. That loses the ability to keep two branches running and combine them, which no use case in scope needs.
 
 # 8. Tips are derived
 
-The tips cache is checked against the frame it points at, and rebuilt on mismatch. The rejected alternative treats a refs file as authoritative, which is how git loses commits after a crash between the object write and the ref update.
+The tips cache is checked against the row it points at, and rebuilt on mismatch. The rejected alternative treats a refs file as authoritative, which is how git loses commits after a crash between the object write and the ref update.
 
-Cost accepted. Startup scans backward through segments until it finds consistent tips. With the cache intact this is one frame read per branch.
+Cost accepted. Startup checks each cached tip against its row and rebuilds by query when a check fails. With the cache intact that is one indexed read per branch.
 
 # 9. Surfaces read the store directly
 
@@ -156,13 +169,13 @@ All three append rather than rewrite. None of them makes a fork a first-class fa
 
 Cost accepted. The branch tree is a global projection, so a reader of one branch cannot see its children without scanning events from other branches. A copy-on-fork design would avoid the scan and cost a rewrite per fork.
 
-# 16. Segments and snapshots, because every surveyed runtime bounds its history
+# 16. Snapshots, so replay does not grow with history
 
 The prior art agrees that unbounded history is not a design, it is a deferred incident. Temporal warns at 10,240 events and terminates a workflow at 51,200 events or 50 MB.[^temporal-limits] Restate purges journals after 24 hours by default.[^restate-durable]
 
-This agent runs for years and cannot terminate a conversation, so the bound has to be structural. That is why segments rotate at a fixed size and why snapshots let a replay start near the tip instead of at genesis.
+This agent runs for years and cannot terminate a conversation, so the bound has to be structural without deleting history. Snapshots are that bound. They do not shrink the database, since no event is ever removed. They bound the work a start has to do, which is the number that would otherwise grow without limit.
 
-Cost accepted. Segmentation and snapshots are two formats to write, test, and version. The alternative, one growing file opened at startup, would need the same recovery logic and would make a cold start proportional to total history.
+Cost accepted. A snapshot format to version and a fold that must stay deterministic, because a snapshot is only useful if the fold that produced it can be repeated and compared. The alternative, folding from genesis on every start, needs no format and makes a cold start proportional to total history, which after a year of running is minutes of CPU before the first command is accepted.
 
 [^langgraph-time-travel]: LangGraph time travel, https://docs.langchain.com/oss/python/langgraph/use-time-travel
 [^temporal-limits]: Temporal workflow execution limits, https://docs.temporal.io/workflow-execution/limits

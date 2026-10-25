@@ -11,7 +11,7 @@ generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
 
 `agentctl <command> [flags]`. Every command takes `--state-dir <path>`, defaults to `$STATE_DIRECTORY` on Linux and `~/Library/Application Support/agent` on macOS, and accepts `--json` for machine output.
 
-The CLI never writes the store. It sends commands to `agentd` over `bus.sock`, or, for read-only commands, opens the store read-only. The two exceptions are `doctor --repair` and `gc`, which require `agentd` to be stopped and say so.
+The CLI never writes events. It sends commands to `agentd` over `bus.sock`, or, for read-only commands, opens the database read-only. The exceptions are `gc` and `backup`, which touch files rather than history, and `doctor`, which requires the service to be stopped and says so.
 
 # Commands
 
@@ -28,8 +28,9 @@ The CLI never writes the store. It sends commands to `agentd` over `bus.sock`, o
 | `agentctl replay --branch <id> [--from <id>] [--to <id>]` | no | Print the folded state transitions as text |
 | `agentctl audit --branch <id> --since <instant>` | no | Effect ledger derived from events |
 | `agentctl export --branch <id> --out <path>` | no | CloudEvents JSON lines for one branch |
-| `agentctl verify [--deep]` | no | Chain, frame, and depth verification |
-| `agentctl doctor [--repair]` | yes | Diagnose a store, and truncate to a named event with explicit confirmation |
+| `agentctl verify [--deep]` | no | Chain, depth, and database integrity verification |
+| `agentctl doctor` | no | Diagnose the store and report the failing row |
+| `agentctl backup --out <path>` | no | Write a consistent copy while the service runs |
 | `agentctl gc [--dry-run]` | yes | Delete unreferenced blobs |
 | `agentctl install --systemd` and `--launchd` | yes | Write and enable the unit or plist |
 | `agentctl spec check` | no | Validate the OKF bundle under `docs/spec` |
@@ -46,7 +47,7 @@ A fork names its parent branch and one selector. `--at` takes an event id, `--re
 | 64 | Command failed at runtime |
 | 65 | Refused by policy, for example a fork inside an unresolved effect without `--force` |
 | 70 | Storage failure, including disk full |
-| 74 | Corrupt store, `doctor --repair` needed |
+| 74 | Corrupt store, restore from backup |
 | 75 | Store lock held by another process |
 | 78 | Configuration error |
 
@@ -66,7 +67,7 @@ Two rules make the output safe to consume.
 The CLI is safe to run from a script, a cron job, a Makefile, and a chat bridge.
 
 - No interactive prompt unless stdout is a terminal and `--yes` is absent.
-- `doctor --repair` always requires a typed confirmation of the event id it truncates to, or `--yes` plus `--to <id>`.
+- `doctor` never repairs. It reports the failing row and the last verified event, and the remedy is a restore from backup. A repair that truncates history would defeat append-only at the exact moment the operator is least able to judge what to drop.
 - No command waits indefinitely. `send` and `warm` return after the command is accepted, with the turn or warm id, unless `--wait` is passed.
 
 # The spec command

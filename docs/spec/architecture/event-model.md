@@ -14,7 +14,7 @@ sources:
 
 # The envelope
 
-Every event is one CloudEvents 1.0 message in structured mode with `datacontenttype: application/json`. The wire format on the socket, the export format, and the format inside a segment are the same bytes. One representation, no translation layer.[^cloudevents-1-0]
+Every event is one CloudEvents 1.0 message in structured mode with `datacontenttype: application/json`. The wire format on the socket, the export format, and the format inside the store are the same bytes. One representation, no translation layer.[^cloudevents-1-0]
 
 | Attribute | Value | Notes |
 |---|---|---|
@@ -53,7 +53,7 @@ Extension names are not namespaced by the specification, so a collision with ano
 
 Three properties follow.
 
-- Tamper detection. Recompute the hash from a segment's bytes and compare. A flipped bit fails the check, and so does a rewritten attribute.
+- Tamper detection. Recompute the hash from its row and compare. A flipped bit fails the check, and so does a rewritten attribute.
 - Chain integrity. `prev` is inside the hashed bytes, so the ancestors are committed to. A branch is a hash chain, not a pointer list.
 - Free idempotency. Retrying an append of identical bytes produces an identical `id`, so a duplicate is detectable without a sequence counter.
 
@@ -67,9 +67,9 @@ Type strings are fixed strings, not derived from Rust names, and a table in `age
 
 | `type` | `subject` | Payload |
 |---|---|---|
-| `dev.mokmok.agent.instance.started` | instance | Version, store schema version, recovered byte count. |
+| `dev.mokmok.agent.instance.started` | instance | Version, store schema version, row count. |
 | `dev.mokmok.agent.instance.stopping` | instance | Reason, signal, drain outcome. |
-| `dev.mokmok.agent.instance.recovered` | instance | Torn bytes dropped, segments verified, chains rechecked. |
+| `dev.mokmok.agent.instance.recovered` | instance | Uncommitted transaction rolled back, chains verified, snapshots checked. |
 | `dev.mokmok.agent.instance.clock_skew` | instance | Measured wall clock delta and direction. |
 | `dev.mokmok.agent.branch.created` | branch | Branch id, parent branch, fork event id, label. |
 | `dev.mokmok.agent.branch.labeled` | branch | Branch id, new label. |
@@ -102,7 +102,7 @@ Adding a case to the taxonomy is a code change to the table plus a test that fol
 
 # Size and offloading
 
-An event's canonical JSON must stay under 128 KiB. This keeps a segment's frame table small enough that replay is not dominated by giant payloads.
+An event's canonical JSON must stay under 128 KiB. This keeps one row small enough that replay is not dominated by giant payloads.
 
 A larger payload is written to a blob file named by its BLAKE3 hash under `blobs/`, and the event carries `dataref` with the relative path plus the byte length and hash. The blob write completes before the event append, so an event never points at a blob that is not on disk. A blob with no referencing event after recovery is garbage and is deleted by `agentctl gc`.
 
@@ -110,7 +110,7 @@ A larger payload is written to a blob file named by its BLAKE3 hash under `blobs
 
 Three orders exist and only one of them is authoritative.
 
-- Physical order is `(segment, offset)`. It is the append order and the only total order.
+- Physical order is the row id. It is the commit order and the only total order.
 - Logical order within a branch is `depth`. It is derived from `prev` and is what the reactor reasons about.
 - `time` is metadata for humans and for cache expiry estimates. Never sort by `time`.
 

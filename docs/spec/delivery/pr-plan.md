@@ -20,14 +20,14 @@ Each PR's gate is the same five checks. Format, clippy with warnings denied, the
 | 1 | `docs(spec): open knowledge format bundle` | none | This bundle |
 | 2 | `ci: gate on mutants, nextest, clippy, and the spec` | 1 | Workflows, `xtask spec-check`, `mutants.toml`, `cargo-deny` |
 | 3 | `feat(core): event envelope, taxonomy, and fold` | 2 | `agent-core` with ports, ids, canonical JSON, fold for every event type |
-| 4 | `feat(store): segments, hash chain, group commit, recovery` | 3 | `agent-store`, fault injection tests, `agentctl verify` |
+| 4 | `feat(store): schema, append-only triggers, chain verification` | 3 | `agent-store`, crash tests, `agentctl verify`, `agentctl backup` |
 | 5 | `feat(prompt): segments, prefix chain, cache ledger` | 3 | `agent-prompt`, ledger fold, prefix hash tests |
 | 6 | `feat(runtime): reactor, timers, supervision` | 4, 5 | `agent-runtime`, `agentd`, systemd unit, launchd plist, sd_notify |
 | 7 | `feat(cli): operator commands` | 6 | `agentctl` with `status`, `fork`, `send`, `replay`, `audit`, `verify` |
 | 8 | `feat(tui): terminal surface` | 7 | `agent-tui` |
 | 9 | `feat(web): http and sse surface` | 7 | `agent-web` |
 | 10 | `feat(chat): discord surface` | 7 | `agent-chat-discord` |
-| 11 | `feat(store): snapshots, compaction, gc` | 6 | Replay budget for long histories |
+| 11 | `feat(store): snapshots and blob gc` | 6 | Replay budget for long histories |
 | 12 | `harden: sandbox, secrets, approvals end to end` | 10 | Scope-backed tool execution, secret resolution |
 
 # Why this order
@@ -38,7 +38,7 @@ PR 5 sits beside PR 4 rather than after it because prompt rendering is pure and 
 
 PR 6 is the first PR that can be left running. Everything after it is a surface or an optimization, so the machine can be handed over at that point and the rest lands while it runs.
 
-PR 11 is late on purpose. Compaction only matters once history is long, and writing it before there is history means writing it without a realistic test fixture.
+PR 11 is late on purpose. Snapshots only matter once history is long, and writing them before there is history means writing them without a realistic test fixture.
 
 # Gates beyond the five checks
 

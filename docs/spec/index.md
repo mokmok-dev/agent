@@ -11,7 +11,7 @@ okf_version: "0.2"
 
 * [Overview](architecture/overview.md) - The five layers, the crate map, and the dependency rule that keeps the core testable.
 * [Event model](architecture/event-model.md) - The CloudEvents 1.0 envelope, the extension attributes, and the closed event taxonomy.
-* [Event store](architecture/event-store.md) - Segment frames, the hash chain, group commit, torn-tail recovery, snapshots.
+* [Event store](architecture/event-store.md) - One database, append-only triggers, the hash chain, snapshots, backup.
 * [Branching](architecture/branching.md) - Append-only history as a DAG, how a fork is recorded, and why branches never merge.
 * [Prompt cache](architecture/prompt-cache.md) - Canonical prompt segments, prefix hashing, the cache ledger, and what the literature does and does not support.
 * [Runtime](architecture/runtime.md) - Process model, supervision on systemd and launchd, the reactor loop, backpressure, the degradation ladder.

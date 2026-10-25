@@ -67,12 +67,12 @@ The gate is only reachable because of the architecture, so treat these as load-b
 |---|---|
 | Unit tests per pure function, table driven per event type | fold, decisions, prompt rendering |
 | Property tests over generated event sequences | hash chain, depth monotonicity, fold determinism, idempotent fold |
-| Store integration tests on a temp directory | frames, rotation, group commit, tips |
-| Fault injection, truncating the last frame at every byte offset | recovery, torn tail, chain verification |
-| Golden replay fixture, a checked-in segment plus its expected state hash | the whole fold pipeline |
+| Store integration tests on a temporary database | schema, triggers, commit, snapshots |
+| Fault injection, killing the process mid-transaction and corrupting the file | recovery, chain verification, refusal to start |
+| Golden replay fixture, a checked-in database plus its expected state hash | the whole fold pipeline |
 | Process tests that start `agentd` and send commands | `main.rs` wiring, the socket, shutdown |
 
-The fault injection test is the one that earns its cost. Recovery bugs live at byte boundaries, and iterating every truncation offset is the only way to kill the mutants in the boundary logic.
+The fault injection tests are the ones that earn their cost. One kills the process between the insert and the commit and asserts that a start finds no event and no half state. Another corrupts bytes in the database file and asserts the store refuses to start rather than serving wrong history. A store that guesses under damage is worse than one that stops.
 
 # CI
 

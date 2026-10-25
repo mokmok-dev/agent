@@ -48,12 +48,12 @@ Each measure has a definition now and a target once there is a running system to
 
 - Replay time for a cold start, measured as wall time to fold 30 days of events.
 - Cache read share, measured as cached prompt tokens over total prompt tokens per model call.
-- Unrecovered crash count, measured as starts that find a torn tail or a failed chain verification.
+- Unrecovered crash count, measured as starts that fail chain verification or find an unreadable database.
 - Event loss, which must be zero by construction.
 - Mutation score on the logic surface, which must be 100 percent killed.
 
 # Constraints accepted
 
 - One writer per store. Horizontal scale-out is out of scope.
-- Disk grows without bound until compaction runs, and compaction copies snapshots rather than deleting events. Retention is an operator decision, documented in [event store](../architecture/event-store.md).
+- History is never deleted, so the database only grows. At the expected volume that is under two gigabytes a year, and blobs dominate long before rows do. Retention is an operator decision, documented in [event store](../architecture/event-store.md).
 - Provider prompt caches are outside our control. The design makes reuse likely and measures whether it happened. It does not promise a hit.

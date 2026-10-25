@@ -22,7 +22,7 @@ flowchart LR
 
   doorbell(("doorbell<br/>and commands"))
   reactor["Reactor in agentd<br/>single writer"]
-  store[("Event store<br/>segments, blobs, snapshots")]
+  store[("Event store<br/>one database, blobs")]
   fold["Fold<br/>disposable projections"]
   gateway["Gateway<br/>models and tools"]
   world["Outside world"]
@@ -38,7 +38,7 @@ flowchart LR
 
 Layers, starting with the store.
 
-**Store.** Segments of framed events, content-addressed, hash chained. It is the only truth. See [event store](event-store.md).
+**Store.** One database of events, content-addressed and hash chained, with append-only enforced in the schema. It is the only truth. See [event store](event-store.md).
 
 **Fold.** A pure function from an ordered event slice to derived state. It computes branch tips, transcripts, task state, and the token ledger.
 
@@ -53,11 +53,11 @@ Layers, starting with the store.
 | Crate | Holds | IO |
 |---|---|---|
 | `agent-core` | Types, event taxonomy, fold, decision functions, ports | none |
-| `agent-store` | Segments, frames, chain verification, recovery, snapshots, blobs | files |
+| `agent-store` | Schema, append-only triggers, chain verification, snapshots, backup, blobs | files |
 | `agent-prompt` | Canonical prompt rendering, segment hashing, prefix chain | none |
 | `agent-model` | Provider adapters over the model port | network |
 | `agent-tools` | Tool registry, executors, sandbox policy | processes, network |
-| `agent-ipc` | Framed command protocol over a Unix socket | socket |
+| `agent-ipc` | Length-prefixed command protocol over a Unix socket | socket |
 | `agent-runtime` | Reactor, timers, scheduler, backpressure, service notification | time, socket |
 | `agentd` | Binary that wires runtime to store and gateway | all |
 | `agentctl` | Operator CLI, including fork and replay | socket, files |
@@ -80,24 +80,24 @@ This rule exists for one reason. Mutation testing at 100 percent killed is only 
 
 # What is disposable
 
-Tips, branch lists, transcripts, token totals, and snapshots. Delete any of them and the system rebuilds them by folding segments. Two consequences follow.
+Tips, branch lists, transcripts, token totals, and snapshots. Delete any of them and the system rebuilds them by folding the log. Two consequences follow.
 
 - Recovery is the same code path as normal start, so it is exercised on every boot rather than only after a crash.
 - A projection bug is a display bug, never data loss.
 
 # What is not disposable
 
-Segments and blobs. They are the only files whose loss is unrecoverable.
+The database and the blobs. They are the only files whose loss is unrecoverable.
 
 # Read path
 
-A surface does not ask `agentd` for state. It opens the store read-only, folds the projection it needs, and tails new segments as they appear. `agentd` is notified of commands over a Unix socket, and notifies surfaces of new data over the same socket with a small `appended` frame that carries the position. The socket is a doorbell, not a message bus.
+A surface does not ask `agentd` for state. It opens the store read-only, folds the projection it needs, and re-reads when the database change counter moves. `agentd` is notified of commands over a Unix socket, and notifies surfaces of new data over the same socket with a small `appended` message that carries the new depth. The socket is a doorbell, not a message bus.
 
 This keeps read load off the writer. It also means a surface can never corrupt the log, because it never has a writable handle.
 
 # Write path
 
-Only `agentd` appends. It holds an exclusive lock on the store. It appends one event at a time, in the order the reactor decided them, and fsyncs before it reports success to itself.
+Only `agentd` appends. It holds an exclusive lock on the store. It appends in the order the reactor decided, one transaction per batch, and commits before it reports success to itself.
 
 A command from a surface does not write. It becomes a `command.received` event, and the reactor reacts to that event like any other. This is what makes every operator action part of the replayable history.
 

@@ -69,7 +69,7 @@ Each iteration reads the events appended since the last folded position and fold
 - Durations use the monotonic clock. Absolute instants use the wall clock and are re-evaluated on each tick.
 - A timer fires once even if its due time has passed many times over. The late duration is recorded in `schedule.fired`, and the timer re-arms from now. Catch-up storms after a suspend or a long stall are prevented by construction.
 - A wall clock jump beyond 2 seconds in either direction emits `instance.clock_skew` with the measured delta, and timers whose absolute deadline is now in the past fire once.
-- No busy polling. The loop blocks on the nearest of the next timer, the socket, and the store's tail.
+- No busy polling. The loop blocks on the nearest of the next timer, the socket, and the next store change notice.
 
 # Backpressure and fairness
 
@@ -91,7 +91,7 @@ A parked branch is state, not a thread. The reactor never blocks on a single bra
 4. A snapshot is written for every active branch.
 5. `instance.stopping` is appended and synced, the lock is released, and the process exits 0.
 
-`TimeoutStopSec` is 45 seconds, which is longer than the drain bound. A drain that exceeds it is a bug and gets a `SIGKILL` that leaves no torn bytes, because the batch boundary is the frame boundary.
+`TimeoutStopSec` is 45 seconds, which is longer than the drain bound. A drain that exceeds it is a bug and gets a `SIGKILL` that leaves nothing half-written, because an uncommitted transaction is rolled back.
 
 # Degradation ladder
 
@@ -104,7 +104,7 @@ A parked branch is state, not a thread. The reactor never blocks on a single bra
 | Store lock held | Exit 75, no retry storm | The other writer exits or is stopped |
 | Clock skew | Emit the event, keep going | Operator notices; timers self-correct |
 | Snapshot hash mismatch | Discard the snapshot, fold from an earlier one | Logged, never fatal |
-| Corrupt frame mid-store | Fail stopped, exit 74 | `agentctl doctor --repair` after inspection |
+| Corrupt database | Fail stopped, exit 74 | Restore the last backup, then verify on start |
 | OOM kill by the cgroup | Restart, recover from the last synced batch | Context shrinking is a follow-up fix |
 
 # Upgrade

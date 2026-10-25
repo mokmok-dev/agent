@@ -38,8 +38,9 @@ Names follow the Prometheus convention and are defined once, in one table in `ag
 | `agent_reactor_last_ping_age_seconds` | gauge | Age of the last completed iteration |
 | `agent_store_append_seconds` | histogram | Time from batch open to sync return |
 | `agent_store_events_total` | counter | Events appended since process start |
-| `agent_store_bytes` | gauge | Segments plus blobs on disk |
-| `agent_store_torn_bytes_total` | counter | Bytes dropped by torn-tail recovery |
+| `agent_store_bytes` | gauge | Database, its log, and blobs on disk |
+| `agent_store_verify_seconds` | histogram | Time from open to a verified chain |
+| `agent_store_chain_failures_total` | counter | Chain verification failures, which must stay zero |
 | `agent_model_requests_total` | counter | Labeled by provider, model, and outcome class |
 | `agent_model_tokens_total` | counter | Labeled by `input`, `output`, `cached`, `estimated` |
 | `agent_model_cache_events_total` | counter | Labeled by `reported` and `hit` |

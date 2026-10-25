@@ -80,6 +80,6 @@ Promote is out of scope for the first release. The point of recording it here is
 
 1. A fork appends exactly one event and modifies no existing byte.
 2. `depth` of the first event on a child branch equals the depth of the fork event plus one.
-3. Every event's `prev` resolves. A missing predecessor that was never archived is corruption, not a gap.
-4. Tips are derived. Deleting `tips.json` changes nothing except startup scan time.
+3. Every event's `prev` resolves. A missing predecessor is corruption, not a gap.
+4. Tips are derived. Deleting a cached tip changes nothing except startup time.
 5. A branch has exactly one tip. Two events with the same branch and depth is a store error and fails verification.

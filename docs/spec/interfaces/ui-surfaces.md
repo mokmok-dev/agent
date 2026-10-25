@@ -12,7 +12,7 @@ generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
 A surface does four things and nothing else.
 
 1. Opens the store read-only and folds the projection it needs.
-2. Tails new segments by watching the newest segment's length and the directory listing.
+2. Re-reads when the database change counter moves, and on a doorbell message.
 3. Sends commands over `bus.sock` with a `command_id` the surface generated.
 4. Renders state. It never writes, never keeps authoritative state, and never decides anything the reactor should decide.
 
@@ -52,7 +52,7 @@ Streaming output arrives as non-durable frames on the doorbell socket. If the so
 
 # WebUI
 
-`axum`, server-rendered HTML, one small vanilla script for the SSE client. No build step, no framework, no bundle.
+`axum`, server-rendered HTML, one small vanilla script for the SSE client. No build step, no framework, no JavaScript bundle.
 
 | Route | Method | Purpose |
 |---|---|---|
