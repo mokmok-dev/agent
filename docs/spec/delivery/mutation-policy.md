@@ -1,0 +1,111 @@
+---
+type: Policy
+title: Mutation policy
+description: Every mutant on the logic surface is killed, a surviving mutant fails the build, and an exception needs a written reason in the config.
+tags: [testing, mutation, ci]
+status: draft
+generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
+---
+
+# The rule
+
+A pull request is mergeable only when `cargo mutants` reports zero missed mutants and zero timeouts on the code it touches. On `main`, the full run over every crate reports the same.
+
+Coverage measures whether a line ran. Mutation testing measures whether a test would notice if the line were wrong. For a store that must never lose a fact and a fold that must never produce a different state from the same events, the second question is the only one worth gating on.
+
+# Scope
+
+| Path | Rule |
+|---|---|
+| `crates/*/src/**/*.rs` except `main.rs` | 100 percent killed, no exceptions beyond the annotated list |
+| `crates/*/src/main.rs` | Excluded by glob. Wiring only, covered by integration tests |
+| `crates/xtask/**` | Excluded. Build tooling, not shipped behavior |
+| `crates/*/tests/**` | Not mutated. Test code |
+| `docs/**` | Not mutated |
+
+`main.rs` is excluded for a specific reason. It constructs concrete adapters, reads arguments, and calls `run`. Almost every mutant in it either fails to compile or changes nothing observable, and the few that matter are caught by an end-to-end test that starts the process. Requiring `main.rs` mutants would push authors to inline logic there to reach it, which is the opposite of what the architecture wants.
+
+The exclusion is a glob in `mutants.toml`, not a convention. A new crate inherits it, and an author who needs a narrower exclusion adds an entry with a reason.
+
+# Configuration
+
+```toml
+# mutants.toml
+examine_globs = ["crates/*/src/**/*.rs"]
+exclude_globs = ["crates/*/src/main.rs", "crates/xtask/**"]
+
+test_tool = "nextest"
+timeout_multiplier = 3.0
+minimum_test_timeout = "60s"
+jobs = 16
+```
+
+`test_tool = "nextest"` matters. `cargo test` reruns a binary per mutant, and nextest's process-per-test model is both faster and better at isolating a mutant that hangs.
+
+# Exceptions
+
+There are exactly two kinds.
+
+**An equivalent mutant.** The mutated code produces identical observable behavior, so no test can kill it. It is annotated at the line with a reason.
+
+```rust
+// mutants: skip-equivalent, saturating add and wrapping add agree here because the
+// caller checks the bound before entering.
+let total = depth.saturating_add(1);
+```
+
+**Platform-only code.** A branch compiled only on macOS, or only under a feature that CI does not build.
+
+```rust
+#[cfg(target_os = "macos")]
+// mutants: skip-platform, launchd path is exercised by the macOS CI job only.
+fn install_plist(...) { ... }
+```
+
+A CI job fails the build when a `mutants:` annotation lacks a reason of at least 20 characters, or when a file adds an annotation without a corresponding line in `mutants.toml`'s reviewed list. That check is a script, not a review habit.
+
+# Why the gate is reachable
+
+The gate is only reachable because of the architecture, so treat these as load-bearing rather than stylistic.
+
+- `agent-core` is pure. Time, entropy, network, and disk arrive through ports, so a test substitutes a fixed clock and a seeded generator and drives every branch.
+- `decide` is a total function over a closed state and a closed step type. Every arm is reachable from a constructed state.
+- The event taxonomy is a closed enum with an exhaustive match. A new variant fails compilation until its fold and its test exist.
+- Errors are values. A branch that returns `Err` is a branch a test can reach without a panic hook.
+- No `unwrap`, no `expect`, no `panic!` in library code. Clippy denies them at workspace level.
+- IO lives in `main.rs` and in adapter crates whose behavior is asserted end to end.
+
+# Test layers
+
+| Layer | Kills mutants in |
+|---|---|
+| Unit tests per pure function, table driven per event type | fold, decisions, prompt rendering |
+| Property tests over generated event sequences | hash chain, depth monotonicity, fold determinism, idempotent fold |
+| Store integration tests on a temp directory | frames, rotation, group commit, tips |
+| Fault injection, truncating the last frame at every byte offset | recovery, torn tail, chain verification |
+| Golden replay fixture, a checked-in segment plus its expected state hash | the whole fold pipeline |
+| Process tests that start `agentd` and send commands | `main.rs` wiring, the socket, shutdown |
+
+The fault injection test is the one that earns its cost. Recovery bugs live at byte boundaries, and iterating every truncation offset is the only way to kill the mutants in the boundary logic.
+
+# CI
+
+| Job | When | Command |
+|---|---|---|
+| `mutants-in-diff` | every pull request | `cargo mutants --in-diff origin/main` |
+| `mutants-full` | nightly on `main` and on demand | `cargo mutants --workspace` |
+| `spec-check` | every pull request | `cargo xtask spec-check` |
+| `nextest` | every pull request | `cargo nextest run --workspace --all-features` |
+| `clippy` | every pull request | `cargo clippy --all-targets --all-features -- -D warnings` |
+
+The in-diff run is the gate authors experience. It mutates only the changed lines, so it stays under a few minutes on a normal PR. The nightly full run catches a mutant that a later change made reachable.
+
+# Reporting
+
+`cargo mutants --json` output is uploaded as a build artifact, and the summary line is posted in the pull request. Three numbers are reported, not one: caught, missed, and timeout. Unviable mutants are reported separately and are not a gap in coverage, because a mutant that does not compile cannot be a wrong program.
+
+# What this policy does not buy
+
+- It does not prove the tests assert the right thing. A test that asserts a wrong constant kills mutants and enshrines a bug, which is why property tests and the golden fixture exist alongside.
+- It does not cover generated code, and the workspace has none.
+- It does not run in the pre-commit hook. A hook that takes minutes gets bypassed, so mutation runs in CI where it cannot be skipped.
