@@ -9,3 +9,4 @@
 * **Update**: Strengthened the no-merge decision with the reason that decides it. A prompt is a linear token sequence, and a two-parent history has no canonical linearization.
 * **Update**: Promoted every concept from draft to stable after the operator's review, and recorded the review in `verified`.
 * **Update**: Named the gate jobs as they are actually implemented, and moved the mutation configuration to `.cargo/mutants.toml`.
+* **Update**: Moved the port traits out of the core and recorded the `no_std` stance as a decision, so the constraint is checked by the compiler rather than by review.

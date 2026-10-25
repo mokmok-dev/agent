@@ -1,0 +1,12 @@
+[package]
+edition.workspace = true
+name = "agent-core"
+publish = false
+version = "0.0.0"
+
+[dependencies]
+blake3 = { workspace = true, features = ["pure"] }
+serde.workspace = true
+
+[lints]
+workspace = true

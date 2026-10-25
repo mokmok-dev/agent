@@ -42,6 +42,7 @@ Each entry names a decision that is expensive to reverse, the alternative that l
 | 14 | OKF 0.2 for the spec | Plain markdown, or a wiki |
 | 15 | Fork appends a new root with a parent pointer | Rewriting or copying history |
 | 16 | Snapshots, so replay does not grow with history | Fold from genesis on every start |
+| 17 | `agent-core` is `no_std` with `alloc`, and serialization lives at the edge | A `std` core that parses JSON |
 
 # 1. The log is the only truth
 
@@ -181,3 +182,18 @@ Cost accepted. A snapshot format to version and a fold that must stay determinis
 [^langgraph-time-travel]: LangGraph time travel, https://docs.langchain.com/oss/python/langgraph/use-time-travel
 [^temporal-limits]: Temporal workflow execution limits, https://docs.temporal.io/workflow-execution/limits
 [^restate-durable]: Restate durable execution, https://docs.restate.dev/concepts/durable_execution
+
+# 17. Core is `no_std` with `alloc`, and serialization lives at the edge
+
+The core crate holds the event envelope, the taxonomy, the fold, the decisions, and the canonical encoding. It compiles with `#![no_std]` and `alloc`, and its only dependencies are `serde` and `blake3`.
+
+Two properties follow, and both are the reason for the constraint.
+
+- The core cannot read a clock, open a file, or reach a socket, because the compiler says so. A `std::time::Instant` in a decision function becomes a build error rather than a test that quietly depends on the wall clock.
+- Every branch in the core is reachable from data, so the mutation gate is a measurement of the tests rather than of the environment.
+
+Serialization is split deliberately. Core owns the canonical writer, which produces the exact bytes whose hash is the event id. Core never parses those bytes. Decoding a row, and exporting events, happen in the store and the CLI, where `serde_json` lives. The store keeps the canonical bytes verbatim, so verification never re-serializes and there is only ever one encoder in the system.
+
+Cost accepted. `alloc` is required, so this is not bare-metal `no_std`. `HashMap` is out, and `BTreeMap` or a sorted `Vec` stands in, which is an improvement for determinism anyway. Integer formatting, hex, and the RFC 3339 calendar conversions are written here rather than taken from a crate, which is more code to own and more code the mutation gate can measure.
+
+The domain of a timestamp starts at the epoch. A pre-1970 instant from a running service is a broken clock, not history, and excluding it removes a branch from the calendar maths that no test could reach.
