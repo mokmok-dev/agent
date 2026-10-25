@@ -1,0 +1,32 @@
+[workspace]
+members = []
+resolver = "3"
+
+[workspace.dependencies]
+
+[workspace.lints.clippy]
+all = "warn"
+doc_link_code = "warn"
+expect_used = "warn"
+missing_const_for_fn = "warn"
+option_if_let_else = "warn"
+panic = "warn"
+pedantic = "warn"
+redundant_clone = "warn"
+redundant_pub_crate = "warn"
+significant_drop_tightening = "warn"
+suboptimal_flops = "warn"
+todo = "warn"
+unwrap_used = "warn"
+use_self = "warn"
+
+[workspace.lints.rust]
+unexpected_cfgs = "warn"
+unsafe_code = "deny"
+
+[workspace.metadata.crane]
+name = "agent"
+
+[workspace.package]
+edition = "2024"
+version = "0.0.0"
