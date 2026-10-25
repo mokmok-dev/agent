@@ -11,7 +11,7 @@ generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
 
 Every PR targets `main`, is independently green, and leaves the tree working. Nothing lands that a later PR has to fix before the tree builds. The order follows one rule. A unit is built only after the unit it depends on can be verified on its own.
 
-Each PR's gate is the same five checks. Format, clippy with warnings denied, nextest, `cargo mutants --in-diff origin/main` with zero missed and zero timeouts, and `cargo xtask spec-check` when the spec changed.
+Each PR's gate is the same five checks. Format, clippy with warnings denied, the workspace test suite, mutation limited to the changed lines with zero missed and zero timeouts, and the spec check when the bundle changed.
 
 # The sequence
 

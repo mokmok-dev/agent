@@ -20,7 +20,7 @@ The CLI never writes the store. It sends commands to `agentd` over `bus.sock`, o
 | `agentctl status` | no | Tip ages, active branches, pending approvals, provider health, store size |
 | `agentctl branch list` | no | Branches with depth, label, tip time, last outcome |
 | `agentctl branch show <id>` | no | One branch, with the last N turns |
-| `agentctl fork --from <branch> (--at <id> \| --rewind <n> \| --turn <id>) [--label <text>] [--boundary]` | command | Create a branch at the chosen point |
+| `agentctl fork` | command | Create a branch at the chosen point |
 | `agentctl send --branch <id> <message>` | command | Request a turn |
 | `agentctl approve <id>` and `agentctl deny <id>` | command | Decide a pending approval |
 | `agentctl archive --branch <id>` | command | Stop scheduling a branch |
@@ -34,6 +34,8 @@ The CLI never writes the store. It sends commands to `agentd` over `bus.sock`, o
 | `agentctl install --systemd` and `--launchd` | yes | Write and enable the unit or plist |
 | `agentctl spec check` | no | Validate the OKF bundle under `docs/spec` |
 | `agentctl version` | no | Binary version, store format, git describe |
+
+A fork names its parent branch and one selector. `--at` takes an event id, `--rewind` takes a count back from the tip, and `--turn` takes a turn id. `--label` names the branch, and `--boundary` snaps the fork to the nearest prompt segment edge.
 
 # Exit codes
 
@@ -52,7 +54,7 @@ The codes exist so a script can tell "refused, fix your arguments" from "the dis
 
 # JSON mode
 
-`--json` prints one object per invocation, or one object per line for list commands, with a stable field set and a `schema` field naming the shape. Errors print `{ "error": { "code", "class", "message", "hint" } }` to stdout and set the exit code.
+`--json` prints one object per invocation, or one object per line for list commands, with a stable field set and a `schema` field naming the shape. An error prints one object under an `error` key holding a code, a class, a message, and a hint, and sets the exit code.
 
 Two rules make the output safe to consume.
 

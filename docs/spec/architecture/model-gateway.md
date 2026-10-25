@@ -11,24 +11,11 @@ generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
 
 `agent-core` declares the port. Adapters live in `agent-model`.
 
-```rust
-pub trait ModelPort {
-    fn describe(&self) -> ModelProfile;
-    fn complete(&self, request: ModelRequest) -> ModelStream;
-}
+The port has two operations. One reports the model profile, which states the model id, the context window, whether the provider caches prefixes, how long that cache is expected to live, and whether the provider reports cached token counts. The other takes a rendered request and returns a stream.
 
-pub struct ModelProfile {
-    pub id: String,
-    pub context_window: u32,
-    pub supports_prefix_cache: bool,
-    pub cache_ttl: CacheTtl,
-    pub reports_cached_tokens: bool,
-}
-```
+The request carries the rendered prompt segments, not one string. Segmentation survives the port, so an adapter can send a cache hint, an explicit cache key, or a plain concatenation without re-parsing text.
 
-`ModelRequest` carries the rendered prompt segments, not a string. Segmentation survives the port, so the adapter can send a cache hint, an explicit cache key, or a plain concatenation without re-parsing text.
-
-`ModelStream` yields token deltas, then a terminal usage report or a typed error. Deltas are ephemeral. They reach surfaces over the doorbell socket as non-durable frames and are never appended. Only the finished message becomes an event, so a reconnect reads the log and cannot observe half a message.
+The stream yields token deltas, then either a usage report or a typed error. Deltas are ephemeral. They reach surfaces over the doorbell socket as non-durable frames and are never appended. Only the finished message becomes an event, so a reconnect reads the log and cannot observe half a message.
 
 # Adapters in the first release
 

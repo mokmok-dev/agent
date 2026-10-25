@@ -81,14 +81,7 @@ Rule 1 is the one worth stating twice. A system prompt with a timestamp is the m
 
 # The prefix chain
 
-For segments `s_0 .. s_n`:
-
-```
-h_0 = BLAKE3(s_0)
-h_i = BLAKE3(h_{i-1} || s_i)
-```
-
-`h_i` is the identity of the prompt prefix ending at segment `i`. It is stored in `model.requested` for every call.
+For segments `s_0 .. s_n`, the first chain entry is the hash of the first segment, and each later entry is the hash of the previous entry concatenated with the next segment. `h_i` is the identity of the prompt prefix ending at segment `i`. It is stored in `model.requested` for every call.
 
 The chain exists to answer four questions that the DAG alone cannot.
 

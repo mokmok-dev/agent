@@ -21,23 +21,7 @@ genesis - a1 - a2 - a3 - a4 - a5          branch main, tip a5
 
 # Fork is append-only
 
-The fork command appends a single `branch.created` event.
-
-```json
-{
-  "type": "dev.mokmok.agent.branch.created",
-  "subject": "branch/b-7f3a2c",
-  "branch": "b-7f3a2c",
-  "prev": "a2...",
-  "depth": 3,
-  "causationid": "<id of the command.received event on the parent>",
-  "data": {
-    "parent": "main",
-    "fork_event": "a2...",
-    "label": "retry with the cheaper model"
-  }
-}
-```
+The fork command appends a single `branch.created` event. It carries the new branch id, the parent branch, the fork event id, and an optional label. Its `prev` is the fork event and its `depth` is one past that event's depth. Nothing else is needed, which is why a fork costs a few hundred bytes rather than a copy.
 
 The parent branch receives no event. That is deliberate. A fork that wrote to its parent would make reading the parent's history depend on how many children it has, and would let an experiment disturb the timeline it branched from.
 

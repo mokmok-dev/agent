@@ -23,46 +23,32 @@ Coverage measures whether a line ran. Mutation testing measures whether a test w
 | `crates/*/tests/**` | Not mutated. Test code |
 | `docs/**` | Not mutated |
 
-`main.rs` is excluded for a specific reason. It constructs concrete adapters, reads arguments, and calls `run`. Almost every mutant in it either fails to compile or changes nothing observable, and the few that matter are caught by an end-to-end test that starts the process. Requiring `main.rs` mutants would push authors to inline logic there to reach it, which is the opposite of what the architecture wants.
+`main.rs` is excluded for a specific reason. It constructs concrete adapters, reads arguments, and calls the runtime entry point. Almost every mutant in it either fails to compile or changes nothing observable, and the few that matter are caught by an end-to-end test that starts the process. Requiring `main.rs` mutants would push authors to inline logic there to reach it, which is the opposite of what the architecture wants.
 
 The exclusion is a glob in `mutants.toml`, not a convention. A new crate inherits it, and an author who needs a narrower exclusion adds an entry with a reason.
 
 # Configuration
 
-```toml
-# mutants.toml
-examine_globs = ["crates/*/src/**/*.rs"]
-exclude_globs = ["crates/*/src/main.rs", "crates/xtask/**"]
+The mutation run is configured with four choices.
 
-test_tool = "nextest"
-timeout_multiplier = 3.0
-minimum_test_timeout = "60s"
-jobs = 16
-```
+| Setting | Value | Why |
+|---|---|---|
+| Examined paths | Every `src` file in every crate | The logic surface is the whole of `src` |
+| Excluded paths | `main.rs` in each crate, and the `xtask` crate | Wiring and build tooling, covered by other tests |
+| Test runner | nextest | A process per test isolates a mutant that hangs, and it is faster than a test binary per mutant |
+| Timeout | Three times the baseline, with a floor | A mutant that hangs is a failure, not a pass |
 
-`test_tool = "nextest"` matters. `cargo test` reruns a binary per mutant, and nextest's process-per-test model is both faster and better at isolating a mutant that hangs.
+The test runner choice matters. A runner that reuses one process lets a hanging mutant stall the whole run, which turns a mutation gate into a timeout.
 
 # Exceptions
 
 There are exactly two kinds.
 
-**An equivalent mutant.** The mutated code produces identical observable behavior, so no test can kill it. It is annotated at the line with a reason.
+**An equivalent mutant.** The mutated code produces identical observable behavior, so no test can kill it. It is annotated at the line it appears on, with the reason written in the annotation itself and at least a sentence long. An example is a saturating addition that agrees with a wrapping one because the caller checks the bound before entering.
 
-```rust
-// mutants: skip-equivalent, saturating add and wrapping add agree here because the
-// caller checks the bound before entering.
-let total = depth.saturating_add(1);
-```
+**Platform-only code.** A branch compiled only on macOS, or only under a feature that CI does not build. It is annotated with the platform and the job that covers it, so a reader knows which CI run stands behind it.
 
-**Platform-only code.** A branch compiled only on macOS, or only under a feature that CI does not build.
-
-```rust
-#[cfg(target_os = "macos")]
-// mutants: skip-platform, launchd path is exercised by the macOS CI job only.
-fn install_plist(...) { ... }
-```
-
-A CI job fails the build when a `mutants:` annotation lacks a reason of at least 20 characters, or when a file adds an annotation without a corresponding line in `mutants.toml`'s reviewed list. That check is a script, not a review habit.
+A CI job fails the build when a mutation annotation lacks a reason of at least 20 characters, or when a file adds an annotation without a corresponding line in the reviewed exception list. That check is a script, not a review habit.
 
 # Why the gate is reachable
 
@@ -90,19 +76,19 @@ The fault injection test is the one that earns its cost. Recovery bugs live at b
 
 # CI
 
-| Job | When | Command |
+| Job | When | Check |
 |---|---|---|
-| `mutants-in-diff` | every pull request | `cargo mutants --in-diff origin/main` |
-| `mutants-full` | nightly on `main` and on demand | `cargo mutants --workspace` |
-| `spec-check` | every pull request | `cargo xtask spec-check` |
-| `nextest` | every pull request | `cargo nextest run --workspace --all-features` |
-| `clippy` | every pull request | `cargo clippy --all-targets --all-features -- -D warnings` |
+| `mutants-in-diff` | every pull request | `cargo mutants` limited to the lines the PR changes |
+| `mutants-full` | nightly on `main`, and on demand | `cargo mutants` over the workspace |
+| `spec-check` | every pull request | the OKF bundle check |
+| `nextest` | every pull request | the workspace test suite |
+| `clippy` | every pull request | clippy with warnings denied |
 
 The in-diff run is the gate authors experience. It mutates only the changed lines, so it stays under a few minutes on a normal PR. The nightly full run catches a mutant that a later change made reachable.
 
 # Reporting
 
-`cargo mutants --json` output is uploaded as a build artifact, and the summary line is posted in the pull request. Three numbers are reported, not one: caught, missed, and timeout. Unviable mutants are reported separately and are not a gap in coverage, because a mutant that does not compile cannot be a wrong program.
+The machine-readable mutation report is uploaded as a build artifact, and the summary line is posted in the pull request. Three numbers are reported, not one: caught, missed, and timeout. Unviable mutants are reported separately and are not a gap in coverage, because a mutant that does not compile cannot be a wrong program.
 
 # What this policy does not buy
 

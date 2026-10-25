@@ -23,48 +23,19 @@ Separate processes buy three things. A surface crash cannot stall the reactor. A
 
 # Supervision on Linux
 
-`agent.service`, installed by the flake's NixOS module or by `agentctl install --systemd`.
+`agent.service`, installed by the flake's NixOS module or by `agentctl install --systemd`. The settings that carry weight, and why.
 
-```ini
-[Unit]
-Description=Mokmok agent
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=0
-
-[Service]
-Type=notify
-NotifyAccess=main
-WatchdogSec=30
-Restart=always
-RestartSec=2
-StateDirectory=agent
-StateDirectoryMode=0700
-RuntimeDirectory=agent
-RuntimeDirectoryMode=0700
-ExecStart=/run/current-system/sw/bin/agentd --state-dir /var/lib/agent
-KillSignal=SIGTERM
-TimeoutStopSec=45
-MemoryMax=4G
-TasksMax=512
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectControlGroups=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-RestrictNamespaces=true
-LockPersonality=true
-SystemCallArchitectures=native
-```
-
-Four choices in that unit carry weight.
-
-- `Type=notify` with `WatchdogSec=30` means systemd restarts a process that is alive but not making progress. The ping is sent by the reactor only after it completes a loop iteration, so a deadlock stops the ping.
-- `StartLimitIntervalSec=0` removes the rate limit, because `RestartSec` plus a persisted backoff inside the agent is the real limiter. Without this, a machine that is failing repeatedly ends up with a dead unit and no agent at all.
-- `ProtectSystem=strict` with `StateDirectory` gives the process exactly one writable path.
-- `MemoryMax` turns a runaway context into a fast, visible kill rather than an out-of-memory event that takes the machine with it.
+| Setting | Value | Why |
+|---|---|---|
+| `Type` with `WatchdogSec` | `notify`, 30 seconds | The ping is sent after a loop iteration completes, so a hang stops the ping and systemd restarts the process |
+| `Restart` with `RestartSec` | `always`, 2 seconds | A crash is a restart, not an outage |
+| `StartLimitIntervalSec` | `0` | Removes the rate limit, because the persisted backoff inside the agent is the real limiter. Without this, a repeatedly failing machine ends up with a dead unit and no agent |
+| `StateDirectory` | `agent`, mode 0700 | Exactly one writable path for a process that otherwise has no write access |
+| `ProtectSystem`, `ProtectHome` | `strict`, `true` | The binary and the home directory are read-only to the service |
+| `MemoryMax` | 4 GB | A runaway context dies quickly and visibly instead of taking the machine with it |
+| `TasksMax` | 512 | Bounds thread and process creation |
+| `NoNewPrivileges`, `RestrictNamespaces`, `LockPersonality` | enabled | Removes the cheap escalation paths for a process that runs tools |
+| `TimeoutStopSec` | 45 seconds | Longer than the drain bound, so a normal stop never becomes a kill |
 
 # Supervision on macOS
 
@@ -87,20 +58,7 @@ launchd has no notify protocol and no watchdog. The runtime therefore ships two 
 
 One loop, one writer, one decision at a time.
 
-```rust
-loop {
-    let batch = store.fold_tail(state.checkpoint_depth)?;   // pure
-    let now = clock.now();                                   // port
-    let step = decide(&state.apply(&batch), now);            // pure
-    match step {
-        Step::Append(events) => store.append(&events)?,       // durable
-        Step::WaitUntil(instant) => timers.sleep_until(instant),
-        Step::WaitForCommand => ipc.next_command(),
-        Step::Shutdown(reason) => break reason,
-    }
-    notifier.ping();                                         // sd_notify
-}
-```
+Each iteration reads the events appended since the last folded position and folds them. It then reads the clock and calls one pure decision function over the folded state and that reading. The decision returns exactly one of four steps. Append a set of events. Sleep until an instant. Wait for a command. Shut down with a reason. The loop carries out that step, then pings the watchdog.
 
 `decide` is a pure function from folded state and a clock reading to one `Step`. It is where the 100 percent killed mutation gate does its most valuable work, because a wrong decision here writes a wrong fact that outlives every restart.
 

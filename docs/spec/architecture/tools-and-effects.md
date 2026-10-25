@@ -15,25 +15,22 @@ The store records intent before the effect and result after it, so a crash leave
 
 # The pair
 
-```
-tool.intent   { call_id, tool, arguments, idempotency_key, expected }
-      ... effect happens outside the store ...
-tool.result   { call_id, exit_status, duration, stdout_ref, stderr_ref, truncated }
-```
+Every effect is bracketed by two events and sometimes a third.
 
-or
-
-```
-tool.failed   { call_id, error_class, may_have_happened }
-```
+| Event | Carries |
+|---|---|
+| `tool.intent` | Call id, tool name, arguments, idempotency key, what the caller expects |
+| The effect | Nothing. It happens outside the store |
+| `tool.result` | Call id, exit status, duration, references to captured output, whether the output was truncated |
+| `tool.failed` | Call id, error class, and whether the effect may have happened |
 
 `may_have_happened` is true when the process had started and the outcome is unknown, for example a kill during execution or a crash before the result was synced.
 
 # Idempotency keys
 
-`idempotency_key = blake3(tool_name || canonical(arguments) || call_id)`.
+The key is a hash of the tool name, the canonicalized arguments, and the call id.
 
-`call_id` is derived from the turn id and the step index, so a re-fold of the same turn produces the same key. That is what makes the pair replay-stable.
+The call id is derived from the turn id and the step index, so a re-fold of the same turn produces the same key. That is what makes the pair replay-stable.
 
 On recovery, an intent without a result is handled by the tool's declared class.
 
@@ -46,28 +43,16 @@ A tool declares its class in its manifest. A tool that lies about being idempote
 
 # Tool manifests
 
-A tool is a directory with a TOML manifest and an executable.
+A tool is a directory with a manifest and an executable. The manifest declares what the tool is and what it may touch. The fields that do the real work.
 
-```toml
-name = "shell"
-version = 1
-class = "non-idempotent"
-risk = "write"
-timeout_secs = 120
-max_output_bytes = 1_048_576
-argv = ["sh", "-c", "{{command}}"]
-[permissions]
-paths = ["{{cwd}}"]
-hosts = []
-env = ["PATH", "HOME", "LANG"]
-```
-
-Four fields do the real work.
-
-- `class` decides recovery behavior.
-- `risk` decides the approval rule.
-- `paths`, `hosts`, and `env` are enforced at spawn, not documented and hoped for.
-- `max_output_bytes` bounds what an event can carry.
+| Field | Controls |
+|---|---|
+| `class` | Recovery behavior. Idempotent tools may be re-run after a crash, non-idempotent ones may not |
+| `risk` | The approval rule. Read and write inside the workspace need no approval, network and destructive calls do |
+| `timeout` | The wall clock bound on one call |
+| `max_output` | The byte bound on what one event may carry |
+| `argv` | How the arguments are turned into a process |
+| `permissions` | The paths, hosts, and environment variables the tool may use, enforced at spawn rather than documented and hoped for |
 
 # Risk and approval
 

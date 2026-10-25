@@ -116,32 +116,4 @@ Three orders exist and only one of them is authoritative.
 
 CloudEvents defines no delivery order, and its `sequence` extension is a per-source hint whose semantics the specification deliberately leaves undefined.[^cloudevents-1-0] Neither can order history, and a broker that reorders would break it. The envelope carries the fact. The store carries the order. That is why `depth` is a hash-committed field rather than a counter a broker could reset.
 
-# An example
-
-```json
-{
-  "specversion": "1.0",
-  "id": "9f2c0d1e7b4a56c8e3f1a2b4c6d8e0f2a4b6c8d0e2f4a6b8c0d2e4f6a8b0c2d4",
-  "source": "agent://mokmok",
-  "type": "dev.mokmok.agent.tool.intent",
-  "subject": "branch/main",
-  "time": "2026-10-25T12:00:03Z",
-  "datacontenttype": "application/json",
-  "branch": "main",
-  "prev": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
-  "depth": 481,
-  "actor": "agent:deepseek-v4.1-flash",
-  "causationid": "5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b",
-  "correlationid": "turn-01JA3QM7X2",
-  "model": "deepseek-v4.1-flash",
-  "schemaver": 1,
-  "data": {
-    "call_id": "call-01JA3QM8Z4",
-    "tool": "shell",
-    "arguments": { "program": "/run/current-system/sw/bin/git", "argv": ["status", "--short"] },
-    "idempotency_key": "sha256:1f0c..."
-  }
-}
-```
-
 [^cloudevents-1-0]: CloudEvents specification, version 1.0.2
