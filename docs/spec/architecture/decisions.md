@@ -116,7 +116,7 @@ Cost accepted. Every surface links the store crate, so a store bug can crash a s
 
 A surface crash must not stall the reactor, and a leak in a renderer must not take down the writer.
 
-The rejected design puts every surface in one binary. It halves the process count and makes shared state trivially easy. It also makes a UI panic a full outage.
+The rejected design puts every surface in one binary. It halves the process count and makes shared state trivial. It also makes a UI panic a full outage.
 
 Cost accepted. More units, more install paths, and one socket protocol to keep stable.
 

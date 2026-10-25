@@ -75,4 +75,4 @@ The CLI is safe to run from a script, a cron job, a Makefile, and a chat bridge.
 2. Every reserved `index.md` and `log.md` follows its structure, and `okf_version` appears only in the bundle root index.
 3. Every internal link resolves, or is reported as a warning, since OKF permits broken links on purpose.
 
-The command is the same check CI runs, so a local pass and a green build mean the same thing.
+The command is the same check CI runs, so a local pass and a green build mean the same thing. It calls one library function, also exposed as `cargo xtask spec-check` for anyone working in the workspace without a running agent.

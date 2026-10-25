@@ -218,7 +218,7 @@ Three consequences follow for this design.
 
 - The ledger records `reported: false` instead of inferring a hit from latency.
 - The measurement plan is the only source for a number in this bundle. A published number from another workload is cited as evidence about the mechanism, never as a prediction for this one.
-- The active branch limit is a cache decision. Twenty live 50,000 token prefixes compete with each other, and the limit exists to keep that working set inside the provider's cache.
+- The active branch limit is a cache decision. Sixty-four live 50,000 token prefixes compete with each other, and the limit exists to keep that working set inside the provider's cache.
 
 # Consequences for the reactor
 
