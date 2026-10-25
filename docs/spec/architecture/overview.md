@@ -11,24 +11,32 @@ generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
 
 The system has one durable artifact and four things that orbit it.
 
-```
-        surfaces            TUI        WebUI      chat adapter      CLI
-                              |           |              |            |
-                              +-----------+--------------+------------+
-                                                  |
-                                            commands (UDS)
-                                                  |
-   reactor (agentd)  ----------------------------> append
-        |  fold tail            ^                     |
-        |                       |                     v
-        +--> decisions ---------+                 event store
-        |                                             |
-        +--> gateway (models, tools)                   |
-                                                      |
-   projections (fold, disposable) <--------------------+
+```mermaid
+flowchart LR
+  subgraph surfaces["Surfaces, read only"]
+    TUI["TUI"]
+    WebUI["WebUI"]
+    Chat["Chat adapter"]
+    CLI["agentctl"]
+  end
+
+  doorbell(("doorbell<br/>and commands"))
+  reactor["Reactor in agentd<br/>single writer"]
+  store[("Event store<br/>segments, blobs, snapshots")]
+  fold["Fold<br/>disposable projections"]
+  gateway["Gateway<br/>models and tools"]
+  world["Outside world"]
+
+  surfaces --> doorbell
+  doorbell --> reactor
+  reactor -->|"append, then sync"| store
+  reactor --> gateway
+  gateway --> world
+  store --> fold
+  fold -->|"state"| reactor
 ```
 
-Layers, from the bottom.
+Layers, starting with the store.
 
 **Store.** Segments of framed events, content-addressed, hash chained. It is the only truth. See [event store](event-store.md).
 

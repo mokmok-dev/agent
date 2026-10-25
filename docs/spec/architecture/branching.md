@@ -11,10 +11,10 @@ generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
 
 Events form a directed acyclic graph where each event has at most one predecessor. A branch is a path through the graph, not a container of events.
 
-```
-genesis - a1 - a2 - a3 - a4 - a5          branch main, tip a5
-                  \
-                   b1 - b2 - b3           branch b-7f3a2c, tip b3
+```mermaid
+graph LR
+  genesis(("genesis<br/>depth 0")) --> a1["a1"] --> a2["a2<br/>depth 2"] --> a3["a3"] --> a4["a4"] --> a5["a5<br/>main tip"]
+  a2 -->|"fork"| b1["b1<br/>depth 3"] --> b2["b2"] --> b3["b3<br/>branch tip"]
 ```
 
 `b1` has `prev = a2`, `branch = b-7f3a2c`, and `depth = 3`. Branch `main` is unchanged by the fork. No event is copied, no file is rewritten, and the fork costs one append of a few hundred bytes.
