@@ -11,5 +11,8 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod canonical;
+pub mod event;
 pub mod ids;
+pub mod taxonomy;
 pub mod time;

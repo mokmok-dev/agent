@@ -185,7 +185,7 @@ Cost accepted. A snapshot format to version and a fold that must stay determinis
 
 # 17. Core is `no_std` with `alloc`, and serialization lives at the edge
 
-The core crate holds the event envelope, the taxonomy, the fold, the decisions, and the canonical encoding. It compiles with `#![no_std]` and `alloc`, and its only dependencies are `serde` and `blake3`.
+The core crate holds the event envelope, the taxonomy, the fold, the decisions, and the canonical encoding. It compiles with `#![no_std]` and `alloc`, and its only dependency is `blake3`. `serde` joins it when the store needs to decode, which is the point at which a decoder exists to justify it.
 
 Two properties follow, and both are the reason for the constraint.
 

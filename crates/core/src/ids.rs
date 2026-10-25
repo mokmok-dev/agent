@@ -108,6 +108,41 @@ impl FromStr for EventId {
     }
 }
 
+/// The hash of a rendered prompt prefix. A distinct type from an event id,
+/// because a branch point and a prefix are different things even when both are
+/// 32 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PrefixHash([u8; 32]);
+
+impl PrefixHash {
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Display for PrefixHash {
+    fn fmt(
+        &self,
+        formatter: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        write_hex(&self.0, formatter)
+    }
+}
+
+impl FromStr for PrefixHash {
+    type Err = IdError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        read_hex(text).map(Self)
+    }
+}
+
 /// A branch, named by a short random id that never changes. The label a person
 /// reads is separate, so a rename cannot break a reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
