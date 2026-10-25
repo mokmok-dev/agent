@@ -1,0 +1,11 @@
+[package]
+edition.workspace = true
+name = "xtask"
+publish = false
+version = "0.0.0"
+
+[dependencies]
+serde_yaml_ng.workspace = true
+
+[lints]
+workspace = true

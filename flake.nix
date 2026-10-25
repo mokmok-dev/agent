@@ -59,13 +59,14 @@
                 cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
               }
             );
-            test = craneLib.cargoTest (
+            test = craneLib.cargoNextest (
               commonArgs
               // {
                 inherit
                   src
                   cargoArtifacts
                   ;
+                cargoNextestExtraArgs = "--workspace --all-features";
               }
             );
           };
@@ -76,6 +77,7 @@
             packages =
               (with pkgs; [
                 cargo-mutants
+                cargo-nextest
                 rustToolchain
                 sccache
               ])

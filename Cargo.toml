@@ -1,8 +1,9 @@
 [workspace]
-members = ["crates/removeme"]
+members = ["crates/removeme", "crates/xtask"]
 resolver = "3"
 
 [workspace.dependencies]
+serde_yaml_ng = "0.10"
 
 [workspace.lints.clippy]
 all = "warn"
