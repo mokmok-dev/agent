@@ -1,0 +1,9 @@
+[package]
+edition.workspace = true
+name = "removeme"
+version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
