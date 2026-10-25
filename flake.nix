@@ -88,7 +88,8 @@
             shellHook = ''
               export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
               ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-                export RUSTFLAGS="-C link-arg=-fuse-ld=${pkgs.mold}/bin/mold";
+                # gcc's -fuse-ld takes a linker name; an absolute path is rejected.
+                export RUSTFLAGS="-C link-arg=-fuse-ld=mold";
               ''}
             '';
           };
