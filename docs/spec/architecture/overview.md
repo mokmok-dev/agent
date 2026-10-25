@@ -53,7 +53,7 @@ Layers, starting with the store.
 
 | Crate | Holds | IO |
 |---|---|---|
-| `agent-core` | Types, event taxonomy, fold, decision functions, ports | none |
+| `agent-core` | Types, event taxonomy, fold, decisions, canonical encoding. `no_std` with `alloc` | none |
 | `agent-store` | Schema, append-only triggers, chain verification, snapshots, backup, blobs | files |
 | `agent-prompt` | Canonical prompt rendering, segment hashing, prefix chain | none |
 | `agent-model` | Provider adapters over the model port | network |
@@ -71,9 +71,9 @@ Layers, starting with the store.
 
 Dependencies point one way, toward `agent-core`.
 
-- `agent-core` depends on serialization and hashing crates, nothing else.
+- `agent-core` depends on `serde` and `blake3`, nothing else, and compiles as `no_std` with `alloc`.
 - Every adapter depends on `agent-core` and on its own driver crate.
-- `agent-core` depends on no adapter. It reaches the world through traits declared in `agent-core` and implemented elsewhere.
+- `agent-core` depends on no adapter. It takes clock readings, entropy, and rendered prompts as data. The traits that produce them live in `agent-runtime`, where they are implemented.
 
 The traits are narrow on purpose. `Clock` returns an instant. `Entropy` fills bytes. `ModelPort` takes a rendered request and returns a stream. `ToolPort` takes an intent and returns a result. `Notifier` sends a heartbeat.
 

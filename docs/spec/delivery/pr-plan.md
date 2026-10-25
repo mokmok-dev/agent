@@ -20,9 +20,11 @@ Each PR's gate is the same five checks. Format, clippy with warnings denied, the
 |---|---|---|---|
 | 1 | `docs(spec): open knowledge format bundle` | none | This bundle |
 | 2 | `ci: gate on mutants, nextest, clippy, and the spec` | 1 | Workflows, `xtask spec-check`, `.cargo/mutants.toml`, nextest in the flake |
-| 3 | `feat(core): event envelope, taxonomy, and fold` | 2 | `agent-core` with ports, ids, canonical JSON, fold for every event type |
-| 4 | `feat(store): schema, append-only triggers, chain verification` | 3 | `agent-store`, crash tests, `agentctl verify`, `agentctl backup` |
-| 5 | `feat(prompt): segments, prefix chain, cache ledger` | 3 | `agent-prompt`, ledger fold, prefix hash tests |
+| 3 | `feat(core): ids, timestamps, and the no_std stance` | 2 | `agent-core` skeleton with the ids and RFC 3339 time, 322 mutants killed |
+| 3b | `feat(core): envelope, taxonomy, and canonical encoding` | 3 | The event types, the type table, and the one writer that defines an id |
+| 3c | `feat(core): fold` | 3b | State, `apply`, invariant errors, `state_hash` |
+| 4 | `feat(store): schema, append-only triggers, chain verification` | 3c | `agent-store`, crash tests, `agentctl verify`, `agentctl backup` |
+| 5 | `feat(prompt): segments, prefix chain, cache ledger` | 3c | `agent-prompt`, ledger fold, prefix hash tests |
 | 6 | `feat(runtime): reactor, timers, supervision` | 4, 5 | `agent-runtime`, `agentd`, systemd unit, launchd plist, sd_notify |
 | 7 | `feat(cli): operator commands` | 6 | `agentctl` with `status`, `fork`, `send`, `replay`, `audit`, `verify` |
 | 8 | `feat(tui): terminal surface` | 7 | `agent-tui` |
@@ -33,7 +35,7 @@ Each PR's gate is the same five checks. Format, clippy with warnings denied, the
 
 # Why this order
 
-PR 3 before PR 4 because the store cannot be tested without an event type to write, and the event type cannot be tested without a fold that consumes it.
+PR 3 before PR 4 because the store cannot be tested without an event type to write, and the event type cannot be tested without a fold that consumes it. The core landed in three pieces rather than one, because the ids and the calendar are where a 100 percent killed gate is either reachable or not, and finding that out first was cheaper than finding it out after the event types were written.
 
 PR 5 sits beside PR 4 rather than after it because prompt rendering is pure and its tests need no store. Landing it early makes the cache ledger available before the first real model call, which means the ledger has data from the first day of running.
 
