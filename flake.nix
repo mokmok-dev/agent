@@ -75,6 +75,7 @@
 
             packages =
               (with pkgs; [
+                cargo-mutants
                 rustToolchain
                 sccache
               ])

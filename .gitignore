@@ -1,5 +1,6 @@
 /.direnv
 /.pre-commit-config.yaml
+/mutants.out*
 /result
 /result-*
 /target
