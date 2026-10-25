@@ -3,8 +3,9 @@ type: Architecture Decision
 title: Decisions
 description: Each structural choice, the alternative that lost, and the cost we accepted for it.
 tags: [adr, decisions]
-status: draft
+status: stable
 generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
+verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 sources:
   - id: langgraph-time-travel
     resource: https://docs.langchain.com/oss/python/langgraph/use-time-travel

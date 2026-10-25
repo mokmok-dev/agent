@@ -3,8 +3,9 @@ type: Interface Spec
 title: Model gateway
 description: One port, thin provider adapters, retries that never duplicate effects, and a ledger that records what the cache actually did.
 tags: [model, provider, streaming, cache]
-status: draft
+status: stable
 generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
+verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 ---
 
 # The port

@@ -3,8 +3,9 @@ type: Architecture Overview
 title: Architecture overview
 description: Five layers from the append-only log to the surfaces, the crate map, and the dependency rule that makes the mutation gate reachable.
 tags: [architecture, crates]
-status: draft
+status: stable
 generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
+verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 ---
 
 # The shape

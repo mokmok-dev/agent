@@ -3,8 +3,9 @@ type: Plan
 title: PR plan
 description: Twelve stacked pull requests on main, each ending in a green gate, in an order where every step is provable before the next begins.
 tags: [delivery, planning]
-status: draft
+status: stable
 generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
+verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 ---
 
 # How the work stacks

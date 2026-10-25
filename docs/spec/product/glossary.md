@@ -3,8 +3,9 @@ type: Glossary
 title: Glossary
 description: The nouns this spec uses, each with exactly one meaning.
 tags: [glossary]
-status: draft
+status: stable
 generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
+verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 ---
 
 # Terms

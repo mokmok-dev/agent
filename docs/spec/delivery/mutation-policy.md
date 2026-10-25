@@ -3,8 +3,9 @@ type: Policy
 title: Mutation policy
 description: Every mutant on the logic surface is killed, a surviving mutant fails the build, and an exception needs a written reason in the config.
 tags: [testing, mutation, ci]
-status: draft
+status: stable
 generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
+verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 ---
 
 # The rule

@@ -3,8 +3,9 @@ type: Architecture Overview
 title: Prompt cache
 description: Byte-stable prompt segments, a prefix chain per branch, a ledger that records what the provider actually cached, and a fork command that estimates the win before it spends it.
 tags: [cache, prompt, fork, performance]
-status: draft
+status: stable
 generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
+verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 sources:
   - id: sglang
     resource: https://arxiv.org/abs/2312.07104

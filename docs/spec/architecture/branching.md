@@ -3,8 +3,9 @@ type: Capability Spec
 title: Branching
 description: History is a single-parent DAG, a fork is one small event, tips are derived, and branches never merge.
 tags: [branching, fork, cache, dag]
-status: draft
+status: stable
 generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
+verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 ---
 
 # The DAG

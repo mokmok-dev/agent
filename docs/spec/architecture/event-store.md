@@ -3,8 +3,9 @@ type: Storage Format
 title: Event store
 description: One SQLite database of events, append-only enforced by triggers, verified by a content hash chain, with snapshots and online backup.
 tags: [storage, durability, recovery, sqlite]
-status: draft
+status: stable
 generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
+verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 ---
 
 # Layout

@@ -3,8 +3,9 @@ type: Protocol Spec
 title: Tools and effects
 description: Every external effect is bracketed by an intent and a result, keyed for idempotency, and gated by an approval policy.
 tags: [tools, effects, idempotency, security]
-status: draft
+status: stable
 generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
+verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 ---
 
 # The problem

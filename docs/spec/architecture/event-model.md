@@ -3,8 +3,9 @@ type: Data Model
 title: Event model
 description: One CloudEvents 1.0 structured-mode message per fact, four extension attributes, and a closed event taxonomy with additive-only payload rules.
 tags: [events, cloudevents, schema]
-status: draft
+status: stable
 generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
+verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 sources:
   - id: cloudevents-1-0
     resource: https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md
