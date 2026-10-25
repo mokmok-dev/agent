@@ -9,10 +9,13 @@ pub const fn add(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    proptest! {
+        #[test]
+        fn add_returns_the_sum(left in any::<u64>(), right in any::<u64>()) {
+            prop_assume!(left <= u64::MAX - right);
+            prop_assert_eq!(add(left, right), left + right);
+        }
     }
 }
