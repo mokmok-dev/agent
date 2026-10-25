@@ -26,7 +26,7 @@ Coverage measures whether a line ran. Mutation testing measures whether a test w
 
 `main.rs` is excluded for a specific reason. It constructs concrete adapters, reads arguments, and calls the runtime entry point. Almost every mutant in it either fails to compile or changes nothing observable, and the few that matter are caught by an end-to-end test that starts the process. Requiring `main.rs` mutants would push authors to inline logic there to reach it, which is the opposite of what the architecture wants.
 
-The exclusion is a glob in `mutants.toml`, not a convention. A new crate inherits it, and an author who needs a narrower exclusion adds an entry with a reason.
+The exclusion is a glob in `.cargo/mutants.toml`, not a convention. A new crate inherits it, and an author who needs a narrower exclusion adds an entry with a reason.
 
 # Configuration
 
@@ -79,11 +79,11 @@ The fault injection tests are the ones that earn their cost. One kills the proce
 
 | Job | When | Check |
 |---|---|---|
-| `mutants-in-diff` | every pull request | `cargo mutants` limited to the lines the PR changes |
-| `mutants-full` | nightly on `main`, and on demand | `cargo mutants` over the workspace |
-| `spec-check` | every pull request | the OKF bundle check |
-| `nextest` | every pull request | the workspace test suite |
-| `clippy` | every pull request | clippy with warnings denied |
+| `spec` | every pull request | the OKF bundle check |
+| `mutants`, in diff | every pull request | `cargo mutants` limited to the lines the PR changes |
+| `mutants`, full | nightly, and on demand | `cargo mutants` over the workspace |
+| `clippy` | every pull request | clippy with warnings denied, as a flake check |
+| `test` | every pull request | the workspace test suite under nextest, as a flake check |
 
 The in-diff run is the gate authors experience. It mutates only the changed lines, so it stays under a few minutes on a normal PR. The nightly full run catches a mutant that a later change made reachable.
 

@@ -19,7 +19,7 @@ Each PR's gate is the same five checks. Format, clippy with warnings denied, the
 | # | Title | Depends on | Delivers |
 |---|---|---|---|
 | 1 | `docs(spec): open knowledge format bundle` | none | This bundle |
-| 2 | `ci: gate on mutants, nextest, clippy, and the spec` | 1 | Workflows, `xtask spec-check`, `mutants.toml`, `cargo-deny` |
+| 2 | `ci: gate on mutants, nextest, clippy, and the spec` | 1 | Workflows, `xtask spec-check`, `.cargo/mutants.toml`, nextest in the flake |
 | 3 | `feat(core): event envelope, taxonomy, and fold` | 2 | `agent-core` with ports, ids, canonical JSON, fold for every event type |
 | 4 | `feat(store): schema, append-only triggers, chain verification` | 3 | `agent-store`, crash tests, `agentctl verify`, `agentctl backup` |
 | 5 | `feat(prompt): segments, prefix chain, cache ledger` | 3 | `agent-prompt`, ledger fold, prefix hash tests |

@@ -1,0 +1,11 @@
+# The gate described in docs/spec/delivery/mutation-policy.md.
+#
+# The logic surface is every crate's src. A binary's main.rs is wiring, and
+# xtask is build tooling, so both are excluded by path rather than by a comment
+# an author could quietly add.
+
+exclude_globs = ["crates/*/src/main.rs", "crates/xtask/**/*.rs"]
+
+minimum_test_timeout = 60.0
+test_tool = "nextest"
+timeout_multiplier = 3.0
