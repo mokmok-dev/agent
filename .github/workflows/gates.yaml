@@ -25,7 +25,10 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       - name: Mutation on the changed lines
         if: github.event_name == 'pull_request'
-        run: nix develop --command cargo mutants --in-diff "origin/${{ github.base_ref }}"
+        run: |
+          git diff "origin/${{ github.base_ref }}" > "$RUNNER_TEMP/pr.diff"
+          wc -l "$RUNNER_TEMP/pr.diff"
+          nix develop --command cargo mutants --in-diff "$RUNNER_TEMP/pr.diff"
       - name: Mutation over the workspace
         if: github.event_name != 'pull_request'
         run: nix develop --command cargo mutants --workspace
