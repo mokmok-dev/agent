@@ -13,7 +13,6 @@ generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
 
 **Store.** The state directory holding the database, the blob directory, and the writer lock. Exactly one process appends to it at a time.
 
-
 **Log.** The total order of rows in the events table, in insert order. A row's physical position is its row id.
 
 **Branch.** A named path through the event DAG. The store holds many branches. A branch is identified by a stable string such as `main` or `b-01JA3`.
@@ -30,7 +29,7 @@ generated: { by: hermes-agent/deepseek-v4.1-flash, at: 2026-10-25T12:57:16Z }
 
 **Turn.** One model request and everything it triggers, from the operator's message to the final assistant message. A turn is a unit of retry and a unit of cache accounting.
 
-**Segment (prompt).** One byte-stable slice of a rendered prompt, such as the system message, the tool schema block, or one conversation message. Prompt segments are hashed to form the prefix chain. Unrelated to a store segment, which is a file.
+**Segment (prompt).** One byte-stable slice of a rendered prompt, such as the system message, the tool schema block, or one conversation message. Prompt segments are hashed to form the prefix chain. Unrelated to a database row, which is a stored event.
 
 **Prefix chain.** The ordered list of hashes `h1 = H(s1)`, `h2 = H(h1 || s2)`, and so on. A cache lookup finds the longest matching prefix chain entry.
 
