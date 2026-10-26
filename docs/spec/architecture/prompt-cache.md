@@ -68,7 +68,7 @@ The mechanism is established by the serving literature. The size of the win on a
 
 | Index | Segment | Changes when |
 |---|---|---|
-| 0 | System directive | A human edits the directive, or its version bumps |
+| 0 | System directive | A human edits the directive's text |
 | 1 | Tool schema block | A tool is added, removed, or its schema changes |
 | 2..n | One per message, in depth order | Never, once appended |
 
@@ -79,6 +79,10 @@ Three rules make the list prefix-stable.
 3. Tool schemas are ordered by tool name, not by registration order or hash map iteration. Two runs of the same code produce the same bytes.
 
 Rule 1 is the one worth stating twice. A system prompt with a timestamp is the most common way to lose prefix reuse, and it is invisible in a transcript.
+
+The directive's version is recorded beside the prompt and never inside its bytes. Identity is the bytes, so a version bumped over unchanged text must not spend a cache to say so. The version exists so an audit can name which directive produced a chain, which is a question about provenance rather than about bytes.
+
+The tool block is the schemas in name order, each length prefixed. Sorting makes two runs of the same code produce the same bytes whatever order the registry handed the tools over. The lengths make the concatenation injective, so no pair of schemas can be read back as a different pair. A message segment is its role, a colon, and its content, which the closed set of roles makes unambiguous.
 
 # The prefix chain
 

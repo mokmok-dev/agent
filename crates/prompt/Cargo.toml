@@ -1,0 +1,11 @@
+[package]
+edition.workspace = true
+name = "agent-prompt"
+publish = false
+version = "0.0.0"
+
+[dependencies]
+agent-core.workspace = true
+
+[lints]
+workspace = true
