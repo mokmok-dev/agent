@@ -642,9 +642,24 @@ fn marker_tool(
     scratch: &Scratch,
     idempotent: bool,
 ) -> Tool {
+    marker_tool_of(scratch, Risk::Read, idempotent)
+}
+
+fn destructive_marker_tool(
+    scratch: &Scratch,
+    idempotent: bool,
+) -> Tool {
+    marker_tool_of(scratch, Risk::Destructive, idempotent)
+}
+
+fn marker_tool_of(
+    scratch: &Scratch,
+    risk: Risk,
+    idempotent: bool,
+) -> Tool {
     let marker = scratch.path.with_extension("ran");
     Tool {
-        risk: agent_core::event::Risk::Read,
+        risk,
         argv: vec![
             "sh".to_string(),
             "-c".to_string(),
@@ -709,6 +724,80 @@ fn a_call_left_behind_is_run_again_when_the_tool_says_it_is_idempotent() {
             .iter()
             .any(|event| matches!(event.kind, EventKind::ToolResult { .. })),
         "the run is in the log"
+    );
+}
+
+#[test]
+fn a_yes_that_arrives_after_a_restart_lets_the_call_run() {
+    let scratch = Scratch::new();
+    let marker = scratch.path.with_extension("ran");
+
+    // The process that asked the question, stopped before anyone answered it.
+    let mut asking = settings();
+    asking.tools = vec![destructive_marker_tool(&scratch, false)];
+    let mut reactor = Reactor::with_model(&scratch.path, Box::new(Asking), asking).expect("opens");
+    reactor.start(now()).expect("starts");
+    let mut store = Store::open(&scratch.path).expect("opens");
+    send(&mut store, ROOT_BRANCH, "do the thing");
+    drop(store);
+    for _ in 0..8 {
+        if matches!(reactor.step(now()).expect("steps"), Step::Wait { .. }) {
+            break;
+        }
+    }
+    drop(reactor);
+
+    let waiting = events(&scratch)
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::ApprovalRequested { call, .. } => Some(call),
+            _ => None,
+        })
+        .expect("the log carries the question");
+    assert!(!marker.exists(), "nothing runs before the answer");
+
+    // A later process, which is the one that hears the yes.
+    let mut answering = settings();
+    answering.tools = vec![destructive_marker_tool(&scratch, false)];
+    let mut reactor =
+        Reactor::with_model(&scratch.path, Box::new(Asking), answering).expect("opens");
+    reactor.start(now()).expect("starts");
+    reactor
+        .command(
+            ROOT_BRANCH,
+            &super::bus::Command {
+                command: "approve".to_string(),
+                text: waiting.to_string(),
+            },
+            now(),
+        )
+        .expect("takes the answer");
+    for _ in 0..12 {
+        if matches!(reactor.step(now()).expect("steps"), Step::Idle) {
+            break;
+        }
+    }
+
+    assert!(
+        marker.exists(),
+        "a yes written by this process is the first yes this call ever had"
+    );
+    let written = events(&scratch);
+    assert!(
+        written
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ToolResult { .. })),
+        "the run is in the log"
+    );
+    assert!(
+        !written.iter().any(|event| matches!(
+            event.kind,
+            EventKind::ToolFailed {
+                may_have_happened: true,
+                ..
+            }
+        )),
+        "nothing claims an effect that never happened"
     );
 }
 

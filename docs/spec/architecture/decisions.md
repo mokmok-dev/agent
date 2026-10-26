@@ -363,6 +363,8 @@ The alternative was to write a second event between the intent and the effect, m
 
 The recovery failure carries the unknown class rather than a new one: what an operator needs to know is that the effect may have happened, and that is the flag, not the class.
 
+The set answers a narrower question than it first appears to. A call waiting for an answer when its process died is in the set of nobody: it has an intent and no result, and the effect cannot have happened, because a call does not run before its permission is recorded. So the runtime also remembers the calls it wrote a yes for. A yes written here is the first yes that call ever had, and the call runs whatever its class. A yes that is already in the log when the process starts proves nothing, because the process that took it may have run the call and died before the result was written. Without that distinction an operator who answers a question after a restart is told the effect may have happened when nobody has touched it, and the answer is spent on a call that will never run.
+
 # 31. What may run unattended is a line in the configuration, and there is no default
 
 A tool declares its risk: read, write, network, or destructive. Read and write inside the paths the manifest declares run without asking. Network is approved once per branch and remembered. Destructive is approved every time and never remembered. A question that goes unanswered past its expiry is a denial, recorded as one, so nothing waits forever on a person.

@@ -175,6 +175,10 @@ pub struct Reactor {
     /// result belongs to a run that ended before it could record one, and the
     /// log cannot tell the difference: only the process knows what it started.
     started: std::collections::BTreeSet<CallId>,
+    /// The calls this process answered yes to. A yes recorded here arrived while
+    /// this process was alive, and this process has not run the call yet, so the
+    /// effect is still ahead of us even when the intent is older.
+    answered: std::collections::BTreeSet<CallId>,
 }
 
 impl Reactor {
@@ -193,6 +197,7 @@ impl Reactor {
                 .parent()
                 .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
             started: std::collections::BTreeSet::new(),
+            answered: std::collections::BTreeSet::new(),
         })
     }
 
@@ -330,6 +335,12 @@ impl Reactor {
                 if let EventKind::ToolIntent { call, .. } = &intent.kind {
                     self.started.insert(*call);
                 }
+                if let EventKind::ApprovalDecided {
+                    allow: true, call, ..
+                } = &intent.kind
+                {
+                    self.answered.insert(*call);
+                }
                 self.append(
                     intent.branch,
                     &state,
@@ -401,8 +412,12 @@ impl Reactor {
         }
 
         // A call this process did not file is a call an earlier one left behind.
-        // Running it again is safe only when the tool says it is.
-        if !self.started.contains(&call) && !tool.idempotent {
+        // Running it again is safe only when the tool says it is, or when the yes
+        // this process is acting on is the only yes that has ever existed for it:
+        // a call cannot run before its permission is recorded, so a permission
+        // written here means the effect is still ahead of us, whatever the age of
+        // the intent it answers.
+        if !self.started.contains(&call) && !self.answered.contains(&call) && !tool.idempotent {
             return self
                 .append(
                     branch,

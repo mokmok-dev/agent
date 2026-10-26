@@ -35,6 +35,8 @@ The call id is derived from the turn id and the step index, so a re-fold of the 
 
 On recovery, an intent without a result is handled by the tool's declared class. Whether a call is in recovery is a question only the running process can answer: a call it filed itself is a first run, and a call it did not is one a process that is gone left behind.
 
+One case looks like recovery and is not. A call waiting for an answer when its process died has an intent and no result, but the effect cannot have happened: a call does not run before its permission is recorded. When the yes is written by the process that is now holding the call, it is the first yes that call ever had, and the call runs whatever its class. A yes that is already in the log when the process starts proves nothing, because the process that took it may have run the call and died before recording the result.
+
 | Tool class | Recovery behavior |
 |---|---|
 | `idempotent` | Re-run with the same key. Safe by contract, checked by the tool's own test. |
