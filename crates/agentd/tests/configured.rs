@@ -368,3 +368,91 @@ fn a_second_turn_sees_the_first_answer() {
     assert_eq!(answers, vec!["answer-0", "answer-1"]);
     assert_eq!(store.verify().expect("verifies").events, 12);
 }
+
+/// Answers one request by asking for a tool, which no answer of its own carries.
+fn serve_tool_call() -> (String, std::thread::JoinHandle<Vec<Vec<u8>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binds a port");
+    let address = listener.local_addr().expect("an address");
+    let handle = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accepts a connection");
+        let seen = vec![read_request(&mut socket)];
+        let frames = [
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"shell","arguments":"{\"cmd\":"}}]}}]}"#.to_string(),
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"date\"}"}}]}}]}"#
+                .to_string(),
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#.to_string(),
+            r#"{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2}}"#.to_string(),
+            "[DONE]".to_string(),
+        ];
+        write_stream(&mut socket, &frames);
+        seen
+    });
+    (format!("http://{address}"), handle)
+}
+
+#[test]
+fn a_tool_call_becomes_an_intent_with_a_key() {
+    let dir = scratch("tool-call");
+    let (base_url, server) = serve_tool_call();
+    let config = write_config(&dir, &base_url);
+
+    assert!(
+        run(&config).status.success(),
+        "the first pass starts the store"
+    );
+    append_command(&dir, "what time is it");
+    assert!(run(&config).status.success(), "the turn is answered");
+
+    let store = Store::open(&dir.join("agent.db")).expect("opens");
+    let events = store.load(ROOT).expect("loads");
+    let kinds: Vec<&str> = events.iter().map(|event| event.kind.type_name()).collect();
+    let requests = server.join().expect("the server finished");
+    assert_eq!(
+        requests.len(),
+        1,
+        "a turn that asks for a tool ends there: {kinds:?}"
+    );
+    assert_eq!(
+        kinds,
+        vec![
+            "dev.mokmok.agent.branch.created",
+            "dev.mokmok.agent.instance.started",
+            "dev.mokmok.agent.command.received",
+            "dev.mokmok.agent.turn.requested",
+            "dev.mokmok.agent.model.requested",
+            "dev.mokmok.agent.model.responded",
+            "dev.mokmok.agent.tool.intent",
+        ]
+    );
+
+    match &events[5].kind {
+        EventKind::ModelResponded {
+            calls,
+            finish,
+            output,
+            ..
+        } => {
+            assert_eq!(*finish, agent_core::event::FinishReason::ToolCalls);
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].tool, "shell");
+            assert_eq!(calls[0].args, r#"{"cmd":"date"}"#);
+            assert!(output.is_empty(), "the request is not an answer");
+        },
+        other => panic!("unexpected {other:?}"),
+    }
+    match &events[6].kind {
+        EventKind::ToolIntent {
+            args,
+            call,
+            key,
+            tool,
+        } => {
+            assert_eq!(tool, "shell");
+            assert_eq!(args, r#"{"cmd":"date"}"#);
+            assert_eq!(call.step, 0);
+            assert_eq!(call.turn, events[3].correlation.expect("a turn"));
+            assert_eq!(key.len(), 64, "a key is a digest, in hex");
+        },
+        other => panic!("unexpected {other:?}"),
+    }
+}

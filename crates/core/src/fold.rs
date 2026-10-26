@@ -10,7 +10,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::event::{Event, EventKind, Role};
+use crate::event::{Event, EventKind, Role, ToolRequest};
 use crate::ids::{BranchId, CallId, EventId, TurnId};
 use crate::time::Timestamp;
 
@@ -44,6 +44,8 @@ pub enum FoldError {
     UnknownTurn(TurnId),
     /// A result or failure names a call with no intent.
     UnknownCall(CallId),
+    /// The same step asked for a tool twice, which only a second writer can do.
+    RepeatedCall(CallId),
 }
 
 impl core::fmt::Display for FoldError {
@@ -66,6 +68,7 @@ impl core::fmt::Display for FoldError {
             Self::DuplicateTurn(id) => write!(formatter, "turn {id} already requested"),
             Self::UnknownTurn(id) => write!(formatter, "unknown turn {id}"),
             Self::UnknownCall(id) => write!(formatter, "unknown call {id}"),
+            Self::RepeatedCall(id) => write!(formatter, "call {id} was filed twice"),
         }
     }
 }
@@ -110,6 +113,13 @@ pub struct PendingModel {
 /// that stops between that event and the transcript entry would otherwise leave
 /// an answer no later turn can see. Keeping it here makes the entry a decision
 /// the loop can repeat after a restart.
+/// The tools one turn asked for, and how many of them have been written out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asked {
+    pub requests: Vec<ToolRequest>,
+    pub filed: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnfiledReply {
     pub turn: TurnId,
@@ -148,6 +158,8 @@ pub struct Branch {
     pub pending_command: Option<Command>,
     pub pending_model: Option<PendingModel>,
     pub unfiled: Option<UnfiledReply>,
+    /// What each turn asked the tools to do, in the order it asked.
+    pub asked: BTreeMap<TurnId, Asked>,
     pub cache: Cache,
     pub failures: u32,
 }
@@ -172,6 +184,7 @@ impl Branch {
             pending_command: None,
             pending_model: None,
             unfiled: None,
+            asked: BTreeMap::new(),
             cache: Cache::default(),
             failures: 0,
         }
@@ -312,6 +325,7 @@ impl State {
                 }
             },
             EventKind::ModelResponded {
+                calls,
                 turn,
                 output,
                 output_tokens,
@@ -321,11 +335,24 @@ impl State {
                     return Err(FoldError::UnknownTurn(*turn));
                 }
                 branch.pending_model = None;
-                branch.unfiled = Some(UnfiledReply {
-                    turn: *turn,
-                    content: output.clone(),
-                    tokens: *output_tokens,
-                });
+                if !calls.is_empty() {
+                    branch.asked.insert(
+                        *turn,
+                        Asked {
+                            requests: calls.clone(),
+                            filed: 0,
+                        },
+                    );
+                }
+                // An answer with no words in it is not an answer. A response that
+                // exists only to ask for a tool has nothing for the transcript.
+                if !output.is_empty() {
+                    branch.unfiled = Some(UnfiledReply {
+                        turn: *turn,
+                        content: output.clone(),
+                        tokens: *output_tokens,
+                    });
+                }
             },
             EventKind::ModelFailed {
                 turn, retryable, ..
@@ -382,7 +409,12 @@ impl State {
                 }
             },
             EventKind::ToolIntent { call, tool, .. } => {
-                branch.pending.insert(*call, tool.clone());
+                if branch.pending.insert(*call, tool.clone()).is_some() {
+                    return Err(FoldError::RepeatedCall(*call));
+                }
+                if let Some(asked) = branch.asked.get_mut(&call.turn) {
+                    asked.filed = asked.filed.max(call.step + 1);
+                }
             },
             EventKind::ToolResult { call, .. } | EventKind::ToolFailed { call, .. } => {
                 if branch.pending.remove(call).is_none() {
@@ -403,7 +435,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::{FoldError, State};
-    use crate::event::{ErrorClass, Event, EventKind, FinishReason, Role};
+    use crate::event::{ErrorClass, Event, EventKind, FinishReason, Role, ToolRequest};
     use crate::ids::{Actor, BranchId, CallId, EventId, PrefixHash, TurnId};
     use crate::time::Timestamp;
     use alloc::collections::BTreeMap;
@@ -661,6 +693,7 @@ mod tests {
         });
         state.apply(&model).expect("folds");
         let responded = chain.push(EventKind::ModelResponded {
+            calls: alloc::vec::Vec::new(),
             finish: FinishReason::Stop,
             input_tokens: 1,
             output: "hi".to_string(),
@@ -675,6 +708,78 @@ mod tests {
                 .expect("exists")
                 .failures,
             0
+        );
+    }
+
+    fn asked(state: &State) -> (usize, u32) {
+        let branch = state.branch(BranchId::from_bytes(BRANCH)).expect("exists");
+        let Some(asked) = branch.asked.get(&turn()) else {
+            return (0, 0);
+        };
+        (asked.requests.len(), asked.filed)
+    }
+
+    #[test]
+    fn a_response_that_only_asks_for_a_tool_files_no_reply() {
+        let (mut chain, mut state) = with_branch();
+        let requested = chain.push(EventKind::TurnRequested {
+            input: "hello".to_string(),
+            turn: turn(),
+        });
+        state.apply(&requested).expect("folds");
+        let responded = chain.push(EventKind::ModelResponded {
+            calls: alloc::vec![ToolRequest {
+                args: "{}".to_string(),
+                tool: "clock".to_string(),
+            }],
+            finish: FinishReason::ToolCalls,
+            input_tokens: 1,
+            output: String::new(),
+            output_tokens: 0,
+            request: "r".to_string(),
+            turn: turn(),
+        });
+        state.apply(&responded).expect("folds");
+        let branch = state.branch(BranchId::from_bytes(BRANCH)).expect("exists");
+        assert!(branch.unfiled.is_none(), "an empty answer is not an answer");
+        assert_eq!(asked(&state), (1, 0));
+    }
+
+    #[test]
+    fn the_same_call_filed_twice_is_an_error() {
+        let (mut chain, mut state) = with_branch();
+        let requested = chain.push(EventKind::TurnRequested {
+            input: "hello".to_string(),
+            turn: turn(),
+        });
+        state.apply(&requested).expect("folds");
+        let intent = chain.push(EventKind::ToolIntent {
+            args: "{}".to_string(),
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            key: "k".to_string(),
+            tool: "clock".to_string(),
+        });
+        state.apply(&intent).expect("folds");
+        // A second writer that filed the same step would arrive as its own event,
+        // with its own hash, and the fold is the only place that can refuse it.
+        let again = chain.push(EventKind::ToolIntent {
+            args: "{}".to_string(),
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            key: "k2".to_string(),
+            tool: "clock".to_string(),
+        });
+        assert_eq!(
+            state.apply(&again),
+            Err(FoldError::RepeatedCall(CallId {
+                turn: turn(),
+                step: 0,
+            }))
         );
     }
 

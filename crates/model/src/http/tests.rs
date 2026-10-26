@@ -177,6 +177,24 @@ fn a_stream_becomes_text_then_usage() {
 }
 
 #[test]
+fn a_stream_of_tool_calls_arrives_whole() {
+    let served = serve(stream(&[
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"shell","arguments":"{\"cmd\":"}}]}}]}"#,
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"date\"}"}}]}}]}"#,
+        r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3}}"#,
+        openai::DONE,
+    ]));
+    let (result, text, _) = call(&served);
+    let completion = result.expect("completes");
+    assert_eq!(text, "", "a request for a tool is not text");
+    assert_eq!(completion.finish, Some(FinishReason::ToolCalls));
+    assert_eq!(completion.calls.len(), 1);
+    assert_eq!(completion.calls[0].name, "shell");
+    assert_eq!(completion.calls[0].arguments, r#"{"cmd":"date"}"#);
+}
+
+#[test]
 fn a_stream_without_usage_is_marked_estimated() {
     let served = serve(stream(&[
         r#"{"choices":[{"delta":{"content":"hello"}}]}"#,

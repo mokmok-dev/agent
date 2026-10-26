@@ -75,6 +75,7 @@ impl Provider for HttpProvider {
         let mut emitted = 0_usize;
         let mut reported = None;
         let mut finish = None;
+        let mut calls = openai::Calls::default();
 
         loop {
             let read = reader
@@ -91,12 +92,21 @@ impl Provider for HttpProvider {
                 let chunk = openai::decode(&data)
                     .map_err(|error| interruption(produced, &error.to_string()))?;
                 if chunk.done {
-                    return Ok(conclusion(request, emitted, reported, finish));
+                    return Ok(conclusion(
+                        request,
+                        emitted,
+                        reported,
+                        finish,
+                        calls.finish(),
+                    ));
                 }
                 if let Some(text) = chunk.text {
                     produced = true;
                     emitted = emitted.saturating_add(text.len());
                     delta(Delta::Text(&text));
+                }
+                if !chunk.calls.is_empty() {
+                    calls.absorb(&chunk.calls);
                 }
                 if let Some(reason) = chunk.finish {
                     finish = Some(openai::finish_of(&reason));
@@ -115,7 +125,13 @@ impl Provider for HttpProvider {
         if finish.is_none() {
             return Err(interruption(produced, "the stream ended before a finish"));
         }
-        Ok(conclusion(request, emitted, reported, finish))
+        Ok(conclusion(
+            request,
+            emitted,
+            reported,
+            finish,
+            calls.finish(),
+        ))
     }
 }
 
@@ -125,6 +141,7 @@ fn conclusion(
     emitted: usize,
     reported: Option<Usage>,
     finish: Option<agent_core::event::FinishReason>,
+    calls: Vec<openai::Call>,
 ) -> Completion {
     let usage = reported.unwrap_or(Usage {
         input_tokens: request.input_tokens_estimate,
@@ -132,7 +149,11 @@ fn conclusion(
         cached_tokens: None,
         estimated: true,
     });
-    Completion { usage, finish }
+    Completion {
+        usage,
+        finish,
+        calls,
+    }
 }
 
 /// Maps a failure before any byte of the body arrived.

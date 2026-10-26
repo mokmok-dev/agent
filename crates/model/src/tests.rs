@@ -172,6 +172,7 @@ impl Provider for Scripted {
         }
         self.outcome.take().map_or(
             Ok(Completion {
+                calls: Vec::new(),
                 usage: Usage {
                     input_tokens: 10,
                     output_tokens: 2,

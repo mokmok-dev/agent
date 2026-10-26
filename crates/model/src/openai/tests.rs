@@ -1,6 +1,6 @@
 use agent_core::event::{FinishReason, Role};
 
-use super::{Chunk, CodecError, DONE, Usage, decode, encode, finish_of};
+use super::{Calls, Chunk, CodecError, DONE, Usage, decode, encode, finish_of};
 use crate::{Message, Request};
 
 fn request() -> Request {
@@ -181,4 +181,43 @@ fn the_four_known_finish_reasons_map_exactly() {
 fn a_finish_reason_this_build_does_not_know_is_kept_as_unknown() {
     assert_eq!(finish_of("eos"), FinishReason::Unknown);
     assert_eq!(finish_of(""), FinishReason::Unknown);
+}
+
+#[test]
+fn a_tool_call_arrives_in_pieces_and_is_joined_back_together() {
+    let first = decode(
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"shell","arguments":"{\"cmd\":"}}]}}]}"#,
+    )
+    .expect("reads");
+    let second = decode(
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"ls\"}"}}]}}]}"#,
+    )
+    .expect("reads");
+    let mut calls = Calls::default();
+    calls.absorb(&first.calls);
+    calls.absorb(&second.calls);
+    let calls = calls.finish();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "c1");
+    assert_eq!(calls[0].name, "shell");
+    assert_eq!(calls[0].arguments, r#"{"cmd":"ls"}"#);
+}
+
+#[test]
+fn two_calls_are_kept_in_the_order_their_indices_give() {
+    let frame = decode(
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"c2","function":{"name":"clock","arguments":"{}"}},{"index":0,"id":"c1","function":{"name":"shell","arguments":"{}"}}]}}]}"#,
+    )
+    .expect("reads");
+    let mut calls = Calls::default();
+    calls.absorb(&frame.calls);
+    let finished = calls.finish();
+    let names: Vec<&str> = finished.iter().map(|call| call.name.as_str()).collect();
+    assert_eq!(names, vec!["shell", "clock"]);
+}
+
+#[test]
+fn a_frame_without_tools_leaves_the_calls_alone() {
+    let frame = decode(r#"{"choices":[{"delta":{"content":"hi"}}]}"#).expect("reads");
+    assert_eq!(frame.calls.len(), 0);
 }

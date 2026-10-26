@@ -28,3 +28,5 @@
 * **Update**: Described the configuration file, what is checked at startup, and why the key is named rather than stored.
 * **Update**: Added the installation guide for the NixOS module, and the daemon's heartbeat to the supervision table.
 * **Update**: Revised the transcript rule after a second turn lost the first question, and recorded why filing an answer is a decision.
+* **Update**: Recorded a tool request with the response that asked for it, and wrote the intent from the log rather than beside it.
+

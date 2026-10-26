@@ -5,6 +5,7 @@
 //! content, and `prev` names a predecessor by the same rule.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::ids::{Actor, BranchId, CallId, EventId, PrefixHash, TurnId};
 use crate::taxonomy;
@@ -169,6 +170,8 @@ pub enum EventKind {
         warm: bool,
     },
     ModelResponded {
+        /// The tools the model asked to run, in the order it asked.
+        calls: Vec<ToolRequest>,
         finish: FinishReason,
         input_tokens: u64,
         output: String,
@@ -258,6 +261,16 @@ impl EventKind {
             _ => taxonomy::SCHEMA_VERSION,
         }
     }
+}
+
+/// One tool the model asked for.
+///
+/// The arguments are the provider's bytes, unparsed: this layer records what was
+/// said, and reading JSON is the store's job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolRequest {
+    pub args: String,
+    pub tool: String,
 }
 
 #[cfg(test)]
@@ -379,6 +392,7 @@ pub(crate) mod tests {
                 warm: false,
             },
             EventKind::ModelResponded {
+                calls: alloc::vec::Vec::new(),
                 finish: FinishReason::Stop,
                 input_tokens: 10,
                 output: "hello".to_string(),
