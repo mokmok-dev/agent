@@ -34,4 +34,5 @@
 * **Update**: Recorded how a call left behind by a dead process is recovered, and why the log cannot answer it.
 * **Update**: Recorded the approval gate, the four risk classes, and why the risk has no default.
 * **Update**: Recorded the command socket, and why a client does not write to the log.
+* **Update**: Recorded that status reads the log rather than the socket.
 

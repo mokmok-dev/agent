@@ -156,19 +156,89 @@ fn verify_reports_a_corrupt_store_with_its_own_code() {
 
 #[test]
 fn a_command_with_nothing_behind_it_exits_64_and_says_what_it_needs() {
-    let output = run(&["status"]);
+    let output = run(&["replay", "--branch", BRANCH]);
     assert_eq!(output.status.code(), Some(64));
     assert_eq!(stdout(&output), "");
     let message = stderr(&output);
     assert!(message.contains("not available in this build"), "{message}");
-    assert!(message.contains("bus.sock"), "{message}");
+    assert!(message.contains("`agentctl replay`"), "{message}");
 
-    let object = run(&["status", "--json"]);
+    let object = run(&["replay", "--branch", BRANCH, "--json"]);
     assert_eq!(object.status.code(), Some(64));
     let parsed: serde_json::Value =
         serde_json::from_str(stderr(&object).trim_end()).expect("one json object");
     assert_eq!(parsed["error"]["code"], 64);
     assert_eq!(parsed["error"]["class"], "unsupported");
+}
+
+#[test]
+fn status_reports_what_the_log_says() {
+    let scratch = Scratch::new();
+    seed_one_turn(&scratch);
+
+    let output = ctl(&scratch.dir, &["status"]);
+    assert!(output.status.success(), "{output:?}");
+    let text = stdout(&output);
+    assert!(text.contains("store  2 events"), "{text}");
+    assert!(text.contains(BRANCH), "{text}");
+    assert!(text.contains("depth 1"), "{text}");
+
+    let object = ctl(&scratch.dir, &["status", "--json"]);
+    assert!(object.status.success(), "{object:?}");
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout(&object).trim_end()).expect("one json object");
+    assert_eq!(parsed["schema"], "agentctl.status/1");
+    assert_eq!(parsed["events"], 2);
+    assert_eq!(parsed["branches"][0]["id"], BRANCH);
+
+    let empty = Scratch::new();
+    let missing = ctl(&empty.dir, &["status"]);
+    assert_eq!(missing.status.code(), Some(78), "{missing:?}");
+    assert!(
+        stderr(&missing).contains("has the daemon ever run?"),
+        "{missing:?}"
+    );
+}
+
+/// A store with a branch and one turn, which is what a daemon leaves behind.
+fn seed_one_turn(scratch: &Scratch) {
+    use agent_core::event::{Event, EventKind};
+    use agent_core::ids::{Actor, BranchId, TurnId};
+    use agent_core::time::Timestamp;
+
+    let branch: BranchId = BRANCH.parse().expect("a branch id");
+    let turn = TurnId::from_bytes([2; 8]);
+    let mut store = Store::open(&scratch.store()).expect("opens");
+    let mut push = |kind: EventKind, correlation| {
+        let events = store.load(branch).unwrap_or_default();
+        let event = Event {
+            branch,
+            depth: u64::try_from(events.len()).expect("small"),
+            prev: events.last().map(Event::id),
+            time: Timestamp::new(1_790_000_000, 0).expect("valid"),
+            actor: Actor::Process("test".to_string()),
+            causation: None,
+            correlation,
+            model: None,
+            kind,
+        };
+        store.append(&event).expect("appends");
+    };
+    push(
+        EventKind::BranchCreated {
+            fork: None,
+            label: None,
+            parent: None,
+        },
+        None,
+    );
+    push(
+        EventKind::TurnRequested {
+            input: "hello".to_string(),
+            turn,
+        },
+        Some(turn),
+    );
 }
 
 #[test]
