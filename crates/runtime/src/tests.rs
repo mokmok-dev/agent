@@ -113,7 +113,7 @@ fn settings() -> Settings {
 
 fn reactor_with_a_model(
     path: &std::path::Path,
-    provider: Fake,
+    provider: impl Provider + 'static,
 ) -> Reactor {
     Reactor::with_model(path, Box::new(provider), settings()).expect("opens")
 }
@@ -319,6 +319,76 @@ fn a_failure_that_may_not_be_retried_writes_no_schedule() {
     assert_eq!(reactor.step(now()).expect("idles"), Step::Idle);
 }
 
+/// A provider that never answers, so only the retry budget can end the turn.
+struct Refusing;
+
+impl Provider for Refusing {
+    fn profile(&self) -> Profile {
+        Profile {
+            id: "refusing".to_string(),
+            context_window: 8192,
+            caches_prefixes: true,
+            cache_ttl: None,
+            reports_cached_tokens: true,
+        }
+    }
+
+    fn call(
+        &mut self,
+        _request: &agent_model::Request,
+        _delta: &mut dyn FnMut(Delta<'_>),
+    ) -> Result<Completion, ProviderError> {
+        Err(ProviderError::Transport)
+    }
+}
+
+#[test]
+fn an_exhausted_retry_budget_stops_asking_instead_of_asking_forever() {
+    // Past the budget there is no instant the next attempt is owed, so a request
+    // left pending turns every iteration into a new call. Measured against a
+    // refused connection: 840 failures in eight seconds, and the log growing by a
+    // megabyte while nobody learns anything.
+    let scratch = Scratch::new();
+    seed(&scratch);
+    let mut reactor = reactor_with_a_model(&scratch.path, Refusing);
+    reactor.step(now()).expect("writes the turn");
+    let mut asked = 0_u32;
+    let mut at = now();
+    for _ in 0..10 {
+        match reactor.step(at).expect("steps") {
+            Step::RequestModel { .. } => {
+                asked = asked.saturating_add(1);
+                at = at.plus(Duration::from_secs(60)).expect("valid");
+            },
+            Step::Wait { until } => at = until,
+            Step::Idle => break,
+            Step::Append(_) | Step::Execute { .. } => {},
+        }
+    }
+    assert_eq!(
+        asked,
+        agent_model::MAX_ATTEMPTS,
+        "the budget is the number of attempts made, and no more"
+    );
+    let written = events(&scratch);
+    let failures: Vec<&Event> = written
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::ModelFailed { .. }))
+        .collect();
+    assert_eq!(failures.len(), 3, "{written:?}");
+    match &failures.last().expect("a failure").kind {
+        EventKind::ModelFailed { retryable, .. } => {
+            assert!(!retryable, "the last attempt is not retried, and says so");
+        },
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(
+        reactor.step(at).expect("idles"),
+        Step::Idle,
+        "an ended turn waits for a command rather than asking again"
+    );
+}
+
 #[test]
 fn a_turn_with_no_model_configured_is_an_error() {
     let scratch = Scratch::new();
@@ -400,6 +470,20 @@ fn a_wait_is_capped_so_a_clock_jump_cannot_park_the_daemon() {
         super::wait_for(now(), later(600)),
         Duration::from_secs(5),
         "an hour away still sleeps at most the cap"
+    );
+}
+
+#[test]
+fn a_wait_shorter_than_a_second_is_not_a_wait_of_none() {
+    // The backoff's first ceiling is under a second, so the common retry is
+    // exactly the case whole-second arithmetic rounds down to zero.
+    let due = now().plus(Duration::from_millis(400)).expect("valid");
+    assert_eq!(super::wait_for(now(), due), Duration::from_millis(400));
+    let past = now().plus(Duration::from_millis(1)).expect("valid");
+    assert_eq!(
+        super::wait_for(past, now()),
+        Duration::ZERO,
+        "an instant already gone is not a wait"
     );
 }
 

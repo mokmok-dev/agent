@@ -51,6 +51,15 @@ Each entry names a decision that is expensive to reverse, the alternative that l
 | 23 | A turn's input joins the prompt without becoming a message | Appending a `message.appended` for it |
 | 24 | Configuration is one TOML file, checked before anything opens | YAML, which the spec bundle already reads |
 | 25 | `agentctl` parses argv with `clap`, and `agentd` keeps its own parser | A table-driven parser in both, or `usage-rs` |
+| 26 | Filing an answer into the transcript is a decision, not a side effect | Writing `message.appended` from the runtime |
+| 27 | A tool request is recorded with the response; the intent is a decision | A separate "model chose" event |
+| 28 | A tool is a program, and the arguments arrive on its standard input | Templating arguments onto a command line |
+| 29 | A message carries the structure its role needs, and the chain hashes it | Hashing role and text only |
+| 30 | Only the process knows whether it started a call | A second event between the intent and the effect |
+| 31 | What may run unattended is a line in the configuration, and there is no default | A default risk for a tool that names none |
+| 32 | The socket carries a line; the daemon writes the event | A client that writes `command.received` itself |
+| 33 | `status` reads the log, which is why it works when the daemon does not | A status request over the socket |
+| 34 | Retryable means this process will retry it | Recording the provider's opinion of the error |
 
 # 1. The log is the only truth
 
@@ -384,3 +393,15 @@ The alternative was a status request over the socket, which the interface spec o
 
 A missing store is a configuration failure rather than an empty status. Nothing has run there, and that is a different sentence from "the agent has no branches".
 
+
+# 34. Retryable means this process will retry it
+
+The flag on `model.failed` records whether another attempt is coming, not whether the provider's error looks like one that could be retried. Those are different questions, and the difference is what keeps the loop honest.
+
+The budget is three attempts. Past it, the backoff returns nothing and the runtime writes no `schedule.armed`, because there is no instant the next attempt is owed. Recording `retryable: true` there left a pending request with no due time, and the decision answers a pending request by asking the model immediately. Nothing in the state distinguished "waiting to try again" from "will never try again", so the loop asked, was refused, and asked again as fast as the connection could be refused. Measured against a closed port: 840 failures in eight seconds, a megabyte of log, and a provider that had already said no three hundred times.
+
+The failure now carries the answer a reader can act on: the last attempt says `false`, the fold drops the pending request, and the turn ends in the state it ended in. The operator sees one failure with the class on it rather than a wall of them.
+
+`wait_for` had the same shape of mistake one level down. It computed the sleep in whole seconds, so a retry owed in 400 ms produced no sleep at all, and the first backoff ceiling is under a second. Fractional seconds now count.
+
+Both were invisible to the tests, which drive the reactor with instants they choose and providers that fail once. A provider that keeps refusing for as long as the process lives is a different machine, and the only way to meet it is to run one.

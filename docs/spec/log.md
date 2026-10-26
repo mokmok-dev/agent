@@ -36,4 +36,4 @@
 * **Update**: Recorded the command socket, and why a client does not write to the log.
 * **Update**: Recorded that status reads the log rather than the socket.
 * **Update**: Recorded that the module installs the operator's command, not only the daemon.
-
+* **Update**: A failure says whether another attempt is coming, not whether the error looks retryable. Past the budget the two parted, and the loop asked a refusing provider 840 times in eight seconds.
