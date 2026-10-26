@@ -18,6 +18,14 @@ The request carries the rendered prompt segments, not one string. Segmentation s
 
 The stream yields token deltas, then either a usage report or a typed error. Deltas are ephemeral. They reach surfaces over the doorbell socket as non-durable frames and are never appended. Only the finished message becomes an event, so a reconnect reads the log and cannot observe half a message.
 
+# The wire half
+
+Parsing a stream is not the same job as owning a connection, and the two are separated. `agent-wire` takes chunks of bytes and returns whole events. It opens nothing, waits for nothing, and holds no timer, so every branch it has is reachable from a test that hands it a slice.
+
+The bound it does carry is a limit on how long one line and one event may grow. A provider that never sends a newline would otherwise grow the buffer until the process dies, and the failure would arrive as an out-of-memory kill with no explanation. A megabyte for a line and eight for an event sit far past any real frame.
+
+The parser dispatches an event on the blank line and strips the final newline, as the format requires. A stream that ends without that blank line still yields its data, because some servers finish that way; whether the missing terminator means a truncated response is the adapter's judgement, not the parser's.
+
 # Adapters in the first release
 
 | Adapter | Covers |

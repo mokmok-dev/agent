@@ -7,6 +7,7 @@ members = [
   "crates/removeme",
   "crates/runtime",
   "crates/store",
+  "crates/wire",
   "crates/xtask",
 ]
 resolver = "3"
@@ -17,6 +18,7 @@ agent-model = { path = "crates/model" }
 agent-prompt = { path = "crates/prompt" }
 agent-runtime = { path = "crates/runtime" }
 agent-store = { path = "crates/store" }
+agent-wire = { path = "crates/wire" }
 blake3 = { version = "1", default-features = false }
 rusqlite = "0.37"
 serde = { version = "1", default-features = false }
