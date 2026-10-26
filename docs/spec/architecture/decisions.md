@@ -344,3 +344,13 @@ A response that asked for tools enters the transcript at fold time rather than t
 
 A round of results reopens its turn so the model can read them, bounded at sixteen rounds per turn. A model that keeps asking for tools would otherwise keep the loop busy forever, and when the bound is reached the results stay in the log, which is a state an operator can read and act on.
 
+# 30. Only the process knows whether it started a call
+
+An intent with no result is ambiguous in the log. It can mean the process died before the effect, or during it, or after it but before the result was written. Nothing in the event says which, because the intent is written before the effect and there is no event between them.
+
+So the runtime decides, and it decides from something the log cannot hold: the set of calls this process filed. A call in that set is one this process asked for and has not yet settled, and running it is the first run. A call outside it has no result and was filed by a process that is gone, which is a recovery, and recovery follows the tool's declared class: an idempotent tool runs again with the same key, and a non-idempotent one does not run, because the log records `tool.failed` with `may_have_happened: true` instead.
+
+The alternative was to write a second event between the intent and the effect, marking the start. It would make the log self-describing, at the cost of an event per call that says nothing an operator needs and that is itself ambiguous when the write is what failed. The set costs one line of process state and cannot be wrong, because a process knows what it filed.
+
+The recovery failure carries the unknown class rather than a new one: what an operator needs to know is that the effect may have happened, and that is the flag, not the class.
+
