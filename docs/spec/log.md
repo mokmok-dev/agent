@@ -35,4 +35,5 @@
 * **Update**: Recorded the approval gate, the four risk classes, and why the risk has no default.
 * **Update**: Recorded the command socket, and why a client does not write to the log.
 * **Update**: Recorded that status reads the log rather than the socket.
+* **Update**: Recorded that the module installs the operator's command, not only the daemon.
 

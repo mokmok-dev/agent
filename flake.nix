@@ -109,6 +109,7 @@
               in
               pkgs.runCommand "mokmok-agent-module-eval" { } ''
                 unit=${pkgs.writeText "unit" unit}
+                host=${pkgs.writeText "host" (builtins.concatStringsSep "\n" (map toString configured.config.environment.systemPackages))}
                 # The module writes the configuration the daemon reads, and the
                 # daemon refuses a tool that does not say what it may touch. A
                 # module that omits the field would be a service that cannot start.
@@ -116,6 +117,13 @@
                   echo "the module did not write a tool's argv" >&2
                   exit 1
                 }
+                grep -q "agentctl" $host || {
+                  echo "the module did not put agentctl on the host" >&2
+                  exit 1
+                }
+                # The tool the host is given has to be a binary a person can run.
+                ${configured.config.services.mokmok-agent.agentctlPackage}/bin/agentctl --version \
+                  | grep -q agentctl
                 grep -q "risk = \"read\"" ${settings} || {
                   echo "the module did not write a tool's risk" >&2
                   exit 1
@@ -201,7 +209,34 @@
                 '';
               }
             );
-            default = config.packages.agentd;
+            agentctl = craneLib.buildPackage (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+                cargoBuildFlags = [
+                  "-p"
+                  "agentctl"
+                ];
+                pname = "agentctl";
+                version = "0.0.0";
+
+                # One binary, for the reason agentd installs one: the dependency
+                # cache leaves every workspace binary in target/release.
+                installPhase = ''
+                  install -Dm755 target/release/agentctl $out/bin/agentctl
+                '';
+              }
+            );
+            # What `nix build` gives: the daemon and the operator's tool together,
+            # because a host that has one and not the other cannot be asked to do
+            # anything.
+            default = pkgs.symlinkJoin {
+              name = "mokmok-agent";
+              paths = [
+                config.packages.agentctl
+                config.packages.agentd
+              ];
+            };
           };
 
           pre-commit.settings = {
