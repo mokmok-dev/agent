@@ -11,3 +11,4 @@
 * **Update**: Named the gate jobs as they are actually implemented, and moved the mutation configuration to `.cargo/mutants.toml`.
 * **Update**: Moved the port traits out of the core and recorded the `no_std` stance as a decision, so the constraint is checked by the compiler rather than by review.
 * **Update**: Added the event envelope, the type table, and the canonical writer to the core, and recorded that the writer is the only encoder in the system.
+* **Creation**: Added the fold concept, which records what state a fold keeps and which contradictions it refuses.
