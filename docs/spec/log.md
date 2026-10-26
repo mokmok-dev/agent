@@ -2,6 +2,7 @@
 
 ## 2026-10-26
 * **Update**: Recorded which parser reads the command line, `clap` for `agentctl` and the existing hand-written parser for `agentd`, with the measurements behind dropping `usage-rs`.
+* **Update**: Landed the `agentctl` crate that decision 25 describes. `clap` declares the command surface, the parse hands on an `Intent`, and the exit table and the error object stay hand-written. `version` and `verify` answer; the commands that need the daemon wait on its command socket.
 
 ## 2026-10-25
 * **Creation**: Established the spec bundle with product scope, architecture, interfaces, and delivery sections.

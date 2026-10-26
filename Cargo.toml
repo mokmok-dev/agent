@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/agentctl",
   "crates/agentd",
   "crates/core",
   "crates/model",
@@ -20,6 +21,13 @@ agent-runtime = { path = "crates/runtime" }
 agent-store = { path = "crates/store" }
 agent-wire = { path = "crates/wire" }
 blake3 = { version = "1", default-features = false }
+clap = { version = "4", default-features = false, features = [
+  "derive",
+  "error-context",
+  "help",
+  "std",
+  "usage",
+] }
 rusqlite = "0.37"
 serde = { version = "1", default-features = false }
 serde_json = { version = "1", features = ["raw_value"] }
