@@ -20,13 +20,22 @@ use agent_core::decide::decide;
 pub use agent_core::decide::{Intent, Step};
 
 /// How long to sleep before an instant, capped so a clock jump cannot park the loop.
+///
+/// Fractions of a second count. Truncating to whole seconds turns any instant
+/// less than a second away into no sleep at all, so a retry that is owed in
+/// 400 ms is made immediately and then again, as fast as the provider can
+/// refuse, for as long as the budget lasts.
 #[must_use]
 pub fn wait_for(
     now: Timestamp,
     until: Timestamp,
 ) -> core::time::Duration {
     let seconds = until.secs().saturating_sub(now.secs());
-    let millis = u64::try_from(seconds).unwrap_or(0).saturating_mul(1000);
+    let nanos = i64::from(until.nanos()) - i64::from(now.nanos());
+    let millis = seconds
+        .saturating_mul(1000)
+        .saturating_add(nanos.div_euclid(1_000_000));
+    let millis = u64::try_from(millis).unwrap_or(0);
     core::time::Duration::from_millis(millis).min(MAX_WAIT)
 }
 
@@ -641,7 +650,20 @@ impl Reactor {
             .branch(branch)
             .and_then(|facts| facts.pending_model.as_ref())
             .map_or(1, |pending| pending.attempts.max(1));
-        let retryable = error.retryable(false);
+        // A failure is "retryable" exactly when this process will retry it.
+        //
+        // The two are not the same question: an exhausted budget and a refusal
+        // that will not improve both mean nothing will try again. Recording
+        // `retryable: true` there leaves a pending request with no instant it
+        // is owed, and the loop asks the model again as fast as the provider
+        // refuses. The log then says "retryable" about an attempt nobody will
+        // make.
+        let delay = if error.retryable(false) {
+            backoff(attempt, draw_of(requested))
+        } else {
+            None
+        };
+        let retryable = delay.is_some();
         self.append(
             branch,
             &state,
@@ -661,10 +683,7 @@ impl Reactor {
                 turn,
             },
         )?;
-        if !retryable {
-            return Ok(());
-        }
-        let Some(delay) = backoff(attempt, draw_of(requested)) else {
+        let Some(delay) = delay else {
             return Ok(());
         };
         let due = now.plus(delay)?;
