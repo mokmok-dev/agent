@@ -84,6 +84,11 @@ fn kinds() -> Vec<EventKind> {
             retryable: true,
             turn: turn(),
         },
+        EventKind::ScheduleArmed {
+            attempt: 2,
+            due: Timestamp::new(1_790_000_058, 500_000_000).expect("valid"),
+            turn: turn(),
+        },
         EventKind::MessageAppended {
             content: "a \"quoted\" line\nwith escapes".to_string(),
             role: Role::Assistant,
