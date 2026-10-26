@@ -198,17 +198,21 @@ in
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
 
+      # The rate limit is off because the limiter that matters is the one inside
+      # the agent, persisted in the log as schedule.armed. This is a [Unit] key:
+      # systemd ignores it in [Service] and says so in the journal, which is how
+      # this was found on a machine that had been running it for two minutes.
+      startLimitIntervalSec = 0;
+
       serviceConfig = {
         Type = "notify";
         WatchdogSec = "${toString cfg.watchdogSec}s";
         ExecStart = "${cfg.package}/bin/agentd --config ${configFile}";
 
-        # A crash is a restart, and the backoff that matters is the one inside
-        # the agent, persisted in the log. Rate limiting the unit as well would
-        # leave a dead unit and no agent after a bad evening.
+        # A crash is a restart, not an outage. There is no rate limit here: see
+        # startLimitIntervalSec above.
         Restart = "always";
         RestartSec = 2;
-        StartLimitIntervalSec = 0;
         TimeoutStopSec = 45;
 
         User = cfg.user;
