@@ -60,6 +60,8 @@ Each entry names a decision that is expensive to reverse, the alternative that l
 | 32 | The socket carries a line; the daemon writes the event | A client that writes `command.received` itself |
 | 33 | `status` reads the log, which is why it works when the daemon does not | A status request over the socket |
 | 34 | Retryable means this process will retry it | Recording the provider's opinion of the error |
+| 35 | The store is locked by the process that writes it | Trusting the deployment to run one daemon |
+| 36 | A failure records what it said, not what was asked | A class alone, or the provider's body |
 
 # 1. The log is the only truth
 
@@ -419,3 +421,15 @@ The alternative was to trust the deployment: one unit, one process, one writer. 
 The file outlives the process on purpose. A lock file that is removed on release has a race older than the lock itself: the next process can create a new file and lock it while the previous holder still has the old inode locked, and both then believe they are alone.
 
 `agentctl status` reads without locking, because a status that needs the daemon to be running fails exactly when an operator needs it.
+
+# 36. A failure records what it said, not what was asked
+
+`model.failed` carries a detail beside its class: the socket's message for a transport failure, the status code for a refusal, the reason a stream stopped. It is cut to 200 characters with a mark where it was cut, and it never includes the request, the headers, or the body.
+
+The class alone was not enough to act on. During the end-to-end check every failure in the log said `transport`, which is equally true of a typo in `base_url`, a provider that is down, a port with nothing on it, and a client that cannot parse what came back. Telling them apart took an afternoon and a packet capture; the socket had said which it was, and the runtime threw the sentence away.
+
+The alternative was to keep the provider's error body for diagnosis. It is the same field and a much worse one: it can be megabytes, it is written by somebody else, and it is the one place in this system where a response could carry a credential into a log that is append-only and replicated by fork. The cause is the part written by the operating system or by our own decoder, and that is the part kept.
+
+The field is optional so the log stays a log: the writer omits it when there is nothing to say, which keeps the bytes of every earlier event identical and the hash chain intact, and the decoder reads a missing key as nothing said.
+
+An operator sees it in `status` as `last failure: model: transport (Connection refused (os error 111))`. The class is what a loop branches on; the parenthetical is what a person acts on.

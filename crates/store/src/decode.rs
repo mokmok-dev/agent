@@ -213,6 +213,8 @@ struct ModelCacheObserved {
 struct ModelFailed {
     attempt: u32,
     class: String,
+    #[serde(default)]
+    detail: Option<String>,
     retryable: bool,
     turn: String,
 }
@@ -386,6 +388,7 @@ fn decode_kind(
             EventKind::ModelFailed {
                 attempt: payload.attempt,
                 class: parse_error_class(&payload.class)?,
+                detail: payload.detail,
                 retryable: payload.retryable,
                 turn: parse_turn(&payload.turn)?,
             }

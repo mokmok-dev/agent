@@ -338,7 +338,7 @@ impl Provider for Refusing {
         _request: &agent_model::Request,
         _delta: &mut dyn FnMut(Delta<'_>),
     ) -> Result<Completion, ProviderError> {
-        Err(ProviderError::Transport)
+        Err(ProviderError::Transport(String::from("refused")))
     }
 }
 

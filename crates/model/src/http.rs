@@ -157,11 +157,15 @@ fn conclusion(
 }
 
 /// Maps a failure before any byte of the body arrived.
-const fn refusal(error: &ureq::Error) -> ProviderError {
+///
+/// Everything that is not a status or a deadline is the socket refusing, failing
+/// to resolve, or closing early, and its own message is the difference between a
+/// wrong URL and a provider that is down.
+fn refusal(error: &ureq::Error) -> ProviderError {
     match error {
         ureq::Error::StatusCode(code) => ProviderError::Status(*code),
         ureq::Error::Timeout(_) => ProviderError::Timeout,
-        _ => ProviderError::Transport,
+        other => ProviderError::Transport(other.to_string()),
     }
 }
 
@@ -176,7 +180,7 @@ fn interruption(
     if produced {
         ProviderError::AfterFirstToken(String::from(detail))
     } else {
-        ProviderError::Transport
+        ProviderError::Transport(String::from(detail))
     }
 }
 

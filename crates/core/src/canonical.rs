@@ -257,11 +257,15 @@ fn write_data(
         EventKind::ModelFailed {
             attempt,
             class,
+            detail,
             retryable,
             turn,
         } => {
             object.uint("attempt", u64::from(*attempt));
             object.string("class", class.as_str());
+            if let Some(detail) = detail {
+                object.string("detail", detail);
+            }
             object.boolean("retryable", *retryable);
             object.string("turn", &alloc::format!("{turn}"));
         },
@@ -653,5 +657,43 @@ mod tests {
             label: Some("retry".to_string()),
         }));
         assert!(encoded.contains(r#""data":{"fork":"0808080808080808080808080808080808080808080808080808080808080808","label":"retry","parent":"b-0707070707070707"}"#), "{encoded}");
+    }
+    #[test]
+    fn a_failure_without_a_detail_keeps_the_bytes_it_always_had() {
+        // The field is optional so a log written before it existed still verifies:
+        // the writer omits the key, and the hash is computed over what is written.
+        let bare = canonical(&event(EventKind::ModelFailed {
+            attempt: 1,
+            class: ErrorClass::Transport,
+            detail: None,
+            retryable: true,
+            turn: turn(),
+        }));
+        assert!(!bare.contains("detail"), "{bare}");
+
+        let told = canonical(&event(EventKind::ModelFailed {
+            attempt: 1,
+            class: ErrorClass::Transport,
+            detail: Some("Connection refused (os error 111)".to_string()),
+            retryable: true,
+            turn: turn(),
+        }));
+        assert!(
+            told.contains(r#""detail":"Connection refused (os error 111)""#),
+            "{told}"
+        );
+        assert_ne!(
+            event_id(&event(EventKind::InstanceStarted {
+                schema: 1,
+                version: "0.0.0".to_string()
+            })),
+            event_id(&event(EventKind::ModelFailed {
+                attempt: 1,
+                class: ErrorClass::Transport,
+                detail: Some("x".to_string()),
+                retryable: true,
+                turn: turn()
+            }))
+        );
     }
 }

@@ -933,6 +933,7 @@ mod tests {
         let failed = chain.push(EventKind::ModelFailed {
             attempt: 1,
             class: ErrorClass::Timeout,
+            detail: None,
             retryable: true,
             turn: turn(),
         });

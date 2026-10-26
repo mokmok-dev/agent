@@ -100,3 +100,11 @@ Provider errors are mapped to a closed set, so the reactor can decide without pa
 | `content_filter` | no | The provider refused the content |
 | `cancelled` | no | The operator or the reactor cancelled it |
 | `unknown` | no | Anything else, with the raw body kept in a blob |
+
+# What a failure records
+
+A failure carries two things about itself. The class is the closed set the loop branches on: transport, timeout, rate limited, server error, context length, invalid request, unknown. The detail is the occasion, in the failure's own words, and it is what tells a wrong base URL apart from a provider that is down.
+
+The detail is cut to 200 characters on a character boundary, with a mark where it was cut, so a provider that answers a failure with a wall of HTML cannot fill the log. It is never the request, the headers, or the body: a credential cannot reach the log through it, and neither can anything an operator did not write.
+
+The field is optional, and the writer omits it when there is nothing to say. A log written before the field existed therefore encodes to the same bytes it always did and still verifies; the decoder reads a missing key as nothing said.

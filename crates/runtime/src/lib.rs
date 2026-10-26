@@ -695,6 +695,7 @@ impl Reactor {
             EventKind::ModelFailed {
                 attempt,
                 class: error.class(),
+                detail: Some(error.detail()),
                 retryable,
                 turn,
             },

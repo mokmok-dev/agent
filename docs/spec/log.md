@@ -39,3 +39,4 @@
 * **Update**: A failure says whether another attempt is coming, not whether the error looks retryable. Past the budget the two parted, and the loop asked a refusing provider 840 times in eight seconds.
 * **Update**: A yes written by the current process is the first yes a call waiting on a question ever had, so answering after a restart runs it instead of claiming the effect may have happened.
 * **Update**: The daemon locks the store it writes, so a second agentd on the same state directory exits instead of doubling every turn.
+* **Update**: A failure records what it said about itself, bounded and without the request, so `transport` is no longer the end of the diagnosis.

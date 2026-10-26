@@ -226,6 +226,13 @@ pub enum EventKind {
     ModelFailed {
         attempt: u32,
         class: ErrorClass,
+        /// What the failure said about itself, when it said anything.
+        ///
+        /// The class names the kind of failure and this names the occasion, which
+        /// is the difference between a URL to fix and a provider to wait for. It
+        /// never carries the request or the body, so nothing an operator did not
+        /// write can reach the log through it.
+        detail: Option<String>,
         retryable: bool,
         turn: TurnId,
     },
@@ -487,6 +494,7 @@ pub(crate) mod tests {
             EventKind::ModelFailed {
                 attempt: 1,
                 class: ErrorClass::Timeout,
+                detail: None,
                 retryable: true,
                 turn,
             },

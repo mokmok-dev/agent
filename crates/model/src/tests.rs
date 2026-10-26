@@ -4,8 +4,8 @@ use agent_core::event::{ErrorClass, FinishReason};
 use agent_prompt::{Directive, Prompt, render};
 
 use super::{
-    Completion, Delta, Message, Profile, Provider, ProviderError, Purpose, Request, RequestRecord,
-    Usage, backoff,
+    Completion, Delta, MAX_DETAIL, Message, Profile, Provider, ProviderError, Purpose, Request,
+    RequestRecord, Usage, backoff,
 };
 
 #[allow(dead_code, reason = "the codec's tests render through it too")]
@@ -93,16 +93,19 @@ fn a_4xx_that_is_not_a_429_is_not_retryable() {
 
 #[test]
 fn transport_and_timeout_failures_are_retryable() {
-    assert_eq!(ProviderError::Transport.class(), ErrorClass::Transport);
+    assert_eq!(
+        ProviderError::Transport(String::from("refused")).class(),
+        ErrorClass::Transport
+    );
     assert_eq!(ProviderError::Timeout.class(), ErrorClass::Timeout);
-    assert!(ProviderError::Transport.retryable(false));
+    assert!(ProviderError::Transport(String::from("refused")).retryable(false));
     assert!(ProviderError::Timeout.retryable(false));
 }
 
 #[test]
 fn a_response_that_produced_a_token_is_never_retried() {
     let errors = [
-        ProviderError::Transport,
+        ProviderError::Transport(String::from("refused")),
         ProviderError::Timeout,
         ProviderError::Status(429),
         ProviderError::Status(500),
@@ -246,4 +249,34 @@ fn a_profile_that_does_not_cache_says_so() {
     let profile = provider.profile();
     assert!(profile.caches_prefixes);
     assert_eq!(profile.context_window, 1000);
+}
+
+#[test]
+fn a_failure_says_what_it_was_without_saying_what_was_asked() {
+    assert_eq!(
+        ProviderError::Transport(String::from("Connection refused (os error 111)")).detail(),
+        "Connection refused (os error 111)",
+        "the socket's own words are the difference between a URL to fix and a provider to wait for"
+    );
+    assert_eq!(ProviderError::Status(503).detail(), "status 503");
+    assert_eq!(
+        ProviderError::AfterFirstToken(String::from("connection reset")).detail(),
+        "connection reset"
+    );
+    assert_eq!(
+        ProviderError::Timeout.detail(),
+        "no response within the deadline"
+    );
+}
+
+#[test]
+fn a_cause_is_cut_on_a_character_boundary_so_the_log_cannot_be_filled_by_one() {
+    let long = "é".repeat(MAX_DETAIL + 50);
+    let detail = ProviderError::Transport(long).detail();
+    assert_eq!(detail.chars().count(), MAX_DETAIL + 1, "cut plus one mark");
+    assert!(detail.ends_with('…'), "a cut says it was cut");
+    assert!(
+        ProviderError::Transport("x".repeat(MAX_DETAIL)).detail() == "x".repeat(MAX_DETAIL),
+        "a cause that fits is kept whole"
+    );
 }
