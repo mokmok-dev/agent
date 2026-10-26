@@ -309,7 +309,8 @@ impl Intent {
     #[must_use]
     pub const fn needs(&self) -> &'static str {
         match self {
-            Self::Status => "the daemon's status report over bus.sock",
+            // Status reads the log, so there is nothing left for it to need.
+            Self::Status => "nothing further",
             Self::BranchList => "the branch list over bus.sock",
             Self::BranchShow { .. } => "one branch, read over bus.sock",
             Self::Fork { .. } => "the daemon's fork command over bus.sock",

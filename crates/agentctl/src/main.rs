@@ -41,6 +41,7 @@ fn dispatch(invocation: &Invocation) -> Result<String, Failure> {
             report::version_text()
         }),
         Intent::Verify { .. } => verify(invocation),
+        Intent::Status => status(invocation),
         Intent::Send { .. } | Intent::Approve { .. } | Intent::Deny { .. } => bus(invocation),
         other => Err(Failure::unsupported(other.name(), other.needs())),
     }
@@ -154,4 +155,21 @@ fn bus(invocation: &Invocation) -> Result<String, Failure> {
                 .to_string(),
         ))
     }
+}
+
+/// What the log says the agent is doing, whether or not the daemon is up.
+fn status(invocation: &Invocation) -> Result<String, Failure> {
+    let path = store_path(invocation)?;
+    if !path.exists() {
+        return Err(Failure::config(format!(
+            "no store at {}: has the daemon ever run?",
+            path.display()
+        )));
+    }
+    let found = agentctl::status::read(&path).map_err(|error| report::store_failure(&error))?;
+    Ok(if invocation.json {
+        report::status_json(&found)
+    } else {
+        report::status_text(&found)
+    })
 }

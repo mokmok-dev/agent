@@ -34,7 +34,7 @@ Nothing else is configurable on the command line. Anything else would be a setti
 
 | Command | Writes | Purpose |
 |---|---|---|
-| `agentctl status` | no | Tip ages, active branches, pending approvals, provider health, store size |
+| `agentctl status` | no | Branches, their depth and tip time, the approval waiting for an answer, the last failure, store size |
 | `agentctl branch list` | no | Branches with depth, label, tip time, last outcome |
 | `agentctl branch show <id>` | no | One branch, with the last N turns |
 | `agentctl fork` | command | Create a branch at the chosen point |
@@ -96,3 +96,12 @@ The CLI is safe to run from a script, a cron job, a Makefile, and a chat bridge.
 3. Every internal link resolves, or is reported as a warning, since OKF permits broken links on purpose.
 
 The command is the same check CI runs, so a local pass and a green build mean the same thing. It calls one library function, also exposed as `cargo xtask spec-check` for anyone working in the workspace without a running agent.
+
+# Reading the status
+
+`status` reads the store and does not ask the daemon. The log is the state, so an operator who wants to know what the agent is doing gets an answer whether or not anything is running — and a status that only worked while the daemon was up would be unavailable exactly when it is most wanted.
+
+It does not write: the store is opened read-only, so a status run against a live daemon cannot disturb it and a status run as another user cannot corrupt it.
+
+A missing store is a configuration failure, not an empty status. Nothing has run there, and saying so is different from saying the agent has no branches.
+

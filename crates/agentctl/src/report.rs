@@ -8,6 +8,7 @@ use agent_store::{StoreError, VerifyReport};
 use serde_json::json;
 
 use crate::exit::{Class, Exit, Failure};
+use crate::status;
 
 /// The version line, in the shape `agentctl version` prints.
 #[must_use]
@@ -80,6 +81,82 @@ pub fn store_failure(error: &StoreError) -> Failure {
             ),
         }
     }
+}
+
+/// The status, in the shape a terminal shows.
+///
+/// A question that is waiting goes first on its branch, because it is the only
+/// line an operator can act on; everything else is context for it.
+#[must_use]
+pub fn status_text(status: &status::Status) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = format!("store  {} events, {} bytes\n", status.events, status.bytes);
+    if status.branches.is_empty() {
+        out.push_str("no branches yet\n");
+        return out;
+    }
+    for branch in &status.branches {
+        let _ = write!(
+            out,
+            "branch {}  depth {}  messages {}",
+            branch.id, branch.depth, branch.messages
+        );
+        if branch.archived {
+            out.push_str("  archived");
+        }
+        if let Some(tip) = branch.tip {
+            let _ = write!(out, "  tip {}", tip.rfc3339());
+        }
+        out.push('\n');
+        if let Some(waiting) = &branch.waiting {
+            let _ = writeln!(
+                out,
+                "  waiting: {} ({}) call {} until {}",
+                waiting.tool,
+                waiting.risk.as_str(),
+                waiting.call,
+                waiting.expires.rfc3339()
+            );
+            let _ = writeln!(out, "  answer with: agentctl approve {}", waiting.call);
+        }
+        if let Some(failure) = &branch.last_failure {
+            let _ = writeln!(out, "  last failure: {failure}");
+        }
+    }
+    out
+}
+
+/// The status, as one object.
+#[must_use]
+pub fn status_json(status: &status::Status) -> String {
+    let branches: Vec<serde_json::Value> = status
+        .branches
+        .iter()
+        .map(|branch| {
+            json!({
+                "id": branch.id.to_string(),
+                "depth": branch.depth,
+                "messages": branch.messages,
+                "archived": branch.archived,
+                "tip": branch.tip.map(|tip| tip.rfc3339()),
+                "last_failure": branch.last_failure,
+                "waiting": branch.waiting.as_ref().map(|waiting| json!({
+                    "call": waiting.call.to_string(),
+                    "expires": waiting.expires.rfc3339(),
+                    "risk": waiting.risk.as_str(),
+                    "tool": waiting.tool,
+                })),
+            })
+        })
+        .collect();
+    json!({
+        "schema": "agentctl.status/1",
+        "events": status.events,
+        "bytes": status.bytes,
+        "branches": branches,
+    })
+    .to_string()
 }
 
 #[cfg(test)]

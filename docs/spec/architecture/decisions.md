@@ -376,3 +376,11 @@ The socket is read before the step rather than after, so a command that arrived 
 
 The line is one JSON object. It is read with a two second bound and answered either way, so a client that connects and says nothing cannot stop the loop.
 
+# 33. `status` reads the log, which is why it works when the daemon does not
+
+Every other command talks to the daemon, because every other command changes something. `status` changes nothing, so it opens the store read-only and folds it.
+
+The alternative was a status request over the socket, which the interface spec originally named. It would have made one shape for all commands, at the price of a command that fails exactly when an operator needs it: after a crash, before a restart, or on a host where the service has been stopped on purpose. The log is the state; asking it directly is asking the truth rather than a process's account of it.
+
+A missing store is a configuration failure rather than an empty status. Nothing has run there, and that is a different sentence from "the agent has no branches".
+
