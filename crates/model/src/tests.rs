@@ -8,7 +8,8 @@ use super::{
     Usage, backoff,
 };
 
-fn prompt(messages: &[(agent_core::event::Role, &str)]) -> Prompt {
+#[allow(dead_code, reason = "the codec's tests render through it too")]
+pub fn prompt(messages: &[agent_prompt::Message<'_>]) -> Prompt {
     let directive = Directive {
         version: "v1",
         text: "You are a careful agent.",
@@ -120,7 +121,10 @@ fn a_stream_that_stopped_part_way_is_unknown_and_not_retryable() {
 
 #[test]
 fn a_record_takes_the_last_chain_entry_as_its_prefix() {
-    let rendered = prompt(&[(agent_core::event::Role::User, "hello")]);
+    let rendered = prompt(&[agent_prompt::Message::plain(
+        agent_core::event::Role::User,
+        "hello",
+    )]);
     let record = RequestRecord::of(&rendered, Purpose::Turn).expect("records");
     assert_eq!(record.prefix, *rendered.chain.last().expect("a chain"));
     assert_eq!(record.segments, 3);
@@ -192,6 +196,8 @@ fn request() -> Request {
         directive: "be careful".to_string(),
         tools: "4:read17:{\"path\":\"string\"}".to_string(),
         messages: vec![Message {
+            call: None,
+            calls: Vec::new(),
             role: agent_core::event::Role::User,
             content: "hello".to_string(),
         }],

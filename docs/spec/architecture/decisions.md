@@ -332,3 +332,15 @@ The timeout is the manifest's, not the tool's. A process that outlives it is kil
 
 Output longer than the manifest's bound keeps its first half and its last half, with the byte count of what was dropped between them. A program puts its summary and its error at the ends, and the middle of a large output is where the least is.
 
+# 29. A message carries the structure its role needs, and the chain hashes it
+
+A tool conversation is not a list of strings. The answer that asked for a tool carries the calls, with an id and the arguments; the tool's output carries the id it answers. A renderer that kept only role and text could not produce either, and sending the tool output as plain text is refused by every provider that implements the protocol.
+
+So a message holds its role, its text, the calls it asked for, and the call it answers. The directive and the tool block stay as they were. The cost is one optional field pair on the segment, which is also what the encoder reads to decide whether a message is an answer with calls or an output with an id.
+
+The chain hashes the structure along with the text. An earlier sketch of this decision kept the hash on role and text alone, to leave the prefix chain untouched; that was wrong. Two prompts whose only difference is the arguments of a call are different bytes to the provider, so a chain that called them the same prefix would record a warm prefix that is cold, and the cache ledger would report savings that did not happen. The invariant is that the chain describes the bytes the provider reads, and the bytes now include the calls.
+
+A response that asked for tools enters the transcript at fold time rather than through `message.appended`, because the event cannot carry the calls. It enters even when it has no words: an empty answer is not an answer, but an empty answer with calls is the message the results answer.
+
+A round of results reopens its turn so the model can read them, bounded at sixteen rounds per turn. A model that keeps asking for tools would otherwise keep the loop busy forever, and when the bound is reached the results stay in the log, which is a state an operator can read and act on.
+

@@ -75,10 +75,25 @@ impl core::fmt::Display for FoldError {
 
 impl core::error::Error for FoldError {}
 
+/// How many times one turn may ask for tools before it stops asking.
+pub const MAX_TOOL_ROUNDS: usize = 16;
+
+/// One call a message asked for, with the id the answer will carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskedCall {
+    pub call: CallId,
+    pub args: String,
+    pub tool: String,
+}
+
 /// One message, as the prompt will see it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub role: Role,
+    /// The calls this message asked for, when it is the answer that asked.
+    pub calls: Vec<AskedCall>,
+    /// The call this message answers, when it is a tool's output.
+    pub call: Option<CallId>,
     pub content: String,
     /// The token count the writer reported, when there was one to report.
     ///
@@ -162,6 +177,35 @@ pub struct Branch {
     pub asked: BTreeMap<TurnId, Asked>,
     pub cache: Cache,
     pub failures: u32,
+}
+
+/// Reopens a turn once the last call it asked for has an outcome.
+///
+/// The bound exists because a model that keeps asking for tools would otherwise
+/// keep the loop busy forever. When it is reached the turn stops asking and the
+/// results stay in the log, which is a state an operator can read and act on.
+fn reopen(
+    branch: &mut Branch,
+    call: CallId,
+) {
+    if !branch.pending.is_empty() || branch.archived {
+        return;
+    }
+    let rounds = branch
+        .asked
+        .get(&call.turn)
+        .map_or(0, |asked| asked.requests.len());
+    if rounds >= MAX_TOOL_ROUNDS {
+        return;
+    }
+    if branch.pending_model.is_some() {
+        return;
+    }
+    branch.pending_model = Some(PendingModel {
+        turn: call.turn,
+        attempts: 0,
+        due: None,
+    });
 }
 
 impl Branch {
@@ -295,6 +339,8 @@ impl State {
                 // a second event, and a later turn then sees what was asked.
                 branch.messages.push(Message {
                     role: Role::User,
+                    call: None,
+                    calls: Vec::new(),
                     content: input.clone(),
                     tokens: None,
                     turn: Some(*turn),
@@ -335,7 +381,21 @@ impl State {
                     return Err(FoldError::UnknownTurn(*turn));
                 }
                 branch.pending_model = None;
-                if !calls.is_empty() {
+                if calls.is_empty() {
+                    // An answer with no words in it is not an answer, and an answer
+                    // with words is filed by a decision so a restart can repeat it.
+                    if !output.is_empty() {
+                        branch.unfiled = Some(UnfiledReply {
+                            turn: *turn,
+                            content: output.clone(),
+                            tokens: *output_tokens,
+                        });
+                    }
+                } else {
+                    // A response that asked for tools is part of the conversation as
+                    // it stands: the provider needs it in front of the results, with
+                    // the ids those results will answer. Nothing else records it, so
+                    // the fold puts it here, output and all.
                     branch.asked.insert(
                         *turn,
                         Asked {
@@ -343,14 +403,24 @@ impl State {
                             filed: 0,
                         },
                     );
-                }
-                // An answer with no words in it is not an answer. A response that
-                // exists only to ask for a tool has nothing for the transcript.
-                if !output.is_empty() {
-                    branch.unfiled = Some(UnfiledReply {
-                        turn: *turn,
+                    branch.messages.push(Message {
+                        role: Role::Assistant,
+                        call: None,
+                        calls: calls
+                            .iter()
+                            .enumerate()
+                            .map(|(step, request)| AskedCall {
+                                call: CallId {
+                                    turn: *turn,
+                                    step: u32::try_from(step).unwrap_or(u32::MAX),
+                                },
+                                args: request.args.clone(),
+                                tool: request.tool.clone(),
+                            })
+                            .collect(),
                         content: output.clone(),
-                        tokens: *output_tokens,
+                        tokens: Some(*output_tokens),
+                        turn: Some(*turn),
                     });
                 }
             },
@@ -396,6 +466,8 @@ impl State {
             } => {
                 branch.messages.push(Message {
                     role: *role,
+                    call: None,
+                    calls: Vec::new(),
                     content: content.clone(),
                     tokens: Some(*tokens),
                     turn: event.correlation,
@@ -416,7 +488,23 @@ impl State {
                     asked.filed = asked.filed.max(call.step + 1);
                 }
             },
-            EventKind::ToolResult { call, .. } | EventKind::ToolFailed { call, .. } => {
+            EventKind::ToolResult { call, output, .. } => {
+                if branch.pending.remove(call).is_none() {
+                    return Err(FoldError::UnknownCall(*call));
+                }
+                // The model cannot answer a result it never sees, so the output is
+                // part of the transcript, addressed to the call that produced it.
+                branch.messages.push(Message {
+                    role: Role::Tool,
+                    call: Some(*call),
+                    calls: Vec::new(),
+                    content: output.clone(),
+                    tokens: None,
+                    turn: Some(call.turn),
+                });
+                reopen(branch, *call);
+            },
+            EventKind::ToolFailed { call, .. } => {
                 if branch.pending.remove(call).is_none() {
                     return Err(FoldError::UnknownCall(*call));
                 }
@@ -1064,6 +1152,189 @@ mod tests {
                 .messages[0]
                 .turn,
             None
+        );
+    }
+    #[test]
+    fn a_turn_with_one_call_still_owing_does_not_reopen() {
+        let (mut chain, mut state) = with_branch();
+        let requested = chain.push(EventKind::TurnRequested {
+            input: "hello".to_string(),
+            turn: turn(),
+        });
+        state.apply(&requested).expect("folds");
+        let responded = chain.push(EventKind::ModelResponded {
+            calls: alloc::vec![
+                ToolRequest {
+                    args: "{}".to_string(),
+                    tool: "clock".to_string(),
+                },
+                ToolRequest {
+                    args: "{}".to_string(),
+                    tool: "shell".to_string(),
+                },
+            ],
+            finish: FinishReason::ToolCalls,
+            input_tokens: 1,
+            output: String::new(),
+            output_tokens: 0,
+            request: "r".to_string(),
+            turn: turn(),
+        });
+        state.apply(&responded).expect("folds");
+        for step in 0..2 {
+            let intent = chain.push(EventKind::ToolIntent {
+                args: "{}".to_string(),
+                call: CallId { turn: turn(), step },
+                key: alloc::format!("k{step}"),
+                tool: "clock".to_string(),
+            });
+            state.apply(&intent).expect("folds");
+        }
+        let first = chain.push(EventKind::ToolResult {
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            duration_ms: 1,
+            output: "noon".to_string(),
+            status: 0,
+            truncated: false,
+        });
+        state.apply(&first).expect("folds");
+        let branch = state.branch(BranchId::from_bytes(BRANCH)).expect("exists");
+        assert!(
+            branch.pending_model.is_none(),
+            "the second call has not run yet, so there is nothing to ask"
+        );
+    }
+
+    #[test]
+    fn an_archived_branch_does_not_reopen_a_turn() {
+        let (mut chain, mut state) = with_branch();
+        let requested = chain.push(EventKind::TurnRequested {
+            input: "hello".to_string(),
+            turn: turn(),
+        });
+        state.apply(&requested).expect("folds");
+        let responded = chain.push(EventKind::ModelResponded {
+            calls: alloc::vec![ToolRequest {
+                args: "{}".to_string(),
+                tool: "clock".to_string(),
+            }],
+            finish: FinishReason::ToolCalls,
+            input_tokens: 1,
+            output: String::new(),
+            output_tokens: 0,
+            request: "r".to_string(),
+            turn: turn(),
+        });
+        state.apply(&responded).expect("folds");
+        let intent = chain.push(EventKind::ToolIntent {
+            args: "{}".to_string(),
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            key: "k".to_string(),
+            tool: "clock".to_string(),
+        });
+        state.apply(&intent).expect("folds");
+        let archived = chain.push(EventKind::BranchArchived { reason: None });
+        state.apply(&archived).expect("folds");
+        let result = chain.push(EventKind::ToolResult {
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            duration_ms: 1,
+            output: String::new(),
+            status: 0,
+            truncated: false,
+        });
+        state.apply(&result).expect("folds");
+        assert!(
+            state
+                .branch(BranchId::from_bytes(BRANCH))
+                .expect("exists")
+                .pending_model
+                .is_none(),
+            "an archived branch is not asked again"
+        );
+    }
+
+    #[test]
+    fn a_tool_result_enters_the_transcript_and_reopens_the_turn() {
+        let (mut chain, mut state) = with_branch();
+        let requested = chain.push(EventKind::TurnRequested {
+            input: "hello".to_string(),
+            turn: turn(),
+        });
+        state.apply(&requested).expect("folds");
+        let responded = chain.push(EventKind::ModelResponded {
+            calls: alloc::vec![ToolRequest {
+                args: "{}".to_string(),
+                tool: "clock".to_string(),
+            }],
+            finish: FinishReason::ToolCalls,
+            input_tokens: 1,
+            output: String::new(),
+            output_tokens: 0,
+            request: "r".to_string(),
+            turn: turn(),
+        });
+        state.apply(&responded).expect("folds");
+        let intent = chain.push(EventKind::ToolIntent {
+            args: "{}".to_string(),
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            key: "k".to_string(),
+            tool: "clock".to_string(),
+        });
+        state.apply(&intent).expect("folds");
+
+        let branch = state.branch(BranchId::from_bytes(BRANCH)).expect("exists");
+        assert_eq!(
+            branch.messages.last().expect("a message").call,
+            None,
+            "the asking is in the transcript as it stands"
+        );
+        let asking = branch
+            .messages
+            .iter()
+            .rev()
+            .find(|message| !message.calls.is_empty())
+            .expect("the answer that asked");
+        assert_eq!(asking.calls[0].tool, "clock");
+        assert_eq!(asking.calls[0].call.step, 0);
+
+        let result = chain.push(EventKind::ToolResult {
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            duration_ms: 1,
+            output: "noon".to_string(),
+            status: 0,
+            truncated: false,
+        });
+        state.apply(&result).expect("folds");
+
+        let branch = state.branch(BranchId::from_bytes(BRANCH)).expect("exists");
+        let last = branch.messages.last().expect("a message");
+        assert_eq!(last.role, Role::Tool);
+        assert_eq!(last.content, "noon");
+        assert_eq!(
+            last.call,
+            Some(CallId {
+                turn: turn(),
+                step: 0
+            })
+        );
+        assert!(
+            branch.pending_model.is_some(),
+            "the model has not answered the result yet"
         );
     }
 }
