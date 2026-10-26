@@ -8,9 +8,11 @@
 
 use std::time::Duration;
 
-use agent_core::event::ErrorClass;
+use agent_core::event::{ErrorClass, Role};
+use agent_prompt::{Kind, Prompt};
+
+pub mod openai;
 use agent_core::ids::PrefixHash;
-use agent_prompt::Prompt;
 
 /// How many attempts one request may take, counting the first.
 pub const MAX_ATTEMPTS: u32 = 3;
@@ -42,14 +44,60 @@ pub enum Purpose {
 
 /// One request, as an adapter receives it.
 ///
-/// The segments are the renderer's own text, so an adapter can send them as a
-/// cache hint, as an explicit cache key, or as one concatenation without
-/// re-parsing anything.
+/// The parts stay apart rather than arriving as one concatenated string, so an
+/// adapter can send a role and a content as separate fields, or add a cache hint
+/// to one part, without splitting text the renderer just built.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     pub model: String,
-    pub segments: Vec<String>,
+    /// The standing instructions. Becomes the first system message.
+    pub directive: String,
+    /// The tool block, already ordered and framed by the renderer.
+    pub tools: String,
+    pub messages: Vec<Message>,
     pub max_output_tokens: u64,
+}
+
+/// One turn of a transcript, as a request carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    pub role: Role,
+    pub content: String,
+}
+
+impl Request {
+    /// Builds a request from a rendered prompt.
+    #[must_use]
+    pub fn of(
+        prompt: &Prompt,
+        model: &str,
+        max_output_tokens: u64,
+    ) -> Self {
+        let mut directive = String::new();
+        let mut tools = String::new();
+        let mut messages = Vec::new();
+        for segment in &prompt.segments {
+            match segment.kind {
+                Kind::Directive => directive.clone_from(&segment.text),
+                Kind::Tools => tools.clone_from(&segment.text),
+                Kind::Message => {
+                    if let Some(role) = segment.role {
+                        messages.push(Message {
+                            role,
+                            content: segment.text.clone(),
+                        });
+                    }
+                },
+            }
+        }
+        Self {
+            model: model.to_string(),
+            directive,
+            tools,
+            messages,
+            max_output_tokens,
+        }
+    }
 }
 
 /// One piece of a response, as it arrives.

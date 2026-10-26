@@ -18,6 +18,14 @@ The request carries the rendered prompt segments, not one string. Segmentation s
 
 The stream yields token deltas, then either a usage report or a typed error. Deltas are ephemeral. They reach surfaces over the doorbell socket as non-durable frames and are never appended. Only the finished message becomes an event, so a reconnect reads the log and cannot observe half a message.
 
+# The request body
+
+A request carries its parts separately: the directive, the tool block, and one entry per message with its role beside its content. The port never hands an adapter one concatenated string, because an adapter that has to split text the renderer just built will eventually split it differently.
+
+The tool block goes in as a second system message rather than in a structured tools field, because the renderer hashed it as one segment and the chain must keep describing the bytes the provider reads. An adapter that sends schemas as structured tools changes those bytes, and that change belongs in the renderer, not in the adapter.
+
+Encoding and decoding the provider's JSON live with the adapter rather than in the wire crate. The wire crate stays free of dependencies and knows only frames; the JSON is a provider's dialect, and a dialect belongs beside the thing that speaks it.
+
 # The wire half
 
 Parsing a stream is not the same job as owning a connection, and the two are separated. `agent-wire` takes chunks of bytes and returns whole events. It opens nothing, waits for nothing, and holds no timer, so every branch it has is reachable from a test that hands it a slice.

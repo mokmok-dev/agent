@@ -15,6 +15,8 @@ version = "0.0.0"
 dependencies = [
  "agent-core",
  "agent-prompt",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

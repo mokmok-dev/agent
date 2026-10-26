@@ -233,3 +233,21 @@ The cost is real and it lands on tests. `vec!`, `format!`, and `ToString` need e
 So a crate is `no_std` when it holds logic that is tempting to make environmental, and `std` when its job is to talk to something. `agent-model` is the second case even though everything it holds today is pure, because the adapters that join it will not be.
 
 The same reasoning governs the Sans I/O split, which has not happened yet. When the HTTP adapter lands, the wire half, request bytes out and server-sent events in, becomes its own crate: that is where the branch density is, and where a test needs no server. The socket half stays a thin shell, excluded from the gate by the rule that already excludes a `main.rs`.
+
+# 22. The HTTP client is `ureq`, chosen on a measurement
+
+Three candidates, measured on this machine with a probe crate per option and a clean target directory each: unique crates on normal edges, and seconds for a clean build.
+
+| Option | Crates | Clean build | TLS backend |
+|---|---|---|---|
+| `ureq` 3 | 28 | 6.2 s | rustls with `ring` |
+| `reqwest` 0.12, blocking, rustls | 88 | 6.1 s | rustls with `ring` |
+| `rustls` 0.23 directly | 11 | 10.1 s | `aws-lc-rs`, which compiles C |
+
+The build times say almost nothing. The crate counts say a lot, and the third row says the opposite of what it appears to.
+
+`reqwest` is three times the tree of `ureq` and is asynchronous underneath even in blocking mode, so it pulls a runtime into a process whose design is one synchronous loop. The reactor has no executor and no reason to grow one.
+
+`rustls` alone has the smallest tree and the slowest build, and the crate count is a false economy. It is a TLS implementation, not an HTTP client: request framing, chunked bodies, redirects, and connection reuse would all be written here, in the thin shell, where the mutation gate cannot reach them because the code needs a socket. Hand-written HTTP is exactly the kind of code that looks right and fails once a month.
+
+So the adapter uses `ureq`: blocking, small, and correct about HTTP. The cost accepted is 28 crates, one of which builds C code with `ring`, and a dependency whose API can change between major versions. The dependency is not yet in the tree; it lands with the adapter.

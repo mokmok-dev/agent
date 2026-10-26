@@ -4,7 +4,8 @@ use agent_core::event::ErrorClass;
 use agent_prompt::{Directive, Prompt, render};
 
 use super::{
-    Delta, Profile, Provider, ProviderError, Purpose, Request, RequestRecord, Usage, backoff,
+    Delta, Message, Profile, Provider, ProviderError, Purpose, Request, RequestRecord, Usage,
+    backoff,
 };
 
 fn prompt(messages: &[(agent_core::event::Role, &str)]) -> Prompt {
@@ -184,7 +185,12 @@ impl Provider for Scripted {
 fn request() -> Request {
     Request {
         model: "test".to_string(),
-        segments: vec!["a".to_string(), "b".to_string()],
+        directive: "be careful".to_string(),
+        tools: "4:read17:{\"path\":\"string\"}".to_string(),
+        messages: vec![Message {
+            role: agent_core::event::Role::User,
+            content: "hello".to_string(),
+        }],
         max_output_tokens: 16,
     }
 }
