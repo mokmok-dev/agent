@@ -6,11 +6,11 @@
 //! decision and is not recorded here, so a wrong decision cannot be mistaken
 //! for a wrong history.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::event::{Event, EventKind, Role, ToolRequest};
+use crate::event::{Event, EventKind, Risk, Role, ToolRequest};
 use crate::ids::{BranchId, CallId, EventId, TurnId};
 use crate::time::Timestamp;
 
@@ -74,6 +74,15 @@ impl core::fmt::Display for FoldError {
 }
 
 impl core::error::Error for FoldError {}
+
+/// A question waiting for a person, and the instant it stops being askable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Approval {
+    pub call: CallId,
+    pub expires: Timestamp,
+    pub risk: Risk,
+    pub tool: String,
+}
 
 /// How many times one turn may ask for tools before it stops asking.
 pub const MAX_TOOL_ROUNDS: usize = 16;
@@ -170,6 +179,15 @@ pub struct Branch {
     pub messages: Vec<Message>,
     pub turns: Vec<Turn>,
     pub pending: BTreeMap<CallId, String>,
+    /// The one approval that is waiting for an answer on this branch.
+    ///
+    /// One at a time, because a stack of questions is not what an operator can
+    /// answer well, and the loop asks for one call at a time anyway.
+    pub approval: Option<Approval>,
+    /// Tools whose network risk this branch has already allowed.
+    pub granted: BTreeSet<String>,
+    /// What a person answered about each call, whether they said yes or no.
+    pub decided: BTreeMap<CallId, bool>,
     pub pending_command: Option<Command>,
     pub pending_model: Option<PendingModel>,
     pub unfiled: Option<UnfiledReply>,
@@ -225,6 +243,9 @@ impl Branch {
             messages: Vec::new(),
             turns: Vec::new(),
             pending: BTreeMap::new(),
+            approval: None,
+            granted: BTreeSet::new(),
+            decided: BTreeMap::new(),
             pending_command: None,
             pending_model: None,
             unfiled: None,
@@ -480,6 +501,36 @@ impl State {
                     branch.unfiled = None;
                 }
             },
+            EventKind::ApprovalRequested {
+                call,
+                expires,
+                risk,
+                tool,
+            } => {
+                if !branch.pending.contains_key(call) {
+                    return Err(FoldError::UnknownCall(*call));
+                }
+                branch.approval = Some(Approval {
+                    call: *call,
+                    expires: *expires,
+                    risk: *risk,
+                    tool: tool.clone(),
+                });
+            },
+            EventKind::ApprovalDecided { allow, call, .. } => {
+                let Some(approval) = branch.approval.as_ref() else {
+                    return Err(FoldError::UnknownCall(*call));
+                };
+                if approval.call != *call {
+                    return Err(FoldError::UnknownCall(*call));
+                }
+                if *allow && approval.risk.is_remembered() {
+                    branch.granted.insert(approval.tool.clone());
+                }
+                branch.decided.insert(*call, *allow);
+                branch.approval = None;
+                branch.pending_command = None;
+            },
             EventKind::ToolIntent { call, tool, .. } => {
                 if branch.pending.insert(*call, tool.clone()).is_some() {
                     return Err(FoldError::RepeatedCall(*call));
@@ -523,7 +574,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::{FoldError, State};
-    use crate::event::{ErrorClass, Event, EventKind, FinishReason, Role, ToolRequest};
+    use crate::event::{ErrorClass, Event, EventKind, FinishReason, Risk, Role, ToolRequest};
     use crate::ids::{Actor, BranchId, CallId, EventId, PrefixHash, TurnId};
     use crate::time::Timestamp;
     use alloc::collections::BTreeMap;
@@ -1259,6 +1310,173 @@ mod tests {
                 .pending_model
                 .is_none(),
             "an archived branch is not asked again"
+        );
+    }
+
+    /// A turn with one call whose question is open.
+    fn armed_question(risk: Risk) -> (Chain, State) {
+        let (mut chain, mut state) = with_branch();
+        let requested = chain.push(EventKind::TurnRequested {
+            input: "hello".to_string(),
+            turn: turn(),
+        });
+        state.apply(&requested).expect("folds");
+        let responded = chain.push(EventKind::ModelResponded {
+            calls: alloc::vec![ToolRequest {
+                args: "{}".to_string(),
+                tool: "clock".to_string(),
+            }],
+            finish: FinishReason::ToolCalls,
+            input_tokens: 1,
+            output: String::new(),
+            output_tokens: 0,
+            request: "r".to_string(),
+            turn: turn(),
+        });
+        state.apply(&responded).expect("folds");
+        let intent = chain.push(EventKind::ToolIntent {
+            args: "{}".to_string(),
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            key: "k".to_string(),
+            tool: "clock".to_string(),
+        });
+        state.apply(&intent).expect("folds");
+        let asked = chain.push(EventKind::ApprovalRequested {
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            expires: Timestamp::new(1_790_000_000, 0).expect("valid"),
+            risk,
+            tool: "clock".to_string(),
+        });
+        state.apply(&asked).expect("folds");
+        (chain, state)
+    }
+
+    #[test]
+    fn an_answer_to_a_different_question_is_an_error() {
+        let (mut chain, mut state) = armed_question(Risk::Destructive);
+        let answered = chain.push(EventKind::ApprovalDecided {
+            allow: true,
+            call: CallId {
+                turn: turn(),
+                step: 7,
+            },
+            note: None,
+        });
+        assert_eq!(
+            state.apply(&answered),
+            Err(FoldError::UnknownCall(CallId {
+                turn: turn(),
+                step: 7
+            }))
+        );
+    }
+
+    #[test]
+    fn a_yes_for_a_network_tool_is_remembered_for_the_branch() {
+        let (mut chain, mut state) = armed_question(Risk::Network);
+        let answered = chain.push(EventKind::ApprovalDecided {
+            allow: true,
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            note: None,
+        });
+        state.apply(&answered).expect("folds");
+        let branch = state.branch(BranchId::from_bytes(BRANCH)).expect("exists");
+        assert!(branch.granted.contains("clock"));
+        assert_eq!(
+            branch.decided.get(&CallId {
+                turn: turn(),
+                step: 0
+            }),
+            Some(&true)
+        );
+    }
+
+    #[test]
+    fn a_yes_for_a_destructive_tool_is_not_remembered() {
+        let (mut chain, mut state) = armed_question(Risk::Destructive);
+        let answered = chain.push(EventKind::ApprovalDecided {
+            allow: true,
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            note: None,
+        });
+        state.apply(&answered).expect("folds");
+        let branch = state.branch(BranchId::from_bytes(BRANCH)).expect("exists");
+        assert!(branch.granted.is_empty());
+    }
+
+    #[test]
+    fn a_no_is_recorded_as_a_no() {
+        let (mut chain, mut state) = armed_question(Risk::Network);
+        let answered = chain.push(EventKind::ApprovalDecided {
+            allow: false,
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            note: None,
+        });
+        state.apply(&answered).expect("folds");
+        let branch = state.branch(BranchId::from_bytes(BRANCH)).expect("exists");
+        assert!(branch.granted.is_empty(), "a no grants nothing");
+        assert_eq!(
+            branch.decided.get(&CallId {
+                turn: turn(),
+                step: 0
+            }),
+            Some(&false)
+        );
+    }
+
+    #[test]
+    fn a_question_about_an_unknown_call_is_an_error() {
+        let (mut chain, mut state) = with_branch();
+        let asked = chain.push(EventKind::ApprovalRequested {
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            expires: Timestamp::new(1_790_000_000, 0).expect("valid"),
+            risk: Risk::Destructive,
+            tool: "shell".to_string(),
+        });
+        assert_eq!(
+            state.apply(&asked),
+            Err(FoldError::UnknownCall(CallId {
+                turn: turn(),
+                step: 0
+            }))
+        );
+    }
+
+    #[test]
+    fn an_answer_to_a_question_nobody_asked_is_an_error() {
+        let (mut chain, mut state) = with_branch();
+        let decided = chain.push(EventKind::ApprovalDecided {
+            allow: true,
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            note: None,
+        });
+        assert_eq!(
+            state.apply(&decided),
+            Err(FoldError::UnknownCall(CallId {
+                turn: turn(),
+                step: 0
+            }))
         );
     }
 

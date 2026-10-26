@@ -354,3 +354,13 @@ The alternative was to write a second event between the intent and the effect, m
 
 The recovery failure carries the unknown class rather than a new one: what an operator needs to know is that the effect may have happened, and that is the flag, not the class.
 
+# 31. What may run unattended is a line in the configuration, and there is no default
+
+A tool declares its risk: read, write, network, or destructive. Read and write inside the paths the manifest declares run without asking. Network is approved once per branch and remembered. Destructive is approved every time and never remembered. A question that goes unanswered past its expiry is a denial, recorded as one, so nothing waits forever on a person.
+
+The risk has no default. A default would be this program deciding what a stranger's tool may touch, and every plausible default is wrong for somebody: read lets a destructive tool run silently, destructive makes a first install refuse to do anything. The operator writes one word per tool, the daemon refuses to start without it, and the module has no default either.
+
+The gate lives in the runtime rather than in `decide`, because it needs two things the folded state does not hold: the tool's declared risk, which is configuration, and the answer to "has this process already asked". `decide` says which call is next; the runtime says whether the effect may happen. The decision itself is a pure function over the declaration and the branch's log, so it is tested without a process.
+
+The command that answers a question is the same command channel that carries a message: `approve` or `deny`, with the call id as its text. That is not a temporary shape. The alternative was a dedicated socket for approvals, which would be a second way into the same log, and the log is the one place a second way has already caused trouble.
+

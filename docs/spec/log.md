@@ -32,4 +32,5 @@
 * **Update**: Recorded what a tool writes, ran one, and decided how a tool receives its arguments.
 * **Update**: Gave a message the structure its role needs, and recorded why the chain hashes it.
 * **Update**: Recorded how a call left behind by a dead process is recovered, and why the log cannot answer it.
+* **Update**: Recorded the approval gate, the four risk classes, and why the risk has no default.
 

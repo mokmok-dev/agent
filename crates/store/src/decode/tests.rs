@@ -22,6 +22,10 @@ fn turn() -> TurnId {
     TurnId::from_bytes([4; 8])
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one list of every kind is the point; splitting it would hide a missing one"
+)]
 fn kinds() -> Vec<EventKind> {
     let call = CallId {
         turn: turn(),
@@ -97,6 +101,23 @@ fn kinds() -> Vec<EventKind> {
             content: "a \"quoted\" line\nwith escapes".to_string(),
             role: Role::Assistant,
             tokens: 9,
+        },
+        EventKind::ApprovalRequested {
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            expires: agent_core::time::Timestamp::new(1_790_000_000, 0).expect("valid"),
+            risk: agent_core::event::Risk::Destructive,
+            tool: "shell".to_string(),
+        },
+        EventKind::ApprovalDecided {
+            allow: true,
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            note: Some("they said yes".to_string()),
         },
         EventKind::ToolIntent {
             args: "{\"argv\":[\"ls\"]}".to_string(),
@@ -377,5 +398,28 @@ fn every_error_explains_itself() {
     ];
     for error in errors {
         assert_ne!(error.to_string(), "");
+    }
+}
+
+#[test]
+fn every_risk_word_round_trips() {
+    for (word, risk) in [
+        ("read", agent_core::event::Risk::Read),
+        ("write", agent_core::event::Risk::Write),
+        ("network", agent_core::event::Risk::Network),
+        ("destructive", agent_core::event::Risk::Destructive),
+    ] {
+        let original = event(EventKind::ApprovalRequested {
+            call: CallId {
+                turn: turn(),
+                step: 0,
+            },
+            expires: agent_core::time::Timestamp::new(1_790_000_000, 0).expect("valid"),
+            risk,
+            tool: "shell".to_string(),
+        });
+        let body = agent_core::canonical::canonical(&original);
+        assert!(body.contains(word), "{word} is not in {body}");
+        assert_eq!(decode(&body).expect("decodes"), original);
     }
 }

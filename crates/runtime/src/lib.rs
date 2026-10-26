@@ -27,6 +27,9 @@ pub fn wait_for(
     core::time::Duration::from_millis(millis).min(MAX_WAIT)
 }
 
+/// How long a question waits for a person when the configuration says nothing.
+pub const DEFAULT_APPROVAL_GRACE: core::time::Duration = core::time::Duration::from_secs(600);
+
 /// The longest the loop will sleep for a single retry.
 pub const MAX_WAIT: core::time::Duration = core::time::Duration::from_secs(5);
 use agent_core::event::{ErrorClass, Event, EventKind, FinishReason, ToolRequest};
@@ -64,6 +67,8 @@ pub struct Tool {
     pub argv: Vec<String>,
     /// Whether running it twice is the same as running it once.
     pub idempotent: bool,
+    /// What it may touch, and therefore what it takes to run it.
+    pub risk: agent_core::event::Risk,
     pub timeout: std::time::Duration,
     /// The most bytes of its output one event may carry.
     pub max_output: usize,
@@ -73,6 +78,8 @@ pub struct Tool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub model: String,
+    /// How long a question waits for a person before the answer is no.
+    pub approval_grace: core::time::Duration,
     pub directive_version: String,
     pub directive: String,
     /// Tools in any order; the renderer sorts them by name.
@@ -298,7 +305,14 @@ impl Reactor {
         Ok(step)
     }
 
-    /// Runs one tool call and records what it did.
+    /// How long a question waits, from the configuration.
+    fn approval_grace(&self) -> core::time::Duration {
+        self.settings
+            .as_ref()
+            .map_or(DEFAULT_APPROVAL_GRACE, |settings| settings.approval_grace)
+    }
+
+    /// Runs one tool call, once the gate has allowed it.
     ///
     /// A tool that is not configured, or whose process will not start, is a
     /// failure with a class rather than an error out of the loop: the log must
@@ -310,21 +324,16 @@ impl Reactor {
         call: CallId,
         now: Timestamp,
     ) -> Result<(), ReactorError> {
-        let name = state
-            .branch(branch)
-            .and_then(|facts| facts.pending.get(&call).cloned())
-            .ok_or(ReactorError::NoSuchCall(call))?;
-        let args = state
-            .branch(branch)
-            .and_then(|facts| facts.asked.get(&call.turn))
-            .and_then(|asked| asked.requests.get(call.step as usize))
-            .map(|request| request.args.clone())
-            .ok_or(ReactorError::NoSuchCall(call))?;
-        let Some(tool) = self
+        let (name, args) = Self::resolve(state, branch, call)?;
+        let tool = self
             .settings
             .as_ref()
-            .and_then(|settings| settings.tools.iter().find(|tool| tool.name == name))
-        else {
+            .ok_or(ReactorError::NoModel)?
+            .tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .cloned();
+        let Some(tool) = tool else {
             return self
                 .append(
                     branch,
@@ -341,6 +350,10 @@ impl Reactor {
                 )
                 .map(|_| ());
         };
+        if !self.permit(state, branch, call, &tool, now)? {
+            return Ok(());
+        }
+
         // A call this process did not file is a call an earlier one left behind.
         // Running it again is safe only when the tool says it is.
         if !self.started.contains(&call) && !tool.idempotent {
@@ -360,7 +373,8 @@ impl Reactor {
                 )
                 .map(|_| ());
         }
-        match exec::run(tool, &args, &self.working_dir) {
+
+        match exec::run(&tool, &args, &self.working_dir) {
             Outcome::Ran(ran) => self
                 .append(
                     branch,
@@ -393,6 +407,110 @@ impl Reactor {
                     },
                 )
                 .map(|_| ()),
+        }
+    }
+
+    /// The tool a call names, and the bytes it was asked to run with.
+    fn resolve(
+        state: &State,
+        branch: BranchId,
+        call: CallId,
+    ) -> Result<(String, String), ReactorError> {
+        let facts = state
+            .branch(branch)
+            .ok_or(ReactorError::Fold(FoldError::UnknownBranch(branch)))?;
+        let name = facts
+            .pending
+            .get(&call)
+            .cloned()
+            .ok_or(ReactorError::NoSuchCall(call))?;
+        let args = facts
+            .asked
+            .get(&call.turn)
+            .and_then(|asked| asked.requests.get(call.step as usize))
+            .map(|request| request.args.clone())
+            .ok_or(ReactorError::NoSuchCall(call))?;
+        Ok((name, args))
+    }
+
+    /// Whether the effect may happen now, asking or refusing when it may not.
+    ///
+    /// Returns `false` when the loop should stop here, which is every outcome but
+    /// an allowed call: a question that had to be asked, an answer that has not
+    /// arrived, and a refusal are all states the log now holds.
+    fn permit(
+        &mut self,
+        state: &State,
+        branch: BranchId,
+        call: CallId,
+        tool: &Tool,
+        now: Timestamp,
+    ) -> Result<bool, ReactorError> {
+        let facts = state
+            .branch(branch)
+            .ok_or(ReactorError::Fold(FoldError::UnknownBranch(branch)))?;
+        let outstanding = facts
+            .approval
+            .as_ref()
+            .map(|approval| (&approval.call, approval.expires));
+        match gate(
+            tool.risk,
+            facts.decided.get(&call),
+            facts.granted.contains(&tool.name),
+            outstanding,
+            call,
+            now,
+        ) {
+            Gate::Run => Ok(true),
+            Gate::Wait => Ok(false),
+            Gate::Ask => {
+                let expires = now.plus(self.approval_grace())?;
+                self.append(
+                    branch,
+                    state,
+                    now,
+                    None,
+                    None,
+                    Some(call.turn),
+                    EventKind::ApprovalRequested {
+                        call,
+                        expires,
+                        risk: tool.risk,
+                        tool: tool.name.clone(),
+                    },
+                )
+                .map(|_| false)
+            },
+            Gate::Expired => self
+                .append(
+                    branch,
+                    state,
+                    now,
+                    None,
+                    None,
+                    Some(call.turn),
+                    EventKind::ApprovalDecided {
+                        allow: false,
+                        call,
+                        note: Some("the question expired".to_string()),
+                    },
+                )
+                .map(|_| false),
+            Gate::Refuse => self
+                .append(
+                    branch,
+                    state,
+                    now,
+                    None,
+                    None,
+                    Some(call.turn),
+                    EventKind::ToolFailed {
+                        call,
+                        class: ErrorClass::Cancelled,
+                        may_have_happened: false,
+                    },
+                )
+                .map(|_| false),
         }
     }
 
@@ -556,6 +674,48 @@ impl Reactor {
         };
         self.store.append(&event)?;
         Ok(event.id())
+    }
+}
+
+/// What the loop may do with one call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    /// The effect is allowed.
+    Run,
+    /// The effect is allowed only after a person answers, and the question has not
+    /// been asked yet.
+    Ask,
+    /// A question or a retry is outstanding; there is nothing to do yet.
+    Wait,
+    /// The answer was no.
+    Refuse,
+    /// The question went unanswered past its expiry, which is a no.
+    Expired,
+}
+
+/// Decides whether one call may run, from the declaration and the branch's log.
+fn gate(
+    risk: agent_core::event::Risk,
+    decided: Option<&bool>,
+    granted: bool,
+    outstanding: Option<(&CallId, Timestamp)>,
+    call: CallId,
+    now: Timestamp,
+) -> Gate {
+    if let Some(allow) = decided {
+        return if *allow { Gate::Run } else { Gate::Refuse };
+    }
+    if !risk.needs_approval() {
+        return Gate::Run;
+    }
+    // One answer is remembered only for the risk the design says may remember it.
+    if risk.is_remembered() && granted {
+        return Gate::Run;
+    }
+    match outstanding {
+        Some((asked, expires)) if *asked == call && expires <= now => Gate::Expired,
+        Some(_) => Gate::Wait,
+        None => Gate::Ask,
     }
 }
 

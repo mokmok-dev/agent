@@ -232,6 +232,22 @@ struct MessageAppended {
 }
 
 #[derive(Deserialize)]
+struct ApprovalRequested {
+    call: String,
+    expires: String,
+    risk: String,
+    tool: String,
+}
+
+#[derive(Deserialize)]
+struct ApprovalDecided {
+    allow: bool,
+    call: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct ToolIntent {
     args: String,
     call: String,
@@ -390,6 +406,24 @@ fn decode_kind(
                 tokens: payload.tokens,
             }
         },
+        taxonomy::APPROVAL_REQUESTED => {
+            let payload: ApprovalRequested = payload(raw)?;
+            EventKind::ApprovalRequested {
+                call: parse_call(&payload.call)?,
+                expires: Timestamp::parse(&payload.expires)
+                    .map_err(|_| DecodeError::Malformed("expires"))?,
+                risk: parse_risk(&payload.risk)?,
+                tool: payload.tool,
+            }
+        },
+        taxonomy::APPROVAL_DECIDED => {
+            let payload: ApprovalDecided = payload(raw)?;
+            EventKind::ApprovalDecided {
+                allow: payload.allow,
+                call: parse_call(&payload.call)?,
+                note: payload.note,
+            }
+        },
         taxonomy::TOOL_INTENT => {
             let payload: ToolIntent = payload(raw)?;
             EventKind::ToolIntent {
@@ -424,6 +458,16 @@ fn decode_kind(
         },
     };
     Ok(kind)
+}
+
+fn parse_risk(text: &str) -> Result<agent_core::event::Risk, DecodeError> {
+    match text {
+        "read" => Ok(agent_core::event::Risk::Read),
+        "write" => Ok(agent_core::event::Risk::Write),
+        "network" => Ok(agent_core::event::Risk::Network),
+        "destructive" => Ok(agent_core::event::Risk::Destructive),
+        _ => Err(DecodeError::Malformed("risk")),
+    }
 }
 
 fn parse_turn(text: &str) -> Result<TurnId, DecodeError> {

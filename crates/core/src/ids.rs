@@ -17,6 +17,8 @@ pub enum IdError {
     BadPrefix,
     /// An actor string did not start with `human:`, `process:`, or `agent:`.
     BadActor,
+    /// A call id was not `turn:step`.
+    BadCall,
 }
 
 impl fmt::Display for IdError {
@@ -29,6 +31,7 @@ impl fmt::Display for IdError {
             Self::BadDigit => "not a hex digit",
             Self::BadPrefix => "wrong prefix",
             Self::BadActor => "actor must start with human:, process:, or agent:",
+            Self::BadCall => "a call id is turn:step",
         };
         formatter.write_str(text)
     }
@@ -226,6 +229,20 @@ impl fmt::Display for CallId {
         formatter: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         write!(formatter, "{}:{}", self.turn, self.step)
+    }
+}
+
+impl FromStr for CallId {
+    type Err = IdError;
+
+    /// Reads the text form, `turn:step`, which is what an operator types and what
+    /// the wire carries as a `tool_call_id`.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let (turn, step) = text.split_once(':').ok_or(IdError::BadCall)?;
+        Ok(Self {
+            turn: TurnId::from_str(turn)?,
+            step: step.parse().map_err(|_| IdError::BadCall)?,
+        })
     }
 }
 
