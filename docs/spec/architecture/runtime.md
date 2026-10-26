@@ -119,3 +119,11 @@ A parked branch is state, not a thread. The reactor never blocks on a single bra
 `agentd` writes its version and store format into `instance.started`. A binary older than the store format refuses to start. A newer binary migrates forward by appending a migration record, which means a downgrade sees the old format and refuses, rather than misreading.
 
 Rollback is therefore a deliberate act, not an accident.
+
+# One writer, enforced
+
+The daemon is the only process that appends to the log, and until now that was a property of the deployment rather than of the program: two daemons pointed at one state directory both opened the store, because SQLite serialises writers instead of refusing them. Both folded the same log, both decided what the same turn needed, and the log stayed syntactically valid while its meaning did not. The second daemon also stole the first one's socket: binding removes the path, so the first process's listener became unreachable and the second process's socket was the one clients found — until the first process exited and removed the file the second was serving.
+
+The daemon now takes an advisory lock on `agent.lock` beside the store before it opens anything, and exits with a message naming the file when somebody else holds it. The kernel releases the lock when the process ends, including a process that was killed, so there is no stale lock to clear and no pid to trust. The lock file is never removed: two processes that each removed and recreated it would hold locks on different files and both believe they were alone.
+
+`agentctl status` does not take the lock. It reads, and a status that cannot be read while a daemon is running would be useless on the hosts where it is most wanted.

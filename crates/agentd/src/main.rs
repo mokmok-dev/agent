@@ -97,16 +97,22 @@ fn ping(
 }
 
 fn run(args: &Args) -> Result<(), String> {
-    let (reactor, state_dir) = match (&args.config, &args.state_dir) {
-        (Some(path), _) => (reactor_from_config(path)?, config_state_dir(path)?),
-        (None, Some(dir)) => {
-            std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
-            (
-                Reactor::open(&dir.join("agent.db")).map_err(|error| error.to_string())?,
-                dir.clone(),
-            )
-        },
+    let state_dir = match (&args.config, &args.state_dir) {
+        (Some(path), _) => config_state_dir(path)?,
+        (None, Some(dir)) => dir.clone(),
         (None, None) => return Err("no state was named".to_string()),
+    };
+    std::fs::create_dir_all(&state_dir).map_err(|error| error.to_string())?;
+
+    // Before the store is opened, and before the socket is bound. Two daemons on
+    // one state directory each append, each fold, and each decide what to do
+    // about the same turn; SQLite serialises the writes rather than refusing them,
+    // so the log stays valid and its meaning does not. The second one leaves.
+    let _lock = agent_runtime::lock::Lock::take(&state_dir).map_err(|error| error.to_string())?;
+
+    let reactor = match &args.config {
+        Some(path) => reactor_from_config(path)?,
+        None => Reactor::open(&state_dir.join("agent.db")).map_err(|error| error.to_string())?,
     };
     let bus_path = args
         .bus
