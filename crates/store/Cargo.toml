@@ -1,0 +1,13 @@
+[package]
+edition.workspace = true
+name = "agent-store"
+publish = false
+version = "0.0.0"
+
+[dependencies]
+agent-core = { path = "../core" }
+blake3.workspace = true
+rusqlite = { workspace = true, features = ["bundled"] }
+
+[lints]
+workspace = true
