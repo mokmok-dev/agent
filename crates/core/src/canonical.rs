@@ -63,7 +63,7 @@ pub fn canonical(event: &Event) -> String {
 /// The event's identity: the BLAKE3 hash of its canonical bytes.
 #[must_use]
 pub fn event_id(event: &Event) -> EventId {
-    EventId::from_bytes(*blake3::hash(canonical(event).as_bytes()).as_bytes())
+    EventId::from_bytes(*crate::hash::digest(canonical(event).as_bytes()).as_bytes())
 }
 
 struct Object<'a> {

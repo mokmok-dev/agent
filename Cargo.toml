@@ -2,6 +2,7 @@
 members = [
   "crates/agentd",
   "crates/core",
+  "crates/prompt",
   "crates/removeme",
   "crates/runtime",
   "crates/store",
@@ -11,6 +12,7 @@ resolver = "3"
 
 [workspace.dependencies]
 agent-core = { path = "crates/core" }
+agent-prompt = { path = "crates/prompt" }
 agent-runtime = { path = "crates/runtime" }
 agent-store = { path = "crates/store" }
 blake3 = { version = "1", default-features = false }

@@ -213,3 +213,11 @@ A step reads every branch, folds it from the root, asks `decide` for one intent,
 This is a first cut, and it is slower than the design describes. Two costs are accepted for now. The loop re-folds history it has already folded, so a step costs time proportional to the log rather than to the new events. And the loop sleeps for a fixed interval when there is nothing to do, where the design blocks on the socket and the store change notice, so an idle daemon wakes four times a second and a command waits up to that interval before it is turned into a turn.
 
 The order is deliberate. An incremental fold that is wrong diverges from the log silently, and every fact written after that divergence is wrong in a way no verification can catch, because the log itself is consistent. Re-folding is slow and cannot be wrong. The position cache lands when a measurement shows the cost, which is the point at which a snapshot also becomes worth its format.
+
+# 20. The token estimate is four bytes to the token, and it decides one thing
+
+`agent-prompt` estimates tokens as bytes divided by four, rounded up. There is no tokenizer in the dependency tree, and there will not be one on the request path.
+
+The number is used for exactly one decision: whether a prefix clears a provider's minimum cacheable length, which the literature puts at 1,024 or 4,096 tokens depending on the provider. A four byte token underestimates Latin text and underestimates CJK text by more, and underestimating is the safe direction. A prefix wrongly believed too short sends a request that misses the cache; the opposite mistake records a saving that never happened, and the ledger would then be wrong in the direction that flatters it.
+
+Billing never reads this number. `model.responded` carries the input and output tokens the provider reported.

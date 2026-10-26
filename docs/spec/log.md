@@ -15,3 +15,4 @@
 * **Update**: Recorded that the store keeps the core's canonical bytes verbatim, which is what makes verification a hash rather than a second encoder.
 * **Update**: Recorded that the store owns the decoder, and why an unknown payload is kept as the bytes it arrived as.
 * **Update**: Recorded why error types are hand-written and why the reactor re-folds the whole log on each step.
+* **Update**: Recorded the tool block's framing, why the directive version stays out of the bytes, and what the token estimate is allowed to decide.
