@@ -34,14 +34,14 @@
           ...
         }:
         let
-          rustToolchain = pkgs.rust-bin.stable.latest.default;
-          craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-          src = pkgs.lib.cleanSourceWith { src = ./.; };
+          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
           commonArgs = {
             inherit src;
             strictDeps = true;
           };
-          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+          craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+          rustToolchain = pkgs.rust-bin.stable.latest.default;
+          src = pkgs.lib.cleanSourceWith { src = ./.; };
         in
         {
           _module.args.pkgs = import nixpkgs {
@@ -49,28 +49,11 @@
             overlays = [ rust-overlay.overlays.default ];
           };
 
-          packages.agentd = craneLib.buildPackage (
-            commonArgs
-            // {
-              pname = "agentd";
-              version = "0.0.0";
-              inherit cargoArtifacts;
-              cargoBuildFlags = [
-                "-p"
-                "agentd"
-              ];
-            }
-          );
-          packages.default = config.packages.agentd;
-
           checks = {
             clippy = craneLib.cargoClippy (
               commonArgs
               // {
-                inherit
-                  src
-                  cargoArtifacts
-                  ;
+                inherit cargoArtifacts src;
                 cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
               }
             );
@@ -87,11 +70,11 @@
                     self.nixosModules.default
                     {
                       services.mokmok-agent = {
-                        enable = true;
-                        model = "test-model";
+                        apiKeyFile = "/dev/null";
                         baseUrl = "https://example.test/v1";
                         directive = "be careful";
-                        apiKeyFile = "/dev/null";
+                        enable = true;
+                        model = "test-model";
                         tools = [
                           {
                             name = "shell";
@@ -120,10 +103,7 @@
             test = craneLib.cargoNextest (
               commonArgs
               // {
-                inherit
-                  src
-                  cargoArtifacts
-                  ;
+                inherit cargoArtifacts src;
                 cargoNextestExtraArgs = "--workspace --all-features";
               }
             );
@@ -155,6 +135,22 @@
                 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="clang"
               ''}
             '';
+          };
+
+          packages = {
+            agentd = craneLib.buildPackage (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+                cargoBuildFlags = [
+                  "-p"
+                  "agentd"
+                ];
+                pname = "agentd";
+                version = "0.0.0";
+              }
+            );
+            default = config.packages.agentd;
           };
 
           pre-commit.settings = {

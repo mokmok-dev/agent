@@ -18,14 +18,13 @@ let
   # The daemon reads a TOML file, so the module writes one into the store. The
   # key is never part of it: it is named, and systemd hands the value over.
   settings = {
-    state_dir = "/var/lib/${cfg.stateDirectory}";
-    # TOML keys are snake case; the option names are camel case, so only the two
-    # that already match are inherited.
-    inherit (cfg) model directive;
     base_url = cfg.baseUrl;
+    inherit (cfg) directive;
     directive_version = cfg.directiveVersion;
-    timeout_seconds = cfg.timeoutSeconds;
     max_output_tokens = cfg.maxOutputTokens;
+    inherit (cfg) model;
+    state_dir = "/var/lib/${cfg.stateDirectory}";
+    timeout_seconds = cfg.timeoutSeconds;
     tools = map (tool: {
       inherit (tool) name schema;
     }) cfg.tools;
@@ -41,48 +40,13 @@ let
 in
 {
   options.services.mokmok-agent = {
-    enable = mkEnableOption "the mokmok agent daemon";
-
-    package = mkOption {
-      type = types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.agentd;
-      defaultText = lib.literalExpression "self.packages.\${system}.agentd";
-      description = "The daemon to run.";
-    };
-
-    stateDirectory = mkOption {
-      type = types.str;
-      default = "mokmok-agent";
+    apiKeyEnv = mkOption {
+      type = types.nullOr types.str;
+      default = null;
       description = ''
-        The name systemd gives the state directory, created under `/var/lib`
-        and owned by the service. The store lives in it.
-      '';
-    };
-
-    user = mkOption {
-      type = types.str;
-      default = "mokmok-agent";
-      description = "The user the daemon runs as.";
-    };
-
-    group = mkOption {
-      type = types.str;
-      default = "mokmok-agent";
-      description = "The group the daemon runs as.";
-    };
-
-    model = mkOption {
-      type = types.str;
-      example = "deepseek-chat";
-      description = "The model id sent to the provider.";
-    };
-
-    baseUrl = mkOption {
-      type = types.str;
-      example = "https://api.deepseek.com/v1";
-      description = ''
-        The provider's base URL. The daemon appends `/chat/completions`, so this
-        is the part before it.
+        The name of an environment variable holding the key. Use this with
+        {option}`environmentFile` when the secret already lives in a file that
+        systemd can read.
       '';
     };
 
@@ -96,20 +60,13 @@ in
       '';
     };
 
-    apiKeyEnv = mkOption {
-      type = types.nullOr types.str;
-      default = null;
+    baseUrl = mkOption {
+      type = types.str;
+      example = "https://api.deepseek.com/v1";
       description = ''
-        The name of an environment variable holding the key. Use this with
-        {option}`environmentFile` when the secret already lives in a file that
-        systemd can read.
+        The provider's base URL. The daemon appends `/chat/completions`, so this
+        is the part before it.
       '';
-    };
-
-    environmentFile = mkOption {
-      type = types.nullOr types.path;
-      default = null;
-      description = "A file of environment variables for the service.";
     };
 
     directive = mkOption {
@@ -128,6 +85,59 @@ in
         A label recorded beside each request. It is not part of the prompt, so
         bumping it alone does not cost a cache.
       '';
+    };
+
+    enable = mkEnableOption "the mokmok agent daemon";
+
+    environmentFile = mkOption {
+      type = types.nullOr types.path;
+      default = null;
+      description = "A file of environment variables for the service.";
+    };
+
+    group = mkOption {
+      type = types.str;
+      default = "mokmok-agent";
+      description = "The group the daemon runs as.";
+    };
+
+    maxOutputTokens = mkOption {
+      type = types.ints.positive;
+      default = 4096;
+      description = "The cap on one response.";
+    };
+
+    memoryMax = mkOption {
+      type = types.str;
+      default = "4G";
+      description = "The memory ceiling for the service.";
+    };
+    model = mkOption {
+      type = types.str;
+      example = "deepseek-chat";
+      description = "The model id sent to the provider.";
+    };
+
+    package = mkOption {
+      type = types.package;
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.agentd;
+      defaultText = lib.literalExpression "self.packages.\${system}.agentd";
+      description = "The daemon to run.";
+    };
+
+    stateDirectory = mkOption {
+      type = types.str;
+      default = "mokmok-agent";
+      description = ''
+        The name systemd gives the state directory, created under `/var/lib`
+        and owned by the service. The store lives in it.
+      '';
+    };
+
+    timeoutSeconds = mkOption {
+      type = types.ints.positive;
+      default = 120;
+      description = "The deadline for one model call.";
     };
 
     tools = mkOption {
@@ -149,16 +159,10 @@ in
       description = "The tools in force. They are sent in name order.";
     };
 
-    timeoutSeconds = mkOption {
-      type = types.ints.positive;
-      default = 120;
-      description = "The deadline for one model call.";
-    };
-
-    maxOutputTokens = mkOption {
-      type = types.ints.positive;
-      default = 4096;
-      description = "The cap on one response.";
+    user = mkOption {
+      type = types.str;
+      default = "mokmok-agent";
+      description = "The user the daemon runs as.";
     };
 
     watchdogSec = mkOption {
@@ -170,11 +174,6 @@ in
       '';
     };
 
-    memoryMax = mkOption {
-      type = types.str;
-      default = "4G";
-      description = "The memory ceiling for the service.";
-    };
   };
 
   config = mkIf cfg.enable {
