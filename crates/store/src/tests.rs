@@ -421,3 +421,39 @@ fn a_branch_id_that_is_not_hex_is_refused() {
         other => panic!("unexpected {other:?}"),
     }
 }
+
+#[test]
+fn a_read_only_open_does_not_create_the_database() {
+    let scratch = Scratch::new();
+    let missing = scratch.dir.join("absent.db");
+    match Store::open_read_only(&missing) {
+        Err(StoreError::Open { path, .. }) => assert_eq!(path, missing),
+        other => panic!("unexpected {other:?}"),
+    }
+    assert!(!missing.exists(), "a read-only open must not create a file");
+}
+
+#[test]
+fn a_read_only_open_reads_what_the_writer_left() {
+    let scratch = Scratch::new();
+    let mut writer = Store::open(&scratch.path).expect("opens");
+    chain(&mut writer, branch(1), 2);
+    let reader = Store::open_read_only(&scratch.path).expect("opens read only");
+    assert_eq!(reader.path(), scratch.path);
+    let report = reader.verify().expect("verifies");
+    assert_eq!(report.events, 2);
+    assert_eq!(report.branches, 1);
+}
+
+#[test]
+fn a_read_only_open_refuses_a_write() {
+    let scratch = Scratch::new();
+    let mut writer = Store::open(&scratch.path).expect("opens");
+    chain(&mut writer, branch(1), 1);
+    let mut reader = Store::open_read_only(&scratch.path).expect("opens read only");
+    let tip = reader.load(branch(1)).expect("reads")[0].id();
+    match reader.append(&event(branch(1), 1, Some(tip), "two")) {
+        Err(StoreError::Query(_)) => {},
+        other => panic!("unexpected {other:?}"),
+    }
+}

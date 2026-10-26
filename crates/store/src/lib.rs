@@ -159,6 +159,30 @@ impl Store {
         &self.path
     }
 
+    /// Opens a store that already exists, without writing to it.
+    ///
+    /// A read-only command must not create the database it was pointed at, and
+    /// must not repair one, because either would change what the operator is
+    /// about to inspect.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Open`] when the file does not exist or cannot be
+    /// opened for reading.
+    pub fn open_read_only(path: &Path) -> Result<Self, StoreError> {
+        let connection =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(
+                |source| StoreError::Open {
+                    path: path.to_path_buf(),
+                    source,
+                },
+            )?;
+        Ok(Self {
+            connection,
+            path: path.to_path_buf(),
+        })
+    }
+
     /// Appends one event, refusing anything that would break the chain.
     ///
     /// # Errors
