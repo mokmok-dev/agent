@@ -106,6 +106,7 @@ fn settings() -> Settings {
             name: "shell".to_string(),
             schema: r#"{"argv":"string"}"#.to_string(),
             timeout: std::time::Duration::from_secs(5),
+            env: Vec::new(),
         }],
         max_output_tokens: 64,
     }
@@ -501,6 +502,7 @@ fn reactor_with_tools(
         name: "shell".to_string(),
         schema: r#"{"argv":"string"}"#.to_string(),
         timeout: std::time::Duration::from_secs(5),
+        env: Vec::new(),
     }];
     Reactor::with_model(path, Box::new(provider), with_tools).expect("opens")
 }
@@ -539,6 +541,41 @@ impl agent_model::Provider for Asking {
             }],
         })
     }
+}
+
+#[test]
+fn an_intent_names_the_environment_its_tool_declares() {
+    let scratch = Scratch::new();
+    let mut with_env = settings();
+    let mut tool = marker_tool(&scratch, true);
+    tool.env = vec!["PATH".to_string()];
+    with_env.tools = vec![tool];
+    let mut reactor =
+        Reactor::with_model(&scratch.path, Box::new(Asking), with_env).expect("opens");
+    reactor.start(now()).expect("starts");
+    let mut store = Store::open(&scratch.path).expect("opens");
+    send(&mut store, ROOT_BRANCH, "what time is it");
+    drop(store);
+
+    for _ in 0..12 {
+        let step = reactor.step(now()).expect("steps");
+        if matches!(step, Step::Idle) {
+            break;
+        }
+    }
+
+    let named = events(&scratch)
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ToolIntent { env, .. } => Some(env.clone()),
+            _ => None,
+        })
+        .expect("an intent");
+    assert_eq!(
+        named,
+        vec!["PATH".to_string()],
+        "the log names the environment the tool declared, never its values"
+    );
 }
 
 #[test]
@@ -670,6 +707,7 @@ fn marker_tool_of(
         name: "shell".to_string(),
         schema: r#"{"argv":"string"}"#.to_string(),
         timeout: std::time::Duration::from_secs(5),
+        env: Vec::new(),
     }
 }
 

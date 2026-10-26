@@ -55,8 +55,23 @@ A tool is a directory with a manifest and an executable. The manifest declares w
 | `timeout` | The wall clock bound on one call |
 | `max_output` | The byte bound on what one event may carry |
 | `argv` | The program and its arguments; the model's arguments arrive on standard input |
-| `argv` | How the arguments are turned into a process |
-| `permissions` | The paths, hosts, and environment variables the tool may use, enforced at spawn rather than documented and hoped for |
+| `permissions.env` | The environment variable names the process may see. It sees no others |
+
+# The environment a tool gets
+
+A spawned tool inherits nothing. Its environment is exactly the names its manifest declares, resolved from the daemon's own environment at the moment of spawn. A name the daemon holds but the manifest does not declare is not passed.
+
+Inheritance was what the executor did, and it handed every tool the daemon's whole environment, including the provider key that a systemd credential puts there. A tool runs a program the model asked for, and that program's first line of output goes into the log, which is append-only and copied by fork. Inheriting means any tool can copy a credential into the log by accident, and a model able to call a tool can do it on purpose.
+
+`permissions` is required, with no default, the way `risk` is. What a tool may see is the operator's statement, and a default is this program making it for them. `env = []` is a real answer and means the process runs with an empty environment.
+
+A program named without a path is looked up in the daemon's `PATH`, before the child exists. Which program runs is the manifest's statement about `argv`; what it may see is its statement about `permissions`, and one does not decide the other. A tool that declares no environment still starts.
+
+The daemon checks every declared name when it reads the configuration, before it opens the store, and refuses to start when one is not set. The message names the variable and never its value. A manifest that disagrees with its host is a deployment fault, and it should not wait for the first call to surface.
+
+The intent records the names the call had, never the values. The configuration is not in the log and it changes; a reader a year later needs to know which environment this call was given, and that answer has to be in the event.
+
+This is an allowlist, not a sandbox. A tool that declares a name can still print its value, and the log keeps what it prints. The names are the operator's decision about what a tool may know, not evidence that the tool is trustworthy.
 
 # Risk and approval
 
@@ -73,9 +88,11 @@ Chat surfaces render an approval as a button pair. The TUI renders it as a promp
 
 # Secrets
 
-An intent records environment variable names, never values. The executor resolves names from the secret store at spawn time, and the value never enters an event, a log line, or a transcript.
+No value enters the log. The provider key is named by a variable or a file in the configuration, a tool names the variables it may see, and the value lives in the daemon's environment or in a file the operator controls until the moment the process starts.
 
-A tool that needs a secret declares it in the manifest. A tool that requests a name not in its manifest is refused before spawn.
+An intent records the names, never the values, so a reader can see what a call was given without being able to replay the secret from the log.
+
+A tool that needs a variable its manifest does not declare does not get it, because nothing else is passed to the process at all.
 
 # Output handling
 
@@ -85,10 +102,19 @@ A tool that needs a secret declares it in the manifest. A tool that requests a n
 
 A result carries the exit status as data, not as an error. A failing command is a normal outcome the model reads.
 
-# Sandboxing by stage
+# What this build enforces
 
-The first release enforces resource limits, an environment allowlist, a working directory restriction, and a timeout. It runs tools as child processes of `agentd`.
+Tools run as child processes of `agentd`, and four bounds are held by the program.
 
-A later PR moves tool execution into a transient systemd scope with its own cgroup, filesystem namespace, and network namespace. The manifest fields are designed for that move, so the later change adds enforcement without changing the contract.
+| Bound | How |
+|---|---|
+| Environment | The process gets the names its manifest declares and nothing else |
+| Working directory | The store's directory, so a tool that writes files writes them where the operator already looks |
+| Time | The manifest's timeout; the process is killed and the log records that the effect may have happened |
+| Output | The manifest's byte bound; longer output keeps its ends and the count of what was dropped |
 
-Do not claim the first release is sandboxed against hostile code. It is not. It is bounded, and the tools are first-party code the operator installed.
+Not enforced, and not to be described as enforced: the paths and hosts a manifest may declare for the approval policy, resource limits on memory and file size, and any filesystem or network namespace.
+
+A later PR moves tool execution into a transient systemd scope with its own cgroup, filesystem namespace, and network namespace, and the paths and hosts arrive as fields then. Enforcement comes with the move.
+
+Do not claim this build is sandboxed against hostile code. It is not. It is bounded, and the tools are first-party code the operator installed.

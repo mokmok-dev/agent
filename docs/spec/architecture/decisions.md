@@ -62,6 +62,7 @@ Each entry names a decision that is expensive to reverse, the alternative that l
 | 34 | Retryable means this process will retry it | Recording the provider's opinion of the error |
 | 35 | The store is locked by the process that writes it | Trusting the deployment to run one daemon |
 | 36 | A failure records what it said, not what was asked | A class alone, or the provider's body |
+| 37 | A tool's environment is what its manifest declares | Inheritance from the daemon's environment |
 
 # 1. The log is the only truth
 
@@ -433,3 +434,17 @@ The alternative was to keep the provider's error body for diagnosis. It is the s
 The field is optional so the log stays a log: the writer omits it when there is nothing to say, which keeps the bytes of every earlier event identical and the hash chain intact, and the decoder reads a missing key as nothing said.
 
 An operator sees it in `status` as `last failure: model: transport (Connection refused (os error 111))`. The class is what a loop branches on; the parenthetical is what a person acts on.
+
+# 37. A tool's environment is what its manifest declares
+
+A spawned tool gets exactly the variable names its manifest lists, resolved from the daemon's environment at spawn. Nothing else is passed, and `permissions` is a required block with no default.
+
+The executor used to inherit. Every tool saw the daemon's whole environment, which on a NixOS host includes the provider key the module hands over as a systemd credential. The tool's output goes into the log, and the log is append-only and copied by fork, so the shortest path from a credential to permanent storage was one tool call that printed its own environment.
+
+The alternative is to trust the tools, which is what the doc did before this change: `permissions` was described as enforced when nothing read it. A declaration that nothing reads is worse than no declaration, because the reader of the configuration believes a boundary exists.
+
+The cost is that a tool now declares what it needs, and a tool configured before this change stops working until it does. That break is the point: the previous behaviour was the leak. The daemon also refuses to start when a declared name is missing, which turns a typo into a startup error that names the variable rather than a tool that fails on its first call.
+
+`env = []` stays legal and is a real answer. A tool that reads nothing from the environment is the shape most tools should have.
+
+This is an allowlist, not a sandbox. The values are still readable by a tool that declares their names, and the log keeps what it prints. Bounding the process itself belongs to the scope move, not to this field.

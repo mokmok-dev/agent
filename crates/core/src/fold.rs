@@ -900,6 +900,7 @@ mod tests {
             },
             key: "k".to_string(),
             tool: "clock".to_string(),
+            env: alloc::vec::Vec::new(),
         });
         state.apply(&intent).expect("folds");
         // A second writer that filed the same step would arrive as its own event,
@@ -912,6 +913,7 @@ mod tests {
             },
             key: "k2".to_string(),
             tool: "clock".to_string(),
+            env: alloc::vec::Vec::new(),
         });
         assert_eq!(
             state.apply(&again),
@@ -997,6 +999,7 @@ mod tests {
             call: call(),
             key: "k".to_string(),
             tool: "shell".to_string(),
+            env: alloc::vec::Vec::new(),
         });
         state.apply(&intent).expect("folds");
         assert_eq!(
@@ -1032,6 +1035,7 @@ mod tests {
             call: call(),
             key: "k".to_string(),
             tool: "shell".to_string(),
+            env: alloc::vec::Vec::new(),
         });
         state.apply(&intent).expect("folds");
         let failed = chain.push(EventKind::ToolFailed {
@@ -1239,6 +1243,7 @@ mod tests {
                 call: CallId { turn: turn(), step },
                 key: alloc::format!("k{step}"),
                 tool: "clock".to_string(),
+                env: alloc::vec::Vec::new(),
             });
             state.apply(&intent).expect("folds");
         }
@@ -1289,6 +1294,7 @@ mod tests {
             },
             key: "k".to_string(),
             tool: "clock".to_string(),
+            env: alloc::vec::Vec::new(),
         });
         state.apply(&intent).expect("folds");
         let archived = chain.push(EventKind::BranchArchived { reason: None });
@@ -1343,6 +1349,7 @@ mod tests {
             },
             key: "k".to_string(),
             tool: "clock".to_string(),
+            env: alloc::vec::Vec::new(),
         });
         state.apply(&intent).expect("folds");
         let asked = chain.push(EventKind::ApprovalRequested {
@@ -1510,6 +1517,7 @@ mod tests {
             },
             key: "k".to_string(),
             tool: "clock".to_string(),
+            env: alloc::vec::Vec::new(),
         });
         state.apply(&intent).expect("folds");
 

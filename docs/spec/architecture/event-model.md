@@ -85,7 +85,7 @@ Type strings are fixed strings, not derived from Rust names, and a table in `age
 | `dev.mokmok.agent.model.failed` | branch | Turn id, error class, retryable flag, attempt, partial flag, and the failure's own words. |
 | `dev.mokmok.agent.schedule.armed` | branch | Turn id, attempt, the instant the next attempt is owed. |
 | `dev.mokmok.agent.message.appended` | branch | Role, content, tool call ids, token count. |
-| `dev.mokmok.agent.tool.intent` | branch | Call id, tool name, arguments, idempotency key. |
+| `dev.mokmok.agent.tool.intent` | branch | Call id, tool name, arguments, idempotency key, and the environment names the call was given. |
 | `dev.mokmok.agent.tool.result` | branch | Call id, exit status, stdout ref, stderr ref, duration. |
 | `dev.mokmok.agent.tool.failed` | branch | Call id, error class, whether the effect may have happened. |
 | `dev.mokmok.agent.approval.requested` | branch | Approval id, action summary, risk class, expiry. |
