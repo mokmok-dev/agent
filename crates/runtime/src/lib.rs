@@ -7,10 +7,11 @@
 pub mod cli;
 pub mod clock;
 pub mod config;
+pub mod exec;
 pub mod notify;
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use agent_core::decide::decide;
 pub use agent_core::decide::{Intent, Step};
@@ -28,13 +29,14 @@ pub fn wait_for(
 
 /// The longest the loop will sleep for a single retry.
 pub const MAX_WAIT: core::time::Duration = core::time::Duration::from_secs(5);
-use agent_core::event::{Event, EventKind, FinishReason, Role, ToolRequest};
+use agent_core::event::{ErrorClass, Event, EventKind, FinishReason, Role, ToolRequest};
 use agent_core::fold::{FoldError, State};
-use agent_core::ids::{Actor, BranchId, EventId, TurnId};
+use agent_core::ids::{Actor, BranchId, CallId, EventId, TurnId};
 use agent_core::time::{TimeError, Timestamp};
 use agent_model::{Provider, Purpose, Request, RequestRecord, backoff};
 use agent_prompt::{Directive, ToolSchema, render};
 use agent_store::{Store, StoreError};
+use exec::Outcome;
 
 /// The branch every store starts with. Fixed rather than random, so a fresh
 /// store is reproducible and a test needs no entropy source.
@@ -50,14 +52,31 @@ pub enum Work {
     Nothing,
 }
 
+/// One tool the agent may run.
+///
+/// The arguments the model writes arrive on the tool's standard input as the
+/// bytes it wrote, so a tool reads them the way it likes without this build
+/// knowing its format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tool {
+    pub name: String,
+    pub schema: String,
+    pub argv: Vec<String>,
+    /// Whether running it twice is the same as running it once.
+    pub idempotent: bool,
+    pub timeout: std::time::Duration,
+    /// The most bytes of its output one event may carry.
+    pub max_output: usize,
+}
+
 /// What the reactor needs in order to run a turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub model: String,
     pub directive_version: String,
     pub directive: String,
-    /// Tool names and their schemas, in any order; the renderer sorts them.
-    pub tools: Vec<(String, String)>,
+    /// Tools in any order; the renderer sorts them by name.
+    pub tools: Vec<Tool>,
     pub max_output_tokens: u64,
 }
 
@@ -85,6 +104,9 @@ pub enum ReactorError {
     NoModel,
     /// An instant could not be computed.
     Time(TimeError),
+    /// The call the log asks to run is not in the folded state, which means the
+    /// state and the log disagree.
+    NoSuchCall(CallId),
 }
 
 impl fmt::Display for ReactorError {
@@ -97,6 +119,7 @@ impl fmt::Display for ReactorError {
             Self::Fold(error) => write!(formatter, "fold: {error}"),
             Self::NoModel => write!(formatter, "a turn is ready but no model is configured"),
             Self::Time(error) => write!(formatter, "time: {error}"),
+            Self::NoSuchCall(call) => write!(formatter, "no call {call} is waiting"),
         }
     }
 }
@@ -126,6 +149,9 @@ pub struct Reactor {
     store: Store,
     provider: Option<Box<dyn Provider>>,
     settings: Option<Settings>,
+    /// Where a tool's process starts. The store's own directory, so a tool that
+    /// writes files writes them somewhere the operator already knows.
+    working_dir: PathBuf,
 }
 
 impl Reactor {
@@ -140,6 +166,9 @@ impl Reactor {
             store: Store::open(path)?,
             provider: None,
             settings: None,
+            working_dir: path
+                .parent()
+                .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
         })
     }
 
@@ -251,9 +280,91 @@ impl Reactor {
             Step::RequestModel { branch, turn } => {
                 self.run_turn(&state, *branch, *turn, now)?;
             },
+            Step::Execute { branch, call } => {
+                self.run_tool(&state, *branch, *call, now)?;
+            },
             Step::Wait { .. } | Step::Idle => {},
         }
         Ok(step)
+    }
+
+    /// Runs one tool call and records what it did.
+    ///
+    /// A tool that is not configured, or whose process will not start, is a
+    /// failure with a class rather than an error out of the loop: the log must
+    /// say what was attempted even when nothing could be attempted.
+    fn run_tool(
+        &mut self,
+        state: &State,
+        branch: BranchId,
+        call: CallId,
+        now: Timestamp,
+    ) -> Result<(), ReactorError> {
+        let name = state
+            .branch(branch)
+            .and_then(|facts| facts.pending.get(&call).cloned())
+            .ok_or(ReactorError::NoSuchCall(call))?;
+        let args = state
+            .branch(branch)
+            .and_then(|facts| facts.asked.get(&call.turn))
+            .and_then(|asked| asked.requests.get(call.step as usize))
+            .map(|request| request.args.clone())
+            .ok_or(ReactorError::NoSuchCall(call))?;
+        let Some(tool) = self
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.tools.iter().find(|tool| tool.name == name))
+        else {
+            return self
+                .append(
+                    branch,
+                    state,
+                    now,
+                    None,
+                    None,
+                    Some(call.turn),
+                    EventKind::ToolFailed {
+                        call,
+                        class: ErrorClass::Unknown,
+                        may_have_happened: false,
+                    },
+                )
+                .map(|_| ());
+        };
+        match exec::run(tool, &args, &self.working_dir) {
+            Outcome::Ran(ran) => self
+                .append(
+                    branch,
+                    state,
+                    now,
+                    None,
+                    None,
+                    Some(call.turn),
+                    EventKind::ToolResult {
+                        call,
+                        duration_ms: ran.duration_ms,
+                        output: ran.output,
+                        status: ran.status,
+                        truncated: ran.truncated,
+                    },
+                )
+                .map(|_| ()),
+            Outcome::Failed(class, may_have_happened) => self
+                .append(
+                    branch,
+                    state,
+                    now,
+                    None,
+                    None,
+                    Some(call.turn),
+                    EventKind::ToolFailed {
+                        call,
+                        class,
+                        may_have_happened,
+                    },
+                )
+                .map(|_| ()),
+        }
     }
 
     /// Renders one turn, records the request, and records what came back.
@@ -285,9 +396,9 @@ impl Reactor {
         let tools: Vec<ToolSchema<'_>> = settings
             .tools
             .iter()
-            .map(|(name, schema)| ToolSchema {
-                name: name.as_str(),
-                schema: schema.as_str(),
+            .map(|tool| ToolSchema {
+                name: tool.name.as_str(),
+                schema: tool.schema.as_str(),
             })
             .collect();
         let directive = Directive {

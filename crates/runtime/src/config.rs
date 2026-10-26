@@ -11,13 +11,18 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::Settings;
+use super::{Settings, Tool};
 
 /// The default deadline for one model call.
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 
-/// The default cap on a response.
-pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 4096;
+/// A tool that does not say otherwise runs for this long.
+const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
+
+/// A tool that does not say otherwise may write this much into one event.
+const DEFAULT_TOOL_MAX_OUTPUT: usize = 64 * 1024;
+
+const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 4096;
 
 /// Why the configuration could not be used.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +45,8 @@ pub enum ConfigError {
     Zero(&'static str),
     /// Two tools share a name, so the tool block would be ambiguous.
     DuplicateTool(String),
+    /// A tool declared a class that is neither of the two this build knows.
+    ToolClass(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -67,6 +74,10 @@ impl std::fmt::Display for ConfigError {
             Self::KeyEmpty => write!(formatter, "the API key is empty"),
             Self::Zero(setting) => write!(formatter, "{setting} must be greater than zero"),
             Self::DuplicateTool(name) => write!(formatter, "two tools are named {name}"),
+            Self::ToolClass(class) => write!(
+                formatter,
+                "a tool class is idempotent or non-idempotent, not {class}"
+            ),
         }
     }
 }
@@ -93,6 +104,14 @@ struct Raw {
 struct RawTool {
     name: String,
     schema: String,
+    #[serde(default)]
+    argv: Vec<String>,
+    #[serde(default)]
+    class: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    max_output_bytes: Option<usize>,
 }
 
 /// A configuration that has been checked.
@@ -158,20 +177,39 @@ pub fn parse(
     }
 
     let mut seen = BTreeSet::new();
-    for tool in &raw.tools {
+    let mut tools = Vec::with_capacity(raw.tools.len());
+    for tool in raw.tools {
         if tool.name.is_empty() {
             return Err(ConfigError::Missing("tools[].name"));
         }
         if !seen.insert(tool.name.clone()) {
-            return Err(ConfigError::DuplicateTool(tool.name.clone()));
+            return Err(ConfigError::DuplicateTool(tool.name));
         }
+        if tool.argv.is_empty() {
+            return Err(ConfigError::Missing("tools[].argv"));
+        }
+        let idempotent = match tool.class.as_deref() {
+            None | Some("idempotent") => true,
+            Some("non-idempotent") => false,
+            Some(other) => return Err(ConfigError::ToolClass(other.to_string())),
+        };
+        let timeout_ms = tool.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS);
+        if timeout_ms == 0 {
+            return Err(ConfigError::Zero("tools[].timeout_ms"));
+        }
+        let max_output = tool.max_output_bytes.unwrap_or(DEFAULT_TOOL_MAX_OUTPUT);
+        if max_output == 0 {
+            return Err(ConfigError::Zero("tools[].max_output_bytes"));
+        }
+        tools.push(Tool {
+            argv: tool.argv,
+            idempotent,
+            max_output,
+            name: tool.name,
+            schema: tool.schema,
+            timeout: Duration::from_millis(timeout_ms),
+        });
     }
-
-    let tools = raw
-        .tools
-        .into_iter()
-        .map(|tool| (tool.name, tool.schema))
-        .collect();
 
     Ok(Config {
         state_dir: PathBuf::from(state_dir),
@@ -240,6 +278,7 @@ timeout_seconds = 30
 max_output_tokens = 512
 
 [[tools]]
+argv = ["/bin/cat"]
 name = "shell"
 schema = '{"argv":"string"}'
 "#;
@@ -374,6 +413,25 @@ schema = '{"argv":"string"}'
     }
 
     #[test]
+    fn a_tool_that_says_nothing_about_its_output_gets_sixty_four_kilobytes() {
+        let config = parse(MINIMAL, &no_env).expect("parses");
+        assert_eq!(config.settings.tools[0].max_output, 65_536);
+        assert_eq!(config.settings.tools[0].timeout.as_millis(), 30_000);
+        assert!(config.settings.tools[0].idempotent, "the safe default");
+    }
+
+    #[test]
+    fn a_tool_class_this_build_does_not_know_is_refused() {
+        let text = format!(
+            "{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nclass = \"maybe\"\nname = \"other\"\nschema = '{{}}'\n"
+        );
+        assert_eq!(
+            parse(&text, &no_env),
+            Err(ConfigError::ToolClass("maybe".to_string()))
+        );
+    }
+
+    #[test]
     fn a_zero_timeout_is_refused() {
         let text = MINIMAL.replace("timeout_seconds = 30", "timeout_seconds = 0");
         assert_eq!(
@@ -413,7 +471,9 @@ schema = '{"argv":"string"}'
 
     #[test]
     fn two_tools_with_one_name_are_refused() {
-        let text = format!("{MINIMAL}\n[[tools]]\nname = \"shell\"\nschema = '{{}}'\n");
+        let text = format!(
+            "{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"shell\"\nschema = '{{}}'\n"
+        );
         assert_eq!(
             parse(&text, &no_env),
             Err(ConfigError::DuplicateTool("shell".to_string()))
@@ -422,7 +482,8 @@ schema = '{"argv":"string"}'
 
     #[test]
     fn a_tool_with_no_name_is_refused() {
-        let text = format!("{MINIMAL}\n[[tools]]\nname = \"\"\nschema = '{{}}'\n");
+        let text =
+            format!("{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"\"\nschema = '{{}}'\n");
         assert_eq!(
             parse(&text, &no_env),
             Err(ConfigError::Missing("tools[].name"))

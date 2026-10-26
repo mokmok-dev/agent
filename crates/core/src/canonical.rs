@@ -293,11 +293,13 @@ fn write_data(
         EventKind::ToolResult {
             call,
             duration_ms,
+            output,
             status,
             truncated,
         } => {
             object.string("call", &alloc::format!("{call}"));
             object.uint("duration_ms", *duration_ms);
+            object.string("output", output);
             object.int("status", i64::from(*status));
             object.boolean("truncated", *truncated);
         },
@@ -502,6 +504,7 @@ mod tests {
     #[test]
     fn a_zero_number_is_written_without_a_sign() {
         let encoded = canonical(&event(EventKind::ToolResult {
+            output: String::new(),
             call: CallId {
                 turn: turn(),
                 step: 0,
@@ -521,6 +524,7 @@ mod tests {
             step: 3,
         };
         let encoded = canonical(&event(EventKind::ToolResult {
+            output: String::new(),
             call,
             duration_ms: 0,
             status: -9,

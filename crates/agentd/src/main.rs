@@ -53,7 +53,7 @@ fn drive(
     loop {
         let now = clock::now().map_err(|error| error.to_string())?;
         match reactor.step(now).map_err(|error| error.to_string())? {
-            Step::Append(_) | Step::RequestModel { .. } => {},
+            Step::Append(_) | Step::Execute { .. } | Step::RequestModel { .. } => {},
             Step::Idle => {
                 if once {
                     return Ok(());

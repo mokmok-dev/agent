@@ -31,6 +31,9 @@ pub enum Step {
     /// Render this turn's prompt and send it. The events an attempt writes are
     /// the runtime's to append, because only it hears what the provider said.
     RequestModel { branch: BranchId, turn: TurnId },
+    /// Run the tool this call asked for. Only the runtime can do it: the
+    /// decision is which call, not how a process is made.
+    Execute { branch: BranchId, call: CallId },
     /// Do nothing until this instant, because a retry is owed.
     Wait { until: Timestamp },
     /// There is nothing to do.
@@ -77,6 +80,22 @@ pub fn decide(
     state: &State,
     now: Timestamp,
 ) -> Step {
+    if let Some(until) = earliest_retry(state, now) {
+        return Step::Wait { until };
+    }
+    owed_reply(state)
+        .or_else(|| next_intent(state))
+        .or_else(|| next_run(state))
+        .or_else(|| next_request(state))
+        .or_else(|| next_turn(state))
+        .unwrap_or(Step::Idle)
+}
+
+/// The instant the loop should sleep until, when a retry is waiting on the clock.
+fn earliest_retry(
+    state: &State,
+    now: Timestamp,
+) -> Option<Timestamp> {
     let mut earliest: Option<Timestamp> = None;
     for (_, facts) in state.branches() {
         if facts.archived {
@@ -89,34 +108,32 @@ pub fn decide(
             earliest = Some(earliest.map_or(due, |best| best.min(due)));
         }
     }
-    if let Some(until) = earliest {
-        return Step::Wait { until };
-    }
+    earliest
+}
 
-    // An answer the transcript does not hold yet is written first: it is the
-    // cheapest step, and a later turn cannot see the conversation until it lands.
-    for (branch, facts) in state.branches() {
-        if facts.archived {
-            continue;
-        }
-        let Some(unfiled) = &facts.unfiled else {
-            continue;
-        };
-        return Step::Append(Intent {
-            branch: *branch,
-            causation: None,
-            correlation: Some(unfiled.turn),
-            kind: EventKind::MessageAppended {
-                content: unfiled.content.clone(),
-                role: crate::event::Role::Assistant,
-                tokens: unfiled.tokens,
-            },
-        });
-    }
+/// An answer the transcript does not hold yet. Written first: it is the cheapest
+/// step, and a later turn cannot see the conversation until it lands.
+fn owed_reply(state: &State) -> Option<Step> {
+    let (branch, unfiled) = state
+        .branches()
+        .filter(|(_, facts)| !facts.archived)
+        .find_map(|(branch, facts)| facts.unfiled.as_ref().map(|unfiled| (branch, unfiled)))?;
+    Some(Step::Append(Intent {
+        branch: *branch,
+        causation: None,
+        correlation: Some(unfiled.turn),
+        kind: EventKind::MessageAppended {
+            content: unfiled.content.clone(),
+            role: crate::event::Role::Assistant,
+            tokens: unfiled.tokens,
+        },
+    }))
+}
 
-    // Then the tools the model asked for, one event per call. The call id is the
-    // turn and the step, so a re-fold of the same turn derives the same id and the
-    // same idempotency key, and a step already written is not written again.
+/// The tools the model asked for, one event per call. The call id is the turn and
+/// the step, so a re-fold derives the same id and the same key, and a step already
+/// written is not written again.
+fn next_intent(state: &State) -> Option<Step> {
     for (branch, facts) in state.branches() {
         if facts.archived {
             continue;
@@ -129,7 +146,7 @@ pub fn decide(
                 turn: *turn,
                 step: asked.filed,
             };
-            return Step::Append(Intent {
+            return Some(Step::Append(Intent {
                 branch: *branch,
                 causation: None,
                 correlation: Some(*turn),
@@ -139,45 +156,65 @@ pub fn decide(
                     key: key_of(&request.tool, &request.args, call),
                     tool: request.tool.clone(),
                 },
-            });
+            }));
         }
     }
+    None
+}
 
-    for (branch, facts) in state.branches() {
-        if facts.archived {
-            continue;
-        }
-        if let Some(pending) = &facts.pending_model {
-            return Step::RequestModel {
-                branch: *branch,
-                turn: pending.turn,
-            };
-        }
-    }
+/// The calls whose intent has no result. One at a time, in the order the call ids
+/// give, so a crash resumes where it stopped.
+fn next_run(state: &State) -> Option<Step> {
+    let (branch, facts) = state
+        .branches()
+        .filter(|(_, facts)| !facts.archived)
+        .find(|(_, facts)| !facts.pending.is_empty())?;
+    let call = *facts.pending.keys().next()?;
+    Some(Step::Execute {
+        branch: *branch,
+        call,
+    })
+}
 
-    for (branch, facts) in state.branches() {
-        if facts.archived {
-            continue;
-        }
-        let Some(command) = &facts.pending_command else {
-            continue;
-        };
-        if command.name != SEND {
-            continue;
-        }
-        let turn = turn_for(command.event);
-        return Step::Append(Intent {
-            branch: *branch,
-            causation: Some(command.event),
-            correlation: Some(turn),
-            kind: EventKind::TurnRequested {
-                input: command.text.clone().unwrap_or_default(),
-                turn,
-            },
-        });
-    }
+/// The turn that is open and has not been answered.
+fn next_request(state: &State) -> Option<Step> {
+    let (branch, pending) = state
+        .branches()
+        .filter(|(_, facts)| !facts.archived)
+        .find_map(|(branch, facts)| {
+            facts
+                .pending_model
+                .as_ref()
+                .map(|pending| (branch, pending))
+        })?;
+    Some(Step::RequestModel {
+        branch: *branch,
+        turn: pending.turn,
+    })
+}
 
-    Step::Idle
+/// A command that has arrived and has not been turned into a turn.
+fn next_turn(state: &State) -> Option<Step> {
+    let (branch, command) = state
+        .branches()
+        .filter(|(_, facts)| !facts.archived)
+        .filter_map(|(branch, facts)| {
+            facts
+                .pending_command
+                .as_ref()
+                .map(|command| (branch, command))
+        })
+        .find(|(_, command)| command.name == SEND)?;
+    let turn = turn_for(command.event);
+    Some(Step::Append(Intent {
+        branch: *branch,
+        causation: Some(command.event),
+        correlation: Some(turn),
+        kind: EventKind::TurnRequested {
+            input: command.text.clone().unwrap_or_default(),
+            turn,
+        },
+    }))
 }
 
 #[cfg(test)]
@@ -505,10 +542,16 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_whose_tools_are_all_filed_waits() {
+    fn a_turn_whose_tools_are_all_filed_asks_for_the_first_run() {
         let mut state = State::default();
-        let _ = two_calls(&mut state, 2);
-        assert_eq!(decide(&state, now()), Step::Idle);
+        let turn = two_calls(&mut state, 2);
+        assert_eq!(
+            decide(&state, now()),
+            Step::Execute {
+                branch: crate::ids::BranchId::from_bytes([1; 8]),
+                call: CallId { turn, step: 0 },
+            }
+        );
     }
 
     #[test]

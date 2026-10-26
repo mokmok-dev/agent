@@ -7,7 +7,7 @@ use agent_core::time::Timestamp;
 use agent_model::{Completion, Delta, Profile, Provider, ProviderError, Usage};
 use agent_store::Store;
 
-use super::{ROOT_BRANCH, Reactor, Settings, Step, Work, draw_of};
+use super::{ROOT_BRANCH, Reactor, Settings, Step, Tool, Work, draw_of};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -89,7 +89,14 @@ fn settings() -> Settings {
         model: "test-model".to_string(),
         directive_version: "v1".to_string(),
         directive: "be careful".to_string(),
-        tools: vec![("shell".to_string(), r#"{"argv":"string"}"#.to_string())],
+        tools: vec![Tool {
+            argv: vec!["cat".to_string()],
+            idempotent: true,
+            max_output: 4096,
+            name: "shell".to_string(),
+            schema: r#"{"argv":"string"}"#.to_string(),
+            timeout: std::time::Duration::from_secs(5),
+        }],
         max_output_tokens: 64,
     }
 }
@@ -373,5 +380,128 @@ fn a_wait_is_capped_so_a_clock_jump_cannot_park_the_daemon() {
         super::wait_for(now(), later(600)),
         Duration::from_secs(5),
         "an hour away still sleeps at most the cap"
+    );
+}
+
+/// A reactor whose settings name one tool, `cat`, and nothing else.
+fn reactor_with_tools(
+    path: &std::path::Path,
+    provider: impl Provider + 'static,
+) -> Reactor {
+    let mut with_tools = settings();
+    with_tools.tools = vec![Tool {
+        argv: vec!["cat".to_string()],
+        idempotent: true,
+        max_output: 4096,
+        name: "shell".to_string(),
+        schema: r#"{"argv":"string"}"#.to_string(),
+        timeout: std::time::Duration::from_secs(5),
+    }];
+    Reactor::with_model(path, Box::new(provider), with_tools).expect("opens")
+}
+
+/// A provider that answers by asking for the tool named `shell`.
+struct Asking;
+
+impl agent_model::Provider for Asking {
+    fn profile(&self) -> Profile {
+        Profile {
+            id: "asking".to_string(),
+            context_window: 8192,
+            caches_prefixes: true,
+            cache_ttl: None,
+            reports_cached_tokens: true,
+        }
+    }
+
+    fn call(
+        &mut self,
+        _request: &agent_model::Request,
+        _delta: &mut dyn FnMut(agent_model::Delta<'_>),
+    ) -> Result<agent_model::Completion, agent_model::ProviderError> {
+        Ok(agent_model::Completion {
+            usage: agent_model::Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cached_tokens: None,
+                estimated: false,
+            },
+            finish: Some(agent_core::event::FinishReason::ToolCalls),
+            calls: vec![agent_model::openai::Call {
+                id: "c1".to_string(),
+                name: "shell".to_string(),
+                arguments: r#"{"cmd":"date"}"#.to_string(),
+            }],
+        })
+    }
+}
+
+#[test]
+fn a_tool_call_is_run_and_what_it_wrote_is_recorded() {
+    let scratch = Scratch::new();
+    let mut reactor = Reactor::open(&scratch.path).expect("opens");
+    reactor.start(now()).expect("starts");
+    let mut store = Store::open(&scratch.path).expect("opens");
+    send(&mut store, ROOT_BRANCH, "what time is it");
+    drop(store);
+
+    let mut reactor = reactor_with_tools(&scratch.path, Asking);
+    reactor.start(now()).expect("starts");
+    // Drive the loop until it has nothing left to do.
+    for _ in 0..12 {
+        let step = reactor.step(now()).expect("steps");
+        if matches!(step, Step::Idle) {
+            break;
+        }
+    }
+
+    let written = events(&scratch);
+    let kinds: Vec<&str> = written.iter().map(|event| event.kind.type_name()).collect();
+    assert!(kinds.contains(&"dev.mokmok.agent.tool.result"), "{kinds:?}");
+    let result = written
+        .iter()
+        .find(|event| matches!(event.kind, EventKind::ToolResult { .. }))
+        .expect("a result");
+    match &result.kind {
+        EventKind::ToolResult {
+            output,
+            status,
+            truncated,
+            ..
+        } => {
+            assert_eq!(*status, 0);
+            assert!(!truncated);
+            assert_eq!(output.trim(), r#"{"cmd":"date"}"#);
+        },
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn a_tool_that_is_not_configured_is_a_failure_rather_than_a_crash() {
+    let scratch = Scratch::new();
+    let mut reactor = Reactor::open(&scratch.path).expect("opens");
+    reactor.start(now()).expect("starts");
+    let mut store = Store::open(&scratch.path).expect("opens");
+    send(&mut store, ROOT_BRANCH, "run something else");
+    drop(store);
+
+    let mut without_tools = settings();
+    without_tools.tools.clear();
+    let mut reactor =
+        Reactor::with_model(&scratch.path, Box::new(Asking), without_tools).expect("opens");
+    reactor.start(now()).expect("starts");
+    for _ in 0..12 {
+        let step = reactor.step(now()).expect("steps");
+        if matches!(step, Step::Idle) {
+            break;
+        }
+    }
+    let written = events(&scratch);
+    assert!(
+        written
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ToolFailed { .. })),
+        "a missing tool is a failure"
     );
 }

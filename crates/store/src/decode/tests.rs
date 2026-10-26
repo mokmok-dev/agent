@@ -105,6 +105,7 @@ fn kinds() -> Vec<EventKind> {
             tool: "shell".to_string(),
         },
         EventKind::ToolResult {
+            output: String::new(),
             call,
             duration_ms: 12,
             status: -9,
@@ -271,10 +272,10 @@ fn an_unknown_role_is_refused() {
 #[test]
 fn the_unknown_finish_reason_round_trips() {
     let original = event(EventKind::ModelResponded {
+        output: String::new(),
         calls: Vec::new(),
         finish: FinishReason::Unknown,
         input_tokens: 1,
-        output: "x".to_string(),
         output_tokens: 1,
         request: "r".to_string(),
         turn: turn(),
@@ -286,10 +287,10 @@ fn the_unknown_finish_reason_round_trips() {
 #[test]
 fn an_unknown_finish_reason_is_refused() {
     let body = agent_core::canonical::canonical(&event(EventKind::ModelResponded {
+        output: String::new(),
         calls: Vec::new(),
         finish: FinishReason::Stop,
         input_tokens: 1,
-        output: "x".to_string(),
         output_tokens: 1,
         request: "r".to_string(),
         turn: turn(),
@@ -348,6 +349,7 @@ fn a_status_out_of_range_is_refused() {
             step: 0,
         },
         duration_ms: 0,
+        output: String::new(),
         status: 0,
         truncated: false,
     }))
