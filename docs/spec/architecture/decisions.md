@@ -43,6 +43,14 @@ Each entry names a decision that is expensive to reverse, the alternative that l
 | 15 | Fork appends a new root with a parent pointer | Rewriting or copying history |
 | 16 | Snapshots, so replay does not grow with history | Fold from genesis on every start |
 | 17 | `agent-core` is `no_std` with `alloc`, and serialization lives at the edge | A `std` core that parses JSON |
+| 18 | Errors are written by hand | A derive, as `thiserror` would |
+| 19 | The reactor re-folds the whole log on every step | An incremental position cache |
+| 20 | The token estimate is four bytes to the token | A tokenizer on the request path |
+| 21 | `no_std` marks where the temptation is, not where the code is pure | `no_std` across the workspace, or nowhere |
+| 22 | The HTTP client is `ureq`, chosen on a measurement | `reqwest`, or `rustls` directly |
+| 23 | A turn's input joins the prompt without becoming a message | Appending a `message.appended` for it |
+| 24 | Configuration is one TOML file, checked before anything opens | YAML, which the spec bundle already reads |
+| 25 | `agentctl` parses argv with `clap`, and `agentd` keeps its own parser | A table-driven parser in both, or `usage-rs` |
 
 # 1. The log is the only truth
 
@@ -271,3 +279,23 @@ Every setting is checked before the store is opened, including the one that need
 The key is named, never stored. An environment variable or a file, exactly one of the two. The file case exists for systemd's credential directory, where the supervisor writes the secret somewhere only the service can read. The daemon reads it at startup and writes it nowhere, not to a log and not to an event.
 
 TOML, not YAML, although this repository already reads YAML for the spec bundle. YAML's implicit typing turns an unquoted `on` into a boolean and `1.10` into a float, and a configuration file that silently changes meaning is the opposite of what a startup check is for. The cost is a parser in the daemon's tree: fifteen crates including `serde`, measured.
+
+# 25. `agentctl` parses argv with `clap`, and `agentd` keeps its own parser
+
+The two binaries face different parses. `agentd` takes a configuration file or a bare state directory and one further flag. `agentctl` takes nineteen leaf commands across two levels of nesting, a global `--json`, and a `fork` that must name exactly one of `--at`, `--rewind`, or `--turn`. One parser is worth owning and the other is not, so the answer is not one framework for the workspace.
+
+`agentd` keeps the parser in `crates/runtime/src/cli.rs`, which is eighty-eight lines of code with ten tests and sits inside the mutation gate. A framework there would add a dependency to a process that [CLI commands](../interfaces/cli-commands.md) gives two flags, and buy nothing.
+
+`agentctl` uses `clap` with the default features off, keeping `std`, `help`, `usage`, `error-context`, and `derive`. That is ten crates on the normal edges, measured with `cargo tree`, against a workspace tree of fifty-eight. Clean dev builds with the compiler cache off cost 1.9 s for the dependency and 4.3 s for `usage-rs`, three runs each on this machine, and both are paid once when someone builds from scratch.
+
+The alternative that lost for `agentctl` is a hand-written table-driven parser. A table of nineteen commands and their flags is not difficult to write. The cost is that every branch of the parser lands on the logic surface, where the gate requires a test that kills each mutant, and those branches are exactly the ones a first draft gets wrong. `--flag=value`, `--` as a terminator, an option given twice, and a group where exactly one member may be present. That is decision 22's shape again, code that looks right and fails once a month, except that here the failure is an operator command that silently parsed into a different command.
+
+`usage-rs` lost for a different reason. Its distinguishing feature is a KDL spec that generates documentation, completions, and manpages, and this repository already has one definition of the command surface, checked by `agentctl spec check` in CI. Adopting it means either two definitions that can drift or moving that table into a second format, which reverses decision 14. Its other advantage is parse speed, which its author measures at 0.19 µs against `clap`'s 480 µs on a 211 command CLI. This binary opens SQLite and folds a log before it prints anything, so that win is not observable here. The cost accepted is eight crates against ten, in exchange for a specification format that nothing else in this repository reads.
+
+What `clap` does not own is the part the interface spec pins down. Parsing produces an `Intent`, which is this project's own enum, never a `clap` type handed further in. The exit code table, 0, 2, 64, 65, 70, 74, 75, 78, and the `--json` error object with its code, class, message, and hint, stay hand-written in a library module where the gate can reach them. Nothing calls `parse()`, which prints and exits. `try_parse()` returns a value, and `main.rs` stays wiring.
+
+Cost accepted. Ten crates in a tree of fifty-eight, and a command declaration that `cargo-mutants` cannot see, because a derive puts it in attributes and the gate reads source. That is decision 18's objection against `thiserror` at a larger scale. The mitigation is the layer [mutation policy](../delivery/mutation-policy.md) already names, process tests that start the binary and assert the exit code and the error object. The gate goes quiet on the declaration rather than failing on it, and that silence is the cost.
+
+`agentctl` does not exist yet, so this entry is written before the code, in the same order as the rest of the bundle. PR 7 implements a choice rather than reopening it.
+
+What would reverse it. A command surface that stops at five commands with no nesting, where the table is smaller than the dependency. Or an objection to the gate going quiet, in which case the builder API declares the same commands in code the gate can read, for four crates instead of ten and roughly three times the lines.
