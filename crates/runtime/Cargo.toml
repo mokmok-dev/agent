@@ -10,6 +10,7 @@ agent-model.workspace = true
 agent-prompt.workspace = true
 agent-store.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 toml = { version = "0.9", features = ["parse", "serde"] }
 
 [lints]

@@ -37,6 +37,7 @@ dependencies = [
  "agent-prompt",
  "agent-store",
  "serde",
+ "serde_json",
  "toml",
 ]
 

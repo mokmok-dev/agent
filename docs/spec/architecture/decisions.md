@@ -364,3 +364,15 @@ The gate lives in the runtime rather than in `decide`, because it needs two thin
 
 The command that answers a question is the same command channel that carries a message: `approve` or `deny`, with the call id as its text. That is not a temporary shape. The alternative was a dedicated socket for approvals, which would be a second way into the same log, and the log is the one place a second way has already caused trouble.
 
+# 32. The socket carries a line; the daemon writes the event
+
+`agentctl` does not write to the log. It sends one line to a Unix socket the daemon owns, and the daemon turns that line into `command.received` on its next turn. There is still one writer.
+
+That is not politeness about ownership. A command written by a client is a command the daemon may never see, and the next process to start would find it in the log and act on an instruction whose author has stopped expecting anything. With the socket, a command sent to a daemon that is not running fails where it was typed, which is the only place the failure is still useful.
+
+The daemon answers as soon as it has read the line, not when it has acted. "The daemon took your line" and "the daemon did what you asked" are different facts, and the socket reports the first because it is the one it can know.
+
+The socket is read before the step rather than after, so a command that arrived while the loop was idle belongs to the turn that iteration is about to make instead of the one after it.
+
+The line is one JSON object. It is read with a two second bound and answered either way, so a client that connects and says nothing cannot stop the loop.
+

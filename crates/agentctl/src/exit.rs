@@ -116,6 +116,28 @@ impl Failure {
 
     /// The state directory could not be worked out.
     #[must_use]
+    /// A failure at runtime, which is the daemon or the socket, not the arguments.
+    pub const fn runtime(message: String) -> Self {
+        Self {
+            exit: Exit::Failed,
+            class: Class::Runtime,
+            message,
+            hint: None,
+        }
+    }
+
+    /// Policy refused it, which is the daemon saying no.
+    #[must_use]
+    pub const fn policy(message: String) -> Self {
+        Self {
+            exit: Exit::Policy,
+            class: Class::Policy,
+            message,
+            hint: None,
+        }
+    }
+
+    #[must_use]
     pub fn config(message: String) -> Self {
         Self {
             exit: Exit::Config,

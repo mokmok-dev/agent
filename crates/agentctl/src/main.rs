@@ -41,6 +41,7 @@ fn dispatch(invocation: &Invocation) -> Result<String, Failure> {
             report::version_text()
         }),
         Intent::Verify { .. } => verify(invocation),
+        Intent::Send { .. } | Intent::Approve { .. } | Intent::Deny { .. } => bus(invocation),
         other => Err(Failure::unsupported(other.name(), other.needs())),
     }
 }
@@ -91,4 +92,66 @@ fn report_failure(
 ) -> ExitCode {
     eprintln!("{}", failure.render(json));
     ExitCode::from(failure.exit.code())
+}
+
+/// The text a bus command carries: what was asked, or the call being answered.
+fn bus_text(invocation: &Invocation) -> Result<String, Failure> {
+    match &invocation.intent {
+        Intent::Send { message, .. } => Ok(message.clone()),
+        Intent::Approve { id } | Intent::Deny { id } => Ok(id.clone()),
+        other => Err(Failure::unsupported(other.name(), other.needs())),
+    }
+}
+
+/// The word the socket accepts for this intent.
+fn wire_word(intent: &Intent) -> Result<&'static str, Failure> {
+    match intent {
+        Intent::Send { .. } => Ok("send"),
+        Intent::Approve { .. } => Ok("approve"),
+        Intent::Deny { .. } => Ok("deny"),
+        other => Err(Failure::unsupported(other.name(), other.needs())),
+    }
+}
+
+/// One line to the daemon's socket, and its answer.
+fn bus(invocation: &Invocation) -> Result<String, Failure> {
+    use std::io::{BufRead as _, BufReader, Write as _};
+
+    let text = bus_text(invocation)?;
+    let command = wire_word(&invocation.intent)?;
+    let socket = store_path(invocation)?
+        .parent()
+        .map(|dir| dir.join("bus.sock"))
+        .ok_or_else(|| Failure::config("no state directory was named".to_string()))?;
+    let stream = std::os::unix::net::UnixStream::connect(&socket).map_err(|error| {
+        Failure::config(format!(
+            "no daemon is listening on {}: {error}",
+            socket.display()
+        ))
+    })?;
+    let mut writer = &stream;
+    let line = serde_json::json!({ "command": command, "text": text }).to_string();
+    writer
+        .write_all(line.as_bytes())
+        .and_then(|()| writer.write_all(b"\n"))
+        .and_then(|()| writer.flush())
+        .map_err(|error| Failure::runtime(format!("the socket took nothing: {error}")))?;
+
+    let mut reader = BufReader::new(&stream);
+    let mut answer = String::new();
+    reader
+        .read_line(&mut answer)
+        .map_err(|error| Failure::runtime(format!("the socket said nothing: {error}")))?;
+    let value: serde_json::Value = serde_json::from_str(answer.trim_end())
+        .map_err(|_| Failure::runtime("the socket answered with something else".to_string()))?;
+    if value["ok"] == serde_json::json!(true) {
+        Ok(format!("{command}: taken"))
+    } else {
+        Err(Failure::policy(
+            value["message"]
+                .as_str()
+                .unwrap_or("the daemon refused it")
+                .to_string(),
+        ))
+    }
 }

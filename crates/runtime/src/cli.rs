@@ -10,10 +10,13 @@ pub struct Args {
     /// A store and nothing else, which can write turns but not answer them.
     pub state_dir: Option<PathBuf>,
     pub once: bool,
+    /// Where the command socket listens. Defaults to the state directory.
+    pub bus: Option<PathBuf>,
 }
 
 /// How to run the daemon.
-pub const USAGE: &str = "usage: agentd (--config <path> | --state-dir <path>) [--once]";
+pub const USAGE: &str =
+    "usage: agentd (--config <path> | --state-dir <path>) [--bus <path>] [--once]";
 
 /// Why the arguments were not usable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +60,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
     let mut state_dir = None;
     let mut config = None;
     let mut once = false;
+    let mut bus = None;
     let mut rest = args.into_iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -69,6 +73,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
                 config = Some(PathBuf::from(value));
             },
             "--once" => once = true,
+            "--bus" => {
+                let value = rest.next().ok_or(ArgError::MissingValue("--bus"))?;
+                bus = Some(PathBuf::from(value));
+            },
             "--help" | "-h" => return Err(ArgError::Help),
             other => return Err(ArgError::Unknown(other.to_string())),
         }
@@ -83,6 +91,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
         config,
         state_dir,
         once,
+        bus,
     })
 }
 
@@ -100,6 +109,7 @@ mod tests {
         assert_eq!(
             parse(args(&["--state-dir", "/var/lib/agent"])),
             Ok(Args {
+                bus: None,
                 config: None,
                 state_dir: Some(PathBuf::from("/var/lib/agent")),
                 once: false,
@@ -112,6 +122,7 @@ mod tests {
         assert_eq!(
             parse(args(&["--config", "/etc/agent.toml"])),
             Ok(Args {
+                bus: None,
                 config: Some(PathBuf::from("/etc/agent.toml")),
                 state_dir: None,
                 once: false,
