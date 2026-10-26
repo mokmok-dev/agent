@@ -5,12 +5,15 @@ use std::path::PathBuf;
 /// What the operator asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
-    pub state_dir: PathBuf,
+    /// A configured daemon: a model, a provider, and where the store lives.
+    pub config: Option<PathBuf>,
+    /// A store and nothing else, which can write turns but not answer them.
+    pub state_dir: Option<PathBuf>,
     pub once: bool,
 }
 
 /// How to run the daemon.
-pub const USAGE: &str = "usage: agentd --state-dir <path> [--once]";
+pub const USAGE: &str = "usage: agentd (--config <path> | --state-dir <path>) [--once]";
 
 /// Why the arguments were not usable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +26,8 @@ pub enum ArgError {
     Unknown(String),
     /// A required flag was not given.
     Missing(&'static str),
+    /// Two ways of naming the state were given at once.
+    Conflict,
 }
 
 impl std::fmt::Display for ArgError {
@@ -35,6 +40,7 @@ impl std::fmt::Display for ArgError {
             Self::MissingValue(flag) => write!(formatter, "{flag} needs a value"),
             Self::Unknown(flag) => write!(formatter, "unknown argument: {flag}"),
             Self::Missing(flag) => write!(formatter, "{flag} is required"),
+            Self::Conflict => write!(formatter, "--config and --state-dir cannot both be given"),
         }
     }
 }
@@ -49,6 +55,7 @@ impl std::error::Error for ArgError {}
 /// state directory was not given.
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> {
     let mut state_dir = None;
+    let mut config = None;
     let mut once = false;
     let mut rest = args.into_iter();
     while let Some(arg) = rest.next() {
@@ -57,13 +64,26 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
                 let value = rest.next().ok_or(ArgError::MissingValue("--state-dir"))?;
                 state_dir = Some(PathBuf::from(value));
             },
+            "--config" => {
+                let value = rest.next().ok_or(ArgError::MissingValue("--config"))?;
+                config = Some(PathBuf::from(value));
+            },
             "--once" => once = true,
             "--help" | "-h" => return Err(ArgError::Help),
             other => return Err(ArgError::Unknown(other.to_string())),
         }
     }
-    let state_dir = state_dir.ok_or(ArgError::Missing("--state-dir"))?;
-    Ok(Args { state_dir, once })
+    if config.is_some() && state_dir.is_some() {
+        return Err(ArgError::Conflict);
+    }
+    if config.is_none() && state_dir.is_none() {
+        return Err(ArgError::Missing("--config"));
+    }
+    Ok(Args {
+        config,
+        state_dir,
+        once,
+    })
 }
 
 #[cfg(test)]
@@ -80,9 +100,35 @@ mod tests {
         assert_eq!(
             parse(args(&["--state-dir", "/var/lib/agent"])),
             Ok(Args {
-                state_dir: PathBuf::from("/var/lib/agent"),
+                config: None,
+                state_dir: Some(PathBuf::from("/var/lib/agent")),
                 once: false,
             })
+        );
+    }
+
+    #[test]
+    fn a_config_file_is_enough() {
+        assert_eq!(
+            parse(args(&["--config", "/etc/agent.toml"])),
+            Ok(Args {
+                config: Some(PathBuf::from("/etc/agent.toml")),
+                state_dir: None,
+                once: false,
+            })
+        );
+    }
+
+    #[test]
+    fn both_ways_of_naming_the_state_at_once_is_refused() {
+        assert_eq!(
+            parse(args(&[
+                "--config",
+                "/etc/agent.toml",
+                "--state-dir",
+                "/tmp"
+            ])),
+            Err(ArgError::Conflict)
         );
     }
 
@@ -100,8 +146,8 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_state_dir_is_refused() {
-        assert_eq!(parse(args(&[])), Err(ArgError::Missing("--state-dir")));
+    fn naming_no_state_at_all_is_refused() {
+        assert_eq!(parse(args(&[])), Err(ArgError::Missing("--config")));
     }
 
     #[test]

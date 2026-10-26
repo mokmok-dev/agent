@@ -14,6 +14,16 @@ verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 
 The CLI never writes events. It sends commands to `agentd` over `bus.sock`, or, for read-only commands, opens the database read-only. The exceptions are `gc` and `backup`, which touch files rather than history, and `doctor`, which requires the service to be stopped and says so.
 
+# The configuration file
+
+The daemon reads one TOML file. It holds the state directory, the model, the provider URL, the directive, the tool schemas, the deadline, and the cap on a response. The API key is not in it.
+
+The key is named, not stored: either an environment variable or a file, and exactly one of the two. A key file is what systemd's credential directory makes possible, since the supervisor writes the secret somewhere only the service can read. The daemon reads it at startup and never writes it anywhere, not to the log and not to an event.
+
+Everything is checked before the store is opened. A missing model, a relative URL, a zero timeout, an empty key, or two tools sharing a name stops the process with a message naming the setting. The alternative is a daemon that starts, accepts a command, and only then discovers it cannot reach anyone, which the operator would read as a provider outage.
+
+The file format is TOML rather than YAML, which this repository already reads for the spec bundle. YAML's implicit typing turns an unquoted `on` into a boolean and a version `1.10` into a float, and a configuration file that silently changes its meaning is the opposite of what a startup check is for.
+
 # The daemon's own flags
 
 `agentd` takes a state directory and one flag that ends the process after a single step. The supervisor passes the directory, from `StateDirectory` on Linux and the application support path on macOS. The single-step flag exists so a test can drive one iteration of the loop without a supervisor, and so an operator can run the loop under their own supervision if they prefer it to systemd's.

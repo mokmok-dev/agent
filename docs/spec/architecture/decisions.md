@@ -261,3 +261,13 @@ A turn carries the text the operator asked with. The transcript carries the mess
 So the renderer is handed the transcript plus the open turn's input as one more user message. Nothing is appended to the log to make that happen, because the input is already recorded in `turn.requested` and appending `message.appended` with the same text would put the same words in the log twice, where a later reader would have to know which of them to believe.
 
 The cost is that two events describe one utterance. A reader that wants the transcript must read `turn.requested` for the asking and `message.appended` for the answering, which is exactly the distinction a replay needs anyway: the request is a fact about intent, the message is a fact about the transcript.
+
+# 24. Configuration is one TOML file, checked before anything opens
+
+The daemon takes a configuration file or a bare state directory. The file holds the state directory, the model, the provider URL, the directive and its version, the tool schemas, the deadline, and the response cap.
+
+Every setting is checked before the store is opened, including the one that needs the outside world: the key. Naming an environment variable that is not set, or a key file that is not readable, stops the process at startup. A daemon that starts, accepts a command and only then discovers it cannot authenticate would present a configuration error as a provider outage, and the operator would spend the evening reading someone else's status page.
+
+The key is named, never stored. An environment variable or a file, exactly one of the two. The file case exists for systemd's credential directory, where the supervisor writes the secret somewhere only the service can read. The daemon reads it at startup and writes it nowhere, not to a log and not to an event.
+
+TOML, not YAML, although this repository already reads YAML for the spec bundle. YAML's implicit typing turns an unquoted `on` into a boolean and `1.10` into a float, and a configuration file that silently changes meaning is the opposite of what a startup check is for. The cost is a parser in the daemon's tree: fifteen crates including `serde`, measured.

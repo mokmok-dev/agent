@@ -6,6 +6,7 @@
 
 pub mod cli;
 pub mod clock;
+pub mod config;
 
 use std::fmt;
 use std::path::Path;
