@@ -13,6 +13,10 @@ use agent_core::event::Event;
 use agent_core::ids::{BranchId, EventId};
 use rusqlite::{Connection, Transaction, params};
 
+mod decode;
+
+pub use decode::{DecodeError, decode};
+
 /// The schema, verbatim. Re-running it is safe, so an open repairs an empty
 /// database and does nothing to a populated one.
 const SCHEMA: &str = "
