@@ -13,6 +13,7 @@ extern crate std;
 
 pub mod canonical;
 pub mod event;
+pub mod fold;
 pub mod ids;
 pub mod taxonomy;
 pub mod time;
