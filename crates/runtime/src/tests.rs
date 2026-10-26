@@ -872,3 +872,68 @@ fn a_question_that_expires_is_a_no_and_the_call_never_runs() {
     assert!(!decided.0);
     assert_eq!(decided.1.as_deref(), Some("the question expired"));
 }
+
+#[test]
+fn a_command_from_the_socket_becomes_an_event_the_loop_can_read() {
+    let scratch = Scratch::new();
+    let socket = scratch.path.with_extension("sock");
+    let bus = crate::bus::Bus::bind(&socket).expect("binds");
+    let mut reactor = Reactor::open(&scratch.path).expect("opens");
+    reactor.start(now()).expect("starts");
+
+    // The client is the shape `agentctl` writes, so this covers the wire as well
+    // as the writer.
+    let target = socket;
+    let client = std::thread::spawn(move || {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        let mut stream = std::os::unix::net::UnixStream::connect(&target).expect("connects");
+        let line = crate::bus::request_line("send", "hello from the socket");
+        stream.write_all(line.as_bytes()).expect("writes");
+        stream.write_all(b"\n").expect("writes");
+        stream.flush().expect("flushes");
+        let mut reader = BufReader::new(stream);
+        let mut answer = String::new();
+        reader.read_line(&mut answer).expect("reads");
+        answer
+    });
+
+    let started = std::time::Instant::now();
+    let answers = loop {
+        let answers = bus.poll();
+        if !answers.is_empty() {
+            break answers;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the loop never polled the socket"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    let answer = client.join().expect("the client finished");
+    assert!(answer.contains(r#""ok":true"#), "{answer}");
+
+    let command = answers
+        .into_iter()
+        .next()
+        .expect("one answer")
+        .expect("a command");
+    reactor
+        .command(ROOT_BRANCH, &command, now())
+        .expect("writes the command");
+    let written = events(&scratch);
+    let received = written
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::CommandReceived {
+                command,
+                surface,
+                text,
+                ..
+            } => Some((command.clone(), surface.clone(), text.clone())),
+            _ => None,
+        })
+        .expect("the command is in the log");
+    assert_eq!(received.0, "send");
+    assert_eq!(received.1, "bus");
+    assert_eq!(received.2.as_deref(), Some("hello from the socket"));
+}

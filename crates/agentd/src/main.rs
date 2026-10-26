@@ -44,7 +44,10 @@ fn reactor_from_config(path: &Path) -> Result<Reactor, String> {
 fn drive(
     mut reactor: Reactor,
     once: bool,
+    bus_path: &Path,
 ) -> Result<(), String> {
+    let bus = agent_runtime::bus::Bus::bind(bus_path)
+        .map_err(|error| format!("{}: {error}", bus_path.display()))?;
     reactor
         .start(clock::now().map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())?;
@@ -52,6 +55,15 @@ fn drive(
     ping(supervisor.as_deref(), agent_runtime::notify::READY);
     loop {
         let now = clock::now().map_err(|error| error.to_string())?;
+        // The socket is read before the step: a command that arrived while the
+        // loop was sleeping belongs in the turn this iteration is about to make.
+        // A refused line has already been answered on the socket; there is nothing
+        // to write for it here.
+        for command in bus.poll().into_iter().flatten() {
+            reactor
+                .command(agent_runtime::ROOT_BRANCH, &command, now)
+                .map_err(|error| error.to_string())?;
+        }
         match reactor.step(now).map_err(|error| error.to_string())? {
             Step::Append(_) | Step::Execute { .. } | Step::RequestModel { .. } => {},
             Step::Idle => {
@@ -85,15 +97,29 @@ fn ping(
 }
 
 fn run(args: &Args) -> Result<(), String> {
-    let reactor = match (&args.config, &args.state_dir) {
-        (Some(path), _) => reactor_from_config(path)?,
+    let (reactor, state_dir) = match (&args.config, &args.state_dir) {
+        (Some(path), _) => (reactor_from_config(path)?, config_state_dir(path)?),
         (None, Some(dir)) => {
             std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
-            Reactor::open(&dir.join("agent.db")).map_err(|error| error.to_string())?
+            (
+                Reactor::open(&dir.join("agent.db")).map_err(|error| error.to_string())?,
+                dir.clone(),
+            )
         },
         (None, None) => return Err("no state was named".to_string()),
     };
-    drive(reactor, args.once)
+    let bus_path = args
+        .bus
+        .clone()
+        .unwrap_or_else(|| state_dir.join(agent_runtime::bus::SOCKET));
+    drive(reactor, args.once, &bus_path)
+}
+
+/// Where a configured daemon keeps its store, which is also where its socket goes.
+fn config_state_dir(path: &Path) -> Result<std::path::PathBuf, String> {
+    agent_runtime::config::load(path, &|name| std::env::var(name).ok())
+        .map(|config| config.state_dir)
+        .map_err(|error| error.to_string())
 }
 
 fn main() -> ExitCode {

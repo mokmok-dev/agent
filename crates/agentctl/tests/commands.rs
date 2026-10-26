@@ -173,11 +173,23 @@ fn a_command_with_nothing_behind_it_exits_64_and_says_what_it_needs() {
 
 #[test]
 fn a_message_the_operator_quoted_is_not_read_as_a_flag() {
-    let output = run(&["send", "--branch", BRANCH, "--", "--wait"]);
-    assert_eq!(output.status.code(), Some(64), "{}", stderr(&output));
-    assert!(
-        stderr(&output).contains("`agentctl send`"),
-        "the message parsed as a message, so the command was recognised"
+    let scratch = Scratch::new();
+    let socket = scratch.dir.join("bus.sock");
+    let daemon = fake_daemon(&socket, r#"{"ok":true}"#);
+
+    // Everything after `--` is positional, so the global option goes before the
+    // command.
+    let output = Command::new(BIN)
+        .arg("--state-dir")
+        .arg(&scratch.dir)
+        .args(["send", "--branch", BRANCH, "--", "--wait"])
+        .output()
+        .expect("runs");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        daemon.join().expect("the daemon finished"),
+        r#"{"command":"send","text":"--wait"}"#,
+        "the message parsed as a message, not as a flag"
     );
 }
 
@@ -204,4 +216,96 @@ fn help_is_text_on_stdout_and_exits_zero() {
     assert!(text.contains("agentctl"), "{text}");
     assert!(text.contains("verify"), "{text}");
     assert_eq!(stderr(&output), "");
+}
+
+/// A socket that takes one line, answers it, and reports what it saw.
+fn fake_daemon(
+    path: &std::path::Path,
+    answer: &str,
+) -> std::thread::JoinHandle<String> {
+    let listener = std::os::unix::net::UnixListener::bind(path).expect("binds");
+    let answer = answer.to_string();
+    std::thread::spawn(move || {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        let (mut stream, _) = listener.accept().expect("accepts");
+        let mut reader = BufReader::new(stream.try_clone().expect("clones"));
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("reads");
+        stream.write_all(answer.as_bytes()).expect("writes");
+        stream.write_all(b"\n").expect("writes");
+        stream.flush().expect("flushes");
+        line.trim_end().to_string()
+    })
+}
+
+fn ctl(
+    dir: &std::path::Path,
+    arguments: &[&str],
+) -> Output {
+    Command::new(BIN)
+        .args(arguments)
+        .arg("--state-dir")
+        .arg(dir)
+        .output()
+        .expect("runs")
+}
+
+#[test]
+fn send_writes_one_line_the_daemon_can_read() {
+    let scratch = Scratch::new();
+    let socket = scratch.dir.join("bus.sock");
+    let daemon = fake_daemon(&socket, r#"{"ok":true}"#);
+
+    let output = ctl(&scratch.dir, &["send", "--branch", BRANCH, "hello there"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "send: taken"
+    );
+
+    let line = daemon.join().expect("the daemon finished");
+    assert_eq!(
+        line, r#"{"command":"send","text":"hello there"}"#,
+        "the line is the one the socket documents"
+    );
+}
+
+#[test]
+fn approve_carries_the_call_it_answers() {
+    let scratch = Scratch::new();
+    let socket = scratch.dir.join("bus.sock");
+    let daemon = fake_daemon(&socket, r#"{"ok":true}"#);
+
+    let output = ctl(&scratch.dir, &["approve", "0102030405060708:0"]);
+    assert!(output.status.success(), "{output:?}");
+
+    let line = daemon.join().expect("the daemon finished");
+    assert_eq!(line, r#"{"command":"approve","text":"0102030405060708:0"}"#);
+}
+
+#[test]
+fn a_daemon_that_says_no_is_a_policy_failure() {
+    let scratch = Scratch::new();
+    let socket = scratch.dir.join("bus.sock");
+    let daemon = fake_daemon(&socket, r#"{"ok":false,"message":"deny needs text"}"#);
+
+    let output = ctl(&scratch.dir, &["deny", "0102030405060708:0"]);
+    assert_eq!(output.status.code(), Some(65), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("deny needs text"),
+        "{output:?}"
+    );
+    let _ = daemon.join();
+}
+
+#[test]
+fn no_daemon_is_a_configuration_failure_where_the_operator_typed_it() {
+    let scratch = Scratch::new();
+    // Nothing is listening: the socket file is not there at all.
+    let output = ctl(&scratch.dir, &["send", "--branch", BRANCH, "hello"]);
+    assert_eq!(output.status.code(), Some(78), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no daemon is listening"),
+        "{output:?}"
+    );
 }

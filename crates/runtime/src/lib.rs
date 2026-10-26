@@ -4,11 +4,14 @@
 //! it, so a restart, a fork and a second process all see the same facts, and a
 //! decision can never run on state that an earlier decision has invalidated.
 
+pub mod bus;
 pub mod cli;
 pub mod clock;
 pub mod config;
 pub mod exec;
 pub mod notify;
+
+extern crate alloc;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -182,6 +185,40 @@ impl Reactor {
                 .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
             started: std::collections::BTreeSet::new(),
         })
+    }
+
+    /// Writes one command that arrived on the socket.
+    ///
+    /// The socket never writes to the store itself: the client sends a line, and
+    /// this process turns it into the event on its next turn, so there is one
+    /// writer and one place a command can come from.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReactorError::Store`] when the append fails, and
+    /// [`ReactorError::Fold`] when the history cannot be read to place it.
+    pub fn command(
+        &mut self,
+        branch: BranchId,
+        command: &bus::Command,
+        now: Timestamp,
+    ) -> Result<EventId, ReactorError> {
+        let state = self.state()?;
+        let name = command.command.clone();
+        self.append(
+            branch,
+            &state,
+            now,
+            None,
+            None,
+            None,
+            EventKind::CommandReceived {
+                command: name.clone(),
+                command_id: alloc::format!("{name}-{}", now.secs()),
+                surface: "bus".to_string(),
+                text: Some(command.text.clone()),
+            },
+        )
     }
 
     /// Opens the store and gives the reactor a model to send turns to.
