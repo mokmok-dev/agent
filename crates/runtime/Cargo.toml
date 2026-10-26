@@ -9,6 +9,8 @@ agent-core.workspace = true
 agent-model.workspace = true
 agent-prompt.workspace = true
 agent-store.workspace = true
+serde.workspace = true
+toml = { version = "0.9", features = ["parse", "serde"] }
 
 [lints]
 workspace = true

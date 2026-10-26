@@ -16,6 +16,8 @@ use agent_core::ids::PrefixHash;
 pub mod http;
 pub mod openai;
 
+pub use http::HttpProvider;
+
 /// How many attempts one request may take, counting the first.
 pub const MAX_ATTEMPTS: u32 = 3;
 
