@@ -407,3 +407,15 @@ The failure now carries the answer a reader can act on: the last attempt says `f
 `wait_for` had the same shape of mistake one level down. It computed the sleep in whole seconds, so a retry owed in 400 ms produced no sleep at all, and the first backoff ceiling is under a second. Fractional seconds now count.
 
 Both were invisible to the tests, which drive the reactor with instants they choose and providers that fail once. A provider that keeps refusing for as long as the process lives is a different machine, and the only way to meet it is to run one.
+
+# 35. The store is locked by the process that writes it
+
+The daemon holds an advisory lock on a file beside the store, taken before the store is opened and released when the kernel ends the process. A second daemon on the same state directory exits and says which file is locked.
+
+SQLite made this look solved. Two writers are serialised rather than refused, so the database never corrupts and nothing complains; what breaks is the meaning of the log. Two loops fold the same facts, both decide the same turn needs a request, and the turn is sent twice. The socket made it worse: binding removes the path first, so the second daemon took the first one's place in the filesystem while the first kept listening on a socket nobody could reach, and the first one's exit then removed the file the second was serving.
+
+The alternative was to trust the deployment: one unit, one process, one writer. That is true where the module is used and false everywhere else, and the failure it produces is not a crash but a quiet doubling that only a reader of the log can see. A lock costs one file and one syscall.
+
+The file outlives the process on purpose. A lock file that is removed on release has a race older than the lock itself: the next process can create a new file and lock it while the previous holder still has the old inode locked, and both then believe they are alone.
+
+`agentctl status` reads without locking, because a status that needs the daemon to be running fails exactly when an operator needs it.

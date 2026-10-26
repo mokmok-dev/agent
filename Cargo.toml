@@ -29,6 +29,7 @@ clap = { version = "4", default-features = false, features = [
   "usage",
 ] }
 rusqlite = "0.37"
+rustix = { version = "1", features = ["fs"] }
 serde = { version = "1", default-features = false }
 serde_json = { version = "1", features = ["raw_value"] }
 serde_yaml_ng = "0.10"

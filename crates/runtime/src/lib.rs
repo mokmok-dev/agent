@@ -9,6 +9,7 @@ pub mod cli;
 pub mod clock;
 pub mod config;
 pub mod exec;
+pub mod lock;
 pub mod notify;
 
 extern crate alloc;

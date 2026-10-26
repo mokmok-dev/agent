@@ -36,6 +36,7 @@ dependencies = [
  "agent-model",
  "agent-prompt",
  "agent-store",
+ "rustix",
  "serde",
  "serde_json",
  "toml",
