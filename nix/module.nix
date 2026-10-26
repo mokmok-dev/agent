@@ -126,6 +126,16 @@ in
       description = "The model id sent to the provider.";
     };
 
+    agentctlPackage = mkOption {
+      type = types.package;
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.agentctl;
+      defaultText = lib.literalExpression "self.packages.\${system}.agentctl";
+      description = ''
+        The operator's command line, installed on the host. A service nobody can
+        send a command to is a service that only runs what it was built with.
+      '';
+    };
+
     package = mkOption {
       type = types.package;
       default = self.packages.${pkgs.stdenv.hostPlatform.system}.agentd;
@@ -234,6 +244,8 @@ in
         message = "services.mokmok-agent: set apiKeyFile or apiKeyEnv, not both.";
       }
     ];
+
+    environment.systemPackages = [ cfg.agentctlPackage ];
 
     users.groups.${cfg.group} = { };
     users.users.${cfg.user} = {

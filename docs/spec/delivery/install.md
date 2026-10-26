@@ -49,6 +49,22 @@ Without it the first start after a reboot fails with a missing credential file,
 the supervisor restarts, and the second attempt succeeds because the file has
 arrived. The failure looks intermittent, which is the worst way for it to look.
 
+# The operator's command
+
+`services.mokmok-agent.enable = true;` puts `agentctl` on the host as well as the
+daemon. A service nobody can send a command to is a service that only ever runs what
+it was built with, so the tool arrives with it rather than as a second thing to
+remember.
+
+```
+agentctl status
+agentctl send --branch <id> "what time is it"
+agentctl approve <call id>
+```
+
+`nix build` at the flake root gives one directory with both binaries in it. The
+packages are `.#agentd` and `.#agentctl` when they are wanted separately.
+
 # What is checked and what is not
 
 The flake's check evaluates a configuration, reads the unit text systemd would receive, and asserts the settings this design depends on: the notify type, the watchdog interval, the disabled start rate limit, the state directory, the credential, and the two hardening directives that keep the binary and the home directory read-only.
