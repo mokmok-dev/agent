@@ -505,3 +505,139 @@ fn a_tool_that_is_not_configured_is_a_failure_rather_than_a_crash() {
         "a missing tool is a failure"
     );
 }
+
+/// Leaves the store in the state a process that died mid-call would leave: a turn
+/// that asked for a tool, an intent, and no result.
+fn left_behind(
+    scratch: &Scratch,
+    tool: Tool,
+) {
+    let mut with_tool = settings();
+    with_tool.tools = vec![tool];
+    let mut reactor =
+        Reactor::with_model(&scratch.path, Box::new(Asking), with_tool).expect("opens");
+    reactor.start(now()).expect("starts");
+    let mut store = Store::open(&scratch.path).expect("opens");
+    send(&mut store, ROOT_BRANCH, "do the thing");
+    drop(store);
+
+    let mut without_tools = settings();
+    without_tools.tools = Vec::new();
+    let mut reactor =
+        Reactor::with_model(&scratch.path, Box::new(Asking), without_tools).expect("opens");
+    reactor.start(now()).expect("starts");
+    // The turn, the answer, and the intent. The fourth step would run it, and this
+    // process is the one that is about to die.
+    for _ in 0..3 {
+        reactor.step(now()).expect("steps");
+    }
+}
+
+fn marker_tool(
+    scratch: &Scratch,
+    idempotent: bool,
+) -> Tool {
+    let marker = scratch.path.with_extension("ran");
+    Tool {
+        argv: vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("echo ran >> {}", marker.display()),
+        ],
+        idempotent,
+        max_output: 4096,
+        name: "shell".to_string(),
+        schema: r#"{"argv":"string"}"#.to_string(),
+        timeout: std::time::Duration::from_secs(5),
+    }
+}
+
+#[test]
+fn a_call_left_behind_by_a_dead_process_is_not_run_again_when_it_is_not_idempotent() {
+    let scratch = Scratch::new();
+    let tool = marker_tool(&scratch, false);
+    let marker = scratch.path.with_extension("ran");
+    left_behind(&scratch, tool.clone());
+
+    let mut settings = settings();
+    settings.tools = vec![tool];
+    let mut reactor =
+        Reactor::with_model(&scratch.path, Box::new(Asking), settings).expect("opens");
+    reactor.start(now()).expect("starts");
+    let _ = reactor.step(now()).expect("steps");
+
+    assert!(
+        !marker.exists(),
+        "a tool that may not run twice was run anyway"
+    );
+    let written = events(&scratch);
+    let failure = written
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ToolFailed {
+                may_have_happened, ..
+            } => Some(*may_have_happened),
+            _ => None,
+        })
+        .expect("the log says the call is over");
+    assert!(failure, "the effect may have happened");
+}
+
+#[test]
+fn a_call_left_behind_is_run_again_when_the_tool_says_it_is_idempotent() {
+    let scratch = Scratch::new();
+    let tool = marker_tool(&scratch, true);
+    let marker = scratch.path.with_extension("ran");
+    left_behind(&scratch, tool.clone());
+
+    let mut settings = settings();
+    settings.tools = vec![tool];
+    let mut reactor =
+        Reactor::with_model(&scratch.path, Box::new(Asking), settings).expect("opens");
+    reactor.start(now()).expect("starts");
+    let _ = reactor.step(now()).expect("steps");
+
+    assert!(marker.exists(), "an idempotent tool is safe to run again");
+    assert!(
+        events(&scratch)
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ToolResult { .. })),
+        "the run is in the log"
+    );
+}
+
+#[test]
+fn a_call_this_process_filed_runs_even_when_the_tool_may_not_repeat() {
+    let scratch = Scratch::new();
+    let tool = marker_tool(&scratch, false);
+    let marker = scratch.path.with_extension("ran");
+
+    let mut with_tool = settings();
+    with_tool.tools = vec![tool];
+    let mut reactor = Reactor::open(&scratch.path).expect("opens");
+    reactor.start(now()).expect("starts");
+    let mut store = Store::open(&scratch.path).expect("opens");
+    send(&mut store, ROOT_BRANCH, "do the thing");
+    drop(store);
+    drop(reactor);
+
+    // A fresh process, which files the intent itself and then runs it.
+    let mut with_tool = settings();
+    with_tool.tools = vec![marker_tool(&scratch, false)];
+    let mut reactor =
+        Reactor::with_model(&scratch.path, Box::new(Asking), with_tool).expect("opens");
+    reactor.start(now()).expect("starts");
+    for _ in 0..10 {
+        if matches!(reactor.step(now()).expect("steps"), Step::Idle) {
+            break;
+        }
+    }
+
+    assert!(marker.exists(), "the tool this process filed has to run");
+    assert!(
+        events(&scratch)
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ToolResult { .. })),
+        "and its result is in the log"
+    );
+}

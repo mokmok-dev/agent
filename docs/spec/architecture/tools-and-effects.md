@@ -33,7 +33,7 @@ The key is a hash of the tool name, the canonicalized arguments, and the call id
 
 The call id is derived from the turn id and the step index, so a re-fold of the same turn produces the same key. That is what makes the pair replay-stable.
 
-On recovery, an intent without a result is handled by the tool's declared class.
+On recovery, an intent without a result is handled by the tool's declared class. Whether a call is in recovery is a question only the running process can answer: a call it filed itself is a first run, and a call it did not is one a process that is gone left behind.
 
 | Tool class | Recovery behavior |
 |---|---|

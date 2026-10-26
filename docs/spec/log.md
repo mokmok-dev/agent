@@ -31,4 +31,5 @@
 * **Update**: Recorded a tool request with the response that asked for it, and wrote the intent from the log rather than beside it.
 * **Update**: Recorded what a tool writes, ran one, and decided how a tool receives its arguments.
 * **Update**: Gave a message the structure its role needs, and recorded why the chain hashes it.
+* **Update**: Recorded how a call left behind by a dead process is recovered, and why the log cannot answer it.
 

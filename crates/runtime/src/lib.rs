@@ -152,6 +152,10 @@ pub struct Reactor {
     /// Where a tool's process starts. The store's own directory, so a tool that
     /// writes files writes them somewhere the operator already knows.
     working_dir: PathBuf,
+    /// The calls this process has started. A call that is not here and has no
+    /// result belongs to a run that ended before it could record one, and the
+    /// log cannot tell the difference: only the process knows what it started.
+    started: std::collections::BTreeSet<CallId>,
 }
 
 impl Reactor {
@@ -169,6 +173,7 @@ impl Reactor {
             working_dir: path
                 .parent()
                 .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
+            started: std::collections::BTreeSet::new(),
         })
     }
 
@@ -267,6 +272,11 @@ impl Reactor {
         let step = decide(&state, now);
         match &step {
             Step::Append(intent) => {
+                // Filing an intent is what makes this process the one that asked,
+                // and the next process the one that finds it left behind.
+                if let EventKind::ToolIntent { call, .. } = &intent.kind {
+                    self.started.insert(*call);
+                }
                 self.append(
                     intent.branch,
                     &state,
@@ -331,6 +341,25 @@ impl Reactor {
                 )
                 .map(|_| ());
         };
+        // A call this process did not file is a call an earlier one left behind.
+        // Running it again is safe only when the tool says it is.
+        if !self.started.contains(&call) && !tool.idempotent {
+            return self
+                .append(
+                    branch,
+                    state,
+                    now,
+                    None,
+                    None,
+                    Some(call.turn),
+                    EventKind::ToolFailed {
+                        call,
+                        class: ErrorClass::Unknown,
+                        may_have_happened: true,
+                    },
+                )
+                .map(|_| ());
+        }
         match exec::run(tool, &args, &self.working_dir) {
             Outcome::Ran(ran) => self
                 .append(
