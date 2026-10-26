@@ -30,6 +30,9 @@ pub const SCHEDULE_ARMED: &str = "dev.mokmok.agent.schedule.armed";
 
 pub const MESSAGE_APPENDED: &str = "dev.mokmok.agent.message.appended";
 
+pub const APPROVAL_REQUESTED: &str = "dev.mokmok.agent.approval.requested";
+pub const APPROVAL_DECIDED: &str = "dev.mokmok.agent.approval.decided";
+
 pub const TOOL_INTENT: &str = "dev.mokmok.agent.tool.intent";
 pub const TOOL_RESULT: &str = "dev.mokmok.agent.tool.result";
 pub const TOOL_FAILED: &str = "dev.mokmok.agent.tool.failed";
@@ -51,6 +54,8 @@ pub const ALL: &[&str] = &[
     MODEL_FAILED,
     SCHEDULE_ARMED,
     MESSAGE_APPENDED,
+    APPROVAL_REQUESTED,
+    APPROVAL_DECIDED,
     TOOL_INTENT,
     TOOL_RESULT,
     TOOL_FAILED,

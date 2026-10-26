@@ -8,11 +8,17 @@ use crate::event::EventKind;
 use crate::fold::State;
 use alloc::string::String;
 
+use core::str::FromStr as _;
+
 use crate::ids::{BranchId, CallId, EventId, TurnId};
 use crate::time::Timestamp;
 
 /// The command name a surface uses to ask for a turn.
 pub const SEND: &str = "send";
+/// The command that says yes to the question the loop asked.
+pub const APPROVE: &str = "approve";
+/// The command that says no.
+pub const DENY: &str = "deny";
 
 /// One thing the reactor should append.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +90,7 @@ pub fn decide(
         return Step::Wait { until };
     }
     owed_reply(state)
+        .or_else(|| next_answer(state))
         .or_else(|| next_intent(state))
         .or_else(|| next_run(state))
         .or_else(|| next_request(state))
@@ -191,6 +198,42 @@ fn next_request(state: &State) -> Option<Step> {
         branch: *branch,
         turn: pending.turn,
     })
+}
+
+/// A command that answers the question the loop is waiting on.
+fn next_answer(state: &State) -> Option<Step> {
+    let (branch, command) = state
+        .branches()
+        .filter(|(_, facts)| !facts.archived)
+        .filter_map(|(branch, facts)| {
+            facts
+                .pending_command
+                .as_ref()
+                .map(|command| (*branch, command))
+        })
+        .find(|(_, command)| command.name == APPROVE || command.name == DENY)?;
+    let approval = state
+        .branch(branch)
+        .and_then(|facts| facts.approval.as_ref())
+        .cloned()?;
+    let Ok(call) = CallId::from_str(command.text.as_deref().unwrap_or_default()) else {
+        // A malformed answer is not an answer. Leaving it pending would wedge the
+        // loop, so it is dropped the same way an unknown command is.
+        return None;
+    };
+    if call != approval.call {
+        return None;
+    }
+    Some(Step::Append(Intent {
+        branch,
+        causation: Some(command.event),
+        correlation: Some(call.turn),
+        kind: EventKind::ApprovalDecided {
+            allow: command.name == APPROVE,
+            call,
+            note: None,
+        },
+    }))
 }
 
 /// A command that has arrived and has not been turned into a turn.
@@ -497,6 +540,146 @@ mod tests {
             );
         }
         turn
+    }
+
+    #[test]
+    fn a_command_answers_the_question_that_is_open() {
+        let mut state = State::default();
+        let turn = {
+            let mut chain = Chain::new(&mut state, 1);
+            chain.create();
+            let turn = chain.turn();
+            chain.requested(turn);
+            chain.push_correlated(
+                EventKind::ToolIntent {
+                    args: "{}".to_string(),
+                    call: CallId { turn, step: 0 },
+                    key: "k".to_string(),
+                    tool: "shell".to_string(),
+                },
+                Some(turn),
+            );
+            chain.push_correlated(
+                EventKind::ApprovalRequested {
+                    call: CallId { turn, step: 0 },
+                    expires: now()
+                        .plus(core::time::Duration::from_secs(60))
+                        .expect("later"),
+                    risk: crate::event::Risk::Destructive,
+                    tool: "shell".to_string(),
+                },
+                Some(turn),
+            );
+            chain.push(EventKind::CommandReceived {
+                command: "approve".to_string(),
+                command_id: "c-1".to_string(),
+                surface: "test".to_string(),
+                text: Some(CallId { turn, step: 0 }.to_string()),
+            });
+            turn
+        };
+        match decide(&state, now()) {
+            Step::Append(Intent {
+                kind: EventKind::ApprovalDecided { allow, call, .. },
+                ..
+            }) => {
+                assert!(allow);
+                assert_eq!(call, CallId { turn, step: 0 });
+            },
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_deny_command_answers_no() {
+        let mut state = State::default();
+        {
+            let mut chain = Chain::new(&mut state, 1);
+            chain.create();
+            let turn = chain.turn();
+            chain.requested(turn);
+            chain.push_correlated(
+                EventKind::ToolIntent {
+                    args: "{}".to_string(),
+                    call: CallId { turn, step: 0 },
+                    key: "k".to_string(),
+                    tool: "shell".to_string(),
+                },
+                Some(turn),
+            );
+            chain.push_correlated(
+                EventKind::ApprovalRequested {
+                    call: CallId { turn, step: 0 },
+                    expires: now()
+                        .plus(core::time::Duration::from_secs(60))
+                        .expect("later"),
+                    risk: crate::event::Risk::Destructive,
+                    tool: "shell".to_string(),
+                },
+                Some(turn),
+            );
+            chain.push(EventKind::CommandReceived {
+                command: "deny".to_string(),
+                command_id: "c-1".to_string(),
+                surface: "test".to_string(),
+                text: Some(CallId { turn, step: 0 }.to_string()),
+            });
+            turn
+        };
+        match decide(&state, now()) {
+            Step::Append(Intent {
+                kind: EventKind::ApprovalDecided { allow, .. },
+                ..
+            }) => assert!(!allow, "a deny is not a yes"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_command_that_names_another_call_is_not_an_answer() {
+        let mut state = State::default();
+        {
+            let mut chain = Chain::new(&mut state, 1);
+            chain.create();
+            let turn = chain.turn();
+            chain.requested(turn);
+            chain.push_correlated(
+                EventKind::ToolIntent {
+                    args: "{}".to_string(),
+                    call: CallId { turn, step: 0 },
+                    key: "k".to_string(),
+                    tool: "shell".to_string(),
+                },
+                Some(turn),
+            );
+            chain.push_correlated(
+                EventKind::ApprovalRequested {
+                    call: CallId { turn, step: 0 },
+                    expires: now()
+                        .plus(core::time::Duration::from_secs(60))
+                        .expect("later"),
+                    risk: crate::event::Risk::Destructive,
+                    tool: "shell".to_string(),
+                },
+                Some(turn),
+            );
+            chain.push(EventKind::CommandReceived {
+                command: "approve".to_string(),
+                command_id: "c-1".to_string(),
+                surface: "test".to_string(),
+                text: Some(CallId { turn, step: 9 }.to_string()),
+            });
+            turn
+        };
+        // The answer names a call that is not the one being asked about, so it is
+        // not an answer: the loop still owes the call itself a decision.
+        assert!(!matches!(
+            decide(&state, now()),
+            Step::Append(Intent {
+                kind: EventKind::ApprovalDecided { .. },
+                ..
+            })
+        ));
     }
 
     #[test]

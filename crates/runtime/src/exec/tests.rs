@@ -17,6 +17,7 @@ fn tool(
     timeout_ms: u64,
 ) -> Tool {
     Tool {
+        risk: agent_core::event::Risk::Read,
         argv: argv.iter().map(|part| (*part).to_string()).collect(),
         idempotent: true,
         max_output,

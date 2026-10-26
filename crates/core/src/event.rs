@@ -50,6 +50,43 @@ impl Event {
 }
 
 /// The conversational role a message carries.
+/// What a tool may touch, and therefore what it takes to run it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Risk {
+    /// Reads what the agent can already read. No approval.
+    Read,
+    /// Writes inside the paths the manifest declares. No approval.
+    Write,
+    /// Reaches a host the manifest declares. Approved once per branch.
+    Network,
+    /// Deletes, force pushes, or speaks to a person. Approved every time.
+    Destructive,
+}
+
+impl Risk {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Network => "network",
+            Self::Destructive => "destructive",
+        }
+    }
+
+    /// Whether running this risk without a person's answer is allowed.
+    #[must_use]
+    pub const fn needs_approval(self) -> bool {
+        matches!(self, Self::Network | Self::Destructive)
+    }
+
+    /// Whether one answer is remembered for the rest of the branch.
+    #[must_use]
+    pub const fn is_remembered(self) -> bool {
+        matches!(self, Self::Network)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     System,
@@ -203,6 +240,21 @@ pub enum EventKind {
         role: Role,
         tokens: u64,
     },
+    /// A call that may not run until a person says so.
+    ApprovalRequested {
+        call: CallId,
+        /// The instant this request stops being answerable.
+        expires: Timestamp,
+        risk: Risk,
+        tool: String,
+    },
+    /// A person's answer, or the answer the expiry gives.
+    ApprovalDecided {
+        allow: bool,
+        call: CallId,
+        /// Why, when the answer was not a plain yes or no.
+        note: Option<String>,
+    },
     ToolIntent {
         args: String,
         call: CallId,
@@ -249,6 +301,8 @@ impl EventKind {
             Self::ModelFailed { .. } => taxonomy::MODEL_FAILED,
             Self::ScheduleArmed { .. } => taxonomy::SCHEDULE_ARMED,
             Self::MessageAppended { .. } => taxonomy::MESSAGE_APPENDED,
+            Self::ApprovalRequested { .. } => taxonomy::APPROVAL_REQUESTED,
+            Self::ApprovalDecided { .. } => taxonomy::APPROVAL_DECIDED,
             Self::ToolIntent { .. } => taxonomy::TOOL_INTENT,
             Self::ToolResult { .. } => taxonomy::TOOL_RESULT,
             Self::ToolFailed { .. } => taxonomy::TOOL_FAILED,
@@ -277,7 +331,7 @@ pub struct ToolRequest {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{ErrorClass, EventKind, FinishReason, Role};
+    use super::{ErrorClass, EventKind, FinishReason, Risk, Role};
     use crate::taxonomy;
 
     #[test]
@@ -300,6 +354,23 @@ pub(crate) mod tests {
         let mut listed = taxonomy::ALL.to_vec();
         listed.sort_unstable();
         assert_eq!(named, listed);
+    }
+
+    #[test]
+    fn every_risk_names_itself_and_answers_the_two_questions() {
+        assert_eq!(Risk::Read.as_str(), "read");
+        assert_eq!(Risk::Write.as_str(), "write");
+        assert_eq!(Risk::Network.as_str(), "network");
+        assert_eq!(Risk::Destructive.as_str(), "destructive");
+
+        assert!(!Risk::Read.needs_approval());
+        assert!(!Risk::Write.needs_approval());
+        assert!(Risk::Network.needs_approval());
+        assert!(Risk::Destructive.needs_approval());
+
+        assert!(!Risk::Read.is_remembered());
+        assert!(Risk::Network.is_remembered(), "one answer per branch");
+        assert!(!Risk::Destructive.is_remembered(), "every time, by design");
     }
 
     #[test]
@@ -350,6 +421,10 @@ pub(crate) mod tests {
         assert_eq!(ErrorClass::Unknown.as_str(), "unknown");
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the point of this function is to list every kind in one place"
+    )]
     pub fn sample_kinds() -> alloc::vec::Vec<EventKind> {
         use crate::ids::{BranchId, CallId, PrefixHash, TurnId};
         use alloc::string::{String, ToString};
@@ -424,6 +499,17 @@ pub(crate) mod tests {
                 content: "hello".to_string(),
                 role: Role::Assistant,
                 tokens: 2,
+            },
+            EventKind::ApprovalRequested {
+                call,
+                expires: crate::time::Timestamp::new(1_790_000_000, 0).expect("valid"),
+                risk: Risk::Destructive,
+                tool: "shell".to_string(),
+            },
+            EventKind::ApprovalDecided {
+                allow: true,
+                call,
+                note: None,
             },
             EventKind::ToolIntent {
                 args: "{}".to_string(),

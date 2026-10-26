@@ -84,7 +84,11 @@
                         model = "test-model";
                         tools = [
                           {
+                            argv = [
+                              "/run/current-system/sw/bin/true"
+                            ];
                             name = "shell";
+                            risk = "read";
                             schema = "{}";
                           }
                         ];
@@ -93,9 +97,29 @@
                   ];
                 };
                 unit = configured.config.systemd.units."mokmok-agent.service".text;
+                settings =
+                  let
+                    line = builtins.head (
+                      builtins.filter (l: builtins.match ".*--config (/nix/store/[^ ]+).*" l != null) (
+                        inputs.nixpkgs.lib.splitString "\n" unit
+                      )
+                    );
+                  in
+                  builtins.head (builtins.match ".*--config (/nix/store/[^ ]+).*" line);
               in
               pkgs.runCommand "mokmok-agent-module-eval" { } ''
                 unit=${pkgs.writeText "unit" unit}
+                # The module writes the configuration the daemon reads, and the
+                # daemon refuses a tool that does not say what it may touch. A
+                # module that omits the field would be a service that cannot start.
+                grep -q "argv" ${settings} || {
+                  echo "the module did not write a tool's argv" >&2
+                  exit 1
+                }
+                grep -q "risk = \"read\"" ${settings} || {
+                  echo "the module did not write a tool's risk" >&2
+                  exit 1
+                }
                 grep -q "Type=notify" $unit
                 grep -q "WatchdogSec=30s" $unit
                 # The rate limit belongs to [Unit]; in [Service] systemd ignores it

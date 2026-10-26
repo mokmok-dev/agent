@@ -26,7 +26,15 @@ let
     state_dir = "/var/lib/${cfg.stateDirectory}";
     timeout_seconds = cfg.timeoutSeconds;
     tools = map (tool: {
-      inherit (tool) name schema;
+      inherit (tool)
+        argv
+        class
+        name
+        risk
+        schema
+        ;
+      max_output_bytes = tool.maxOutputBytes;
+      timeout_ms = tool.timeoutMs;
     }) cfg.tools;
   }
   // lib.optionalAttrs (cfg.apiKeyFile != null) {
@@ -144,13 +152,56 @@ in
       type = types.listOf (
         types.submodule {
           options = {
+            argv = mkOption {
+              type = types.listOf types.str;
+              description = ''
+                The program and its arguments. The model's arguments arrive on
+                the tool's standard input, so there is no shell and no template.
+              '';
+            };
+            class = mkOption {
+              type = types.enum [
+                "idempotent"
+                "non-idempotent"
+              ];
+              default = "idempotent";
+              description = ''
+                Whether running it twice is the same as running it once. A tool that
+                is not idempotent is never re-run after a crash; the log records
+                that the effect may have happened instead.
+              '';
+            };
+            maxOutputBytes = mkOption {
+              type = types.ints.positive;
+              default = 65536;
+              description = "The most of its output one event may carry.";
+            };
             name = mkOption {
               type = types.str;
               description = "The tool's name, unique within the set.";
             };
+            risk = mkOption {
+              type = types.enum [
+                "destructive"
+                "network"
+                "read"
+                "write"
+              ];
+              description = ''
+                What it may touch. Network is approved once per branch, destructive
+                every time, and read and write inside the declared paths run without
+                asking. There is no default: what a tool may touch is the operator's
+                statement, not this module's guess.
+              '';
+            };
             schema = mkOption {
               type = types.str;
               description = "The tool's schema, as the model will read it.";
+            };
+            timeoutMs = mkOption {
+              type = types.ints.positive;
+              default = 30000;
+              description = "How long one call may run before it is stopped.";
             };
           };
         }

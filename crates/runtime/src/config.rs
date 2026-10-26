@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use agent_core::event::Risk;
+
 use super::{Settings, Tool};
 
 /// The default deadline for one model call.
@@ -94,6 +96,8 @@ struct Raw {
     api_key_file: Option<String>,
     timeout_seconds: Option<u64>,
     max_output_tokens: Option<u64>,
+    #[serde(default)]
+    approval_seconds: Option<u64>,
     directive_version: Option<String>,
     directive: Option<String>,
     #[serde(default)]
@@ -104,6 +108,8 @@ struct Raw {
 struct RawTool {
     name: String,
     schema: String,
+    #[serde(default)]
+    risk: Option<String>,
     #[serde(default)]
     argv: Vec<String>,
     #[serde(default)]
@@ -188,6 +194,15 @@ pub fn parse(
         if tool.argv.is_empty() {
             return Err(ConfigError::Missing("tools[].argv"));
         }
+        // No default. What a tool may touch is the operator's statement, and a
+        // default would be this program making it for them.
+        let risk = match tool.risk.as_deref() {
+            Some("read") => Risk::Read,
+            Some("write") => Risk::Write,
+            Some("network") => Risk::Network,
+            Some("destructive") => Risk::Destructive,
+            Some(_) | None => return Err(ConfigError::Missing("tools[].risk")),
+        };
         let idempotent = match tool.class.as_deref() {
             None | Some("idempotent") => true,
             Some("non-idempotent") => false,
@@ -206,6 +221,7 @@ pub fn parse(
             idempotent,
             max_output,
             name: tool.name,
+            risk,
             schema: tool.schema,
             timeout: Duration::from_millis(timeout_ms),
         });
@@ -214,6 +230,7 @@ pub fn parse(
     Ok(Config {
         state_dir: PathBuf::from(state_dir),
         settings: Settings {
+            approval_grace: Duration::from_secs(raw.approval_seconds.unwrap_or(600)),
             model,
             directive_version,
             directive,
@@ -280,6 +297,7 @@ max_output_tokens = 512
 [[tools]]
 argv = ["/bin/cat"]
 name = "shell"
+risk = "read"
 schema = '{"argv":"string"}'
 "#;
 
@@ -423,12 +441,49 @@ schema = '{"argv":"string"}'
     #[test]
     fn a_tool_class_this_build_does_not_know_is_refused() {
         let text = format!(
-            "{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nclass = \"maybe\"\nname = \"other\"\nschema = '{{}}'\n"
+            "{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nclass = \"maybe\"\nname = \"other\"\nrisk = \"read\"\nschema = '{{}}'\n"
         );
         assert_eq!(
             parse(&text, &no_env),
             Err(ConfigError::ToolClass("maybe".to_string()))
         );
+    }
+
+    #[test]
+    fn a_tool_that_does_not_say_what_it_may_touch_is_refused() {
+        let text = format!(
+            "{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"other\"\nschema = '{{}}'\n"
+        );
+        assert_eq!(
+            parse(&text, &no_env),
+            Err(ConfigError::Missing("tools[].risk"))
+        );
+    }
+
+    #[test]
+    fn a_risk_this_build_does_not_know_is_refused() {
+        let text = format!(
+            "{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"other\"\nrisk = \"harmless\"\nschema = '{{}}'\n"
+        );
+        assert_eq!(
+            parse(&text, &no_env),
+            Err(ConfigError::Missing("tools[].risk"))
+        );
+    }
+
+    #[test]
+    fn a_risk_is_read_into_the_tool() {
+        let text = format!(
+            "{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"other\"\nrisk = \"destructive\"\nschema = '{{}}'\n"
+        );
+        let config = parse(&text, &no_env).expect("parses");
+        let other = config
+            .settings
+            .tools
+            .iter()
+            .find(|tool| tool.name == "other")
+            .expect("the tool");
+        assert_eq!(other.risk, agent_core::event::Risk::Destructive);
     }
 
     #[test]
@@ -472,7 +527,7 @@ schema = '{"argv":"string"}'
     #[test]
     fn two_tools_with_one_name_are_refused() {
         let text = format!(
-            "{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"shell\"\nschema = '{{}}'\n"
+            "{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"shell\"\nrisk = \"read\"\nschema = '{{}}'\n"
         );
         assert_eq!(
             parse(&text, &no_env),
@@ -482,8 +537,9 @@ schema = '{"argv":"string"}'
 
     #[test]
     fn a_tool_with_no_name_is_refused() {
-        let text =
-            format!("{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"\"\nschema = '{{}}'\n");
+        let text = format!(
+            "{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"\"\nrisk = \"read\"\nschema = '{{}}'\n"
+        );
         assert_eq!(
             parse(&text, &no_env),
             Err(ConfigError::Missing("tools[].name"))

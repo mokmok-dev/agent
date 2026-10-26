@@ -2,12 +2,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use agent_core::event::{Event, EventKind, FinishReason};
-use agent_core::ids::{Actor, BranchId};
+use agent_core::ids::{Actor, BranchId, CallId, TurnId};
 use agent_core::time::Timestamp;
 use agent_model::{Completion, Delta, Profile, Provider, ProviderError, Usage};
 use agent_store::Store;
 
-use super::{ROOT_BRANCH, Reactor, Settings, Step, Tool, Work, draw_of};
+use super::{Gate, ROOT_BRANCH, Reactor, Settings, Step, Tool, Work, draw_of, gate};
+use agent_core::event::Risk;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -84,12 +85,21 @@ impl Provider for Fake {
     }
 }
 
+fn call() -> CallId {
+    CallId {
+        turn: TurnId::from_bytes([9; 8]),
+        step: 0,
+    }
+}
+
 fn settings() -> Settings {
     Settings {
+        approval_grace: std::time::Duration::from_secs(60),
         model: "test-model".to_string(),
         directive_version: "v1".to_string(),
         directive: "be careful".to_string(),
         tools: vec![Tool {
+            risk: agent_core::event::Risk::Read,
             argv: vec!["cat".to_string()],
             idempotent: true,
             max_output: 4096,
@@ -120,6 +130,16 @@ fn send(
     branch: BranchId,
     text: &str,
 ) {
+    send_named(store, branch, "send", text);
+}
+
+/// A command from a person, whatever it asks for.
+fn send_named(
+    store: &mut Store,
+    branch: BranchId,
+    command: &str,
+    text: &str,
+) {
     let events = store.load(branch).expect("loads");
     let depth = u64::try_from(events.len()).expect("small");
     let prev = events.last().map(Event::id);
@@ -133,8 +153,8 @@ fn send(
         correlation: None,
         model: None,
         kind: EventKind::CommandReceived {
-            command: "send".to_string(),
-            command_id: "c-1".to_string(),
+            command: command.to_string(),
+            command_id: format!("c-{depth}"),
             surface: "test".to_string(),
             text: Some(text.to_string()),
         },
@@ -390,6 +410,7 @@ fn reactor_with_tools(
 ) -> Reactor {
     let mut with_tools = settings();
     with_tools.tools = vec![Tool {
+        risk: agent_core::event::Risk::Read,
         argv: vec!["cat".to_string()],
         idempotent: true,
         max_output: 4096,
@@ -539,6 +560,7 @@ fn marker_tool(
 ) -> Tool {
     let marker = scratch.path.with_extension("ran");
     Tool {
+        risk: agent_core::event::Risk::Read,
         argv: vec![
             "sh".to_string(),
             "-c".to_string(),
@@ -640,4 +662,213 @@ fn a_call_this_process_filed_runs_even_when_the_tool_may_not_repeat() {
             .any(|event| matches!(event.kind, EventKind::ToolResult { .. })),
         "and its result is in the log"
     );
+}
+
+#[test]
+fn the_gate_allows_what_needs_no_answer() {
+    assert_eq!(
+        gate(Risk::Read, None, false, None, call(), now()),
+        Gate::Run
+    );
+    assert_eq!(
+        gate(Risk::Write, None, false, None, call(), now()),
+        Gate::Run
+    );
+}
+
+#[test]
+fn the_gate_asks_before_what_needs_an_answer() {
+    assert_eq!(
+        gate(Risk::Destructive, None, false, None, call(), now()),
+        Gate::Ask
+    );
+    assert_eq!(
+        gate(Risk::Network, None, false, None, call(), now()),
+        Gate::Ask
+    );
+}
+
+#[test]
+fn the_gate_remembers_one_answer_for_a_network_tool() {
+    assert_eq!(
+        gate(Risk::Network, None, true, None, call(), now()),
+        Gate::Run
+    );
+    assert_eq!(
+        gate(Risk::Destructive, None, true, None, call(), now()),
+        Gate::Ask,
+        "a destructive call is asked every time"
+    );
+}
+
+#[test]
+fn the_gate_waits_while_the_question_is_open() {
+    let later = now()
+        .plus(std::time::Duration::from_secs(60))
+        .expect("later");
+    assert_eq!(
+        gate(
+            Risk::Destructive,
+            None,
+            false,
+            Some((&call(), later)),
+            call(),
+            now()
+        ),
+        Gate::Wait
+    );
+}
+
+#[test]
+fn the_gate_treats_an_unanswered_question_as_a_no() {
+    let past = now()
+        .plus(std::time::Duration::from_secs(1))
+        .expect("later");
+    let after = now()
+        .plus(std::time::Duration::from_secs(2))
+        .expect("after");
+    assert_eq!(
+        gate(
+            Risk::Destructive,
+            None,
+            false,
+            Some((&call(), past)),
+            call(),
+            after
+        ),
+        Gate::Expired
+    );
+}
+
+#[test]
+fn the_gate_refuses_what_was_refused() {
+    assert_eq!(
+        gate(Risk::Read, Some(&false), false, None, call(), now()),
+        Gate::Refuse
+    );
+    assert_eq!(
+        gate(Risk::Destructive, Some(&true), false, None, call(), now()),
+        Gate::Run
+    );
+}
+
+/// A destructive tool that leaves a marker, and the log state just before it runs.
+fn destructive_call(
+    scratch: &Scratch,
+    risk: Risk,
+) -> Tool {
+    let marker = scratch.path.with_extension("ran");
+    let mut tool = marker_tool(scratch, true);
+    tool.argv = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        format!("echo ran >> {}", marker.display()),
+    ];
+    tool.risk = risk;
+    tool
+}
+
+fn ask_for(
+    scratch: &Scratch,
+    tool: Tool,
+) -> Reactor {
+    left_behind(scratch, tool.clone());
+    let mut settings = settings();
+    settings.tools = vec![tool];
+    let mut reactor =
+        Reactor::with_model(&scratch.path, Box::new(Asking), settings).expect("opens");
+    reactor.start(now()).expect("starts");
+    let _ = reactor.step(now()).expect("steps");
+    reactor
+}
+
+#[test]
+fn a_destructive_call_asks_before_it_runs() {
+    let scratch = Scratch::new();
+    let marker = scratch.path.with_extension("ran");
+    let _reactor = ask_for(&scratch, destructive_call(&scratch, Risk::Destructive));
+
+    assert!(!marker.exists(), "it ran without asking");
+    let written = events(&scratch);
+    let asked = written
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ApprovalRequested { risk, tool, .. } => Some((*risk, tool.clone())),
+            _ => None,
+        })
+        .expect("the log holds the question");
+    assert_eq!(asked.0, Risk::Destructive);
+    assert_eq!(asked.1, "shell");
+    let expires = written
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ApprovalRequested { expires, .. } => Some(*expires),
+            _ => None,
+        })
+        .expect("the question");
+    let expected = now()
+        .plus(std::time::Duration::from_secs(60))
+        .expect("later");
+    assert_eq!(expires, expected, "the grace comes from the settings");
+}
+
+#[test]
+fn a_question_that_is_answered_yes_lets_the_call_run() {
+    let scratch = Scratch::new();
+    let marker = scratch.path.with_extension("ran");
+    let mut reactor = ask_for(&scratch, destructive_call(&scratch, Risk::Destructive));
+
+    let call = {
+        let written = events(&scratch);
+        written
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ToolIntent { call, .. } => Some(*call),
+                _ => None,
+            })
+            .expect("an intent")
+    };
+    let mut store = Store::open(&scratch.path).expect("opens");
+    send_named(&mut store, ROOT_BRANCH, "approve", &call.to_string());
+    drop(store);
+
+    for _ in 0..6 {
+        if matches!(reactor.step(now()).expect("steps"), Step::Idle) {
+            break;
+        }
+    }
+    assert!(marker.exists(), "an allowed call runs");
+    assert!(
+        events(&scratch)
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ToolResult { .. })),
+        "and its result is in the log"
+    );
+}
+
+#[test]
+fn a_question_that_expires_is_a_no_and_the_call_never_runs() {
+    let scratch = Scratch::new();
+    let marker = scratch.path.with_extension("ran");
+    let mut reactor = ask_for(&scratch, destructive_call(&scratch, Risk::Destructive));
+
+    let later = now()
+        .plus(std::time::Duration::from_secs(3600))
+        .expect("later");
+    for _ in 0..4 {
+        if matches!(reactor.step(later).expect("steps"), Step::Idle) {
+            break;
+        }
+    }
+
+    assert!(!marker.exists(), "an expired question is a no");
+    let decided = events(&scratch)
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ApprovalDecided { allow, note, .. } => Some((*allow, note.clone())),
+            _ => None,
+        })
+        .expect("the answer is recorded");
+    assert!(!decided.0);
+    assert_eq!(decided.1.as_deref(), Some("the question expired"));
 }

@@ -279,6 +279,24 @@ fn write_data(
             object.string("role", role.as_str());
             object.uint("tokens", *tokens);
         },
+        EventKind::ApprovalRequested {
+            call,
+            expires,
+            risk,
+            tool,
+        } => {
+            object.string("call", &alloc::format!("{call}"));
+            object.string("expires", &expires.rfc3339());
+            object.string("risk", risk.as_str());
+            object.string("tool", tool);
+        },
+        EventKind::ApprovalDecided { allow, call, note } => {
+            object.boolean("allow", *allow);
+            object.string("call", &alloc::format!("{call}"));
+            if let Some(note) = note {
+                object.string("note", note);
+            }
+        },
         EventKind::ToolIntent {
             args,
             call,

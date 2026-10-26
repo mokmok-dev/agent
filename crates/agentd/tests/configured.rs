@@ -172,6 +172,7 @@ timeout_seconds = 5
 [[tools]]
 argv = ["cat"]
 name = "shell"
+risk = "read"
 schema = '{{"argv":"string"}}'
 timeout_ms = 5000
 max_output_bytes = 4096
