@@ -52,6 +52,7 @@ A tool is a directory with a manifest and an executable. The manifest declares w
 | `risk` | The approval rule. Read and write inside the workspace need no approval, network and destructive calls do |
 | `timeout` | The wall clock bound on one call |
 | `max_output` | The byte bound on what one event may carry |
+| `argv` | The program and its arguments; the model's arguments arrive on standard input |
 | `argv` | How the arguments are turned into a process |
 | `permissions` | The paths, hosts, and environment variables the tool may use, enforced at spawn rather than documented and hoped for |
 

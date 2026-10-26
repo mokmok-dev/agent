@@ -868,6 +868,7 @@ mod tests {
             Some(&"shell".to_string())
         );
         let result = chain.push(EventKind::ToolResult {
+            output: String::new(),
             call: call(),
             duration_ms: 1,
             status: 0,
@@ -914,6 +915,7 @@ mod tests {
         let orphan = chain.push(EventKind::ToolResult {
             call: call(),
             duration_ms: 1,
+            output: String::new(),
             status: 0,
             truncated: false,
         });

@@ -243,6 +243,9 @@ struct ToolIntent {
 struct ToolResult {
     call: String,
     duration_ms: u64,
+    /// Absent from events written before a result carried what it produced.
+    #[serde(default)]
+    output: String,
     status: i64,
     truncated: bool,
 }
@@ -401,6 +404,7 @@ fn decode_kind(
             EventKind::ToolResult {
                 call: parse_call(&payload.call)?,
                 duration_ms: payload.duration_ms,
+                output: payload.output,
                 status: i32::try_from(payload.status)
                     .map_err(|_| DecodeError::Payload("status is out of range".to_owned()))?,
                 truncated: payload.truncated,

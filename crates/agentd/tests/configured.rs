@@ -170,8 +170,11 @@ max_output_tokens = 64
 timeout_seconds = 5
 
 [[tools]]
+argv = ["cat"]
 name = "shell"
 schema = '{{"argv":"string"}}'
+timeout_ms = 5000
+max_output_bytes = 4096
 "#,
         state = dir.to_string_lossy(),
         base = base_url
@@ -422,8 +425,35 @@ fn a_tool_call_becomes_an_intent_with_a_key() {
             "dev.mokmok.agent.model.requested",
             "dev.mokmok.agent.model.responded",
             "dev.mokmok.agent.tool.intent",
+            "dev.mokmok.agent.tool.result",
         ]
     );
+    assert_eq!(events[6].kind.type_name(), "dev.mokmok.agent.tool.intent");
+    match &events[7].kind {
+        EventKind::ToolResult {
+            call,
+            output,
+            status,
+            truncated,
+            ..
+        } => {
+            assert_eq!(
+                *call,
+                agent_core::ids::CallId {
+                    turn: events[3].correlation.expect("a turn"),
+                    step: 0,
+                }
+            );
+            assert_eq!(*status, 0);
+            assert!(!truncated);
+            assert_eq!(
+                output.trim(),
+                r#"{"cmd":"date"}"#,
+                "the arguments went to stdin"
+            );
+        },
+        other => panic!("unexpected {other:?}"),
+    }
 
     match &events[5].kind {
         EventKind::ModelResponded {

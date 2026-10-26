@@ -212,6 +212,8 @@ pub enum EventKind {
     ToolResult {
         call: CallId,
         duration_ms: u64,
+        /// What the tool wrote, cut to the manifest's bound when it was longer.
+        output: String,
         status: i32,
         truncated: bool,
     },
@@ -350,7 +352,7 @@ pub(crate) mod tests {
 
     pub fn sample_kinds() -> alloc::vec::Vec<EventKind> {
         use crate::ids::{BranchId, CallId, PrefixHash, TurnId};
-        use alloc::string::ToString;
+        use alloc::string::{String, ToString};
 
         let _root = BranchId::from_bytes([1; 8]);
         let turn = TurnId::from_bytes([2; 8]);
@@ -430,6 +432,7 @@ pub(crate) mod tests {
                 tool: "shell".to_string(),
             },
             EventKind::ToolResult {
+                output: String::new(),
                 call,
                 duration_ms: 5,
                 status: 0,

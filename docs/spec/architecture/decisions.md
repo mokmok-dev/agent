@@ -322,3 +322,13 @@ An answer with no words in it is not an answer. A response that exists only to a
 
 Two costs. The payload of `model.responded` gained a field, which events written before it do not have: the reader treats it as absent rather than failing, and a reader that predates the field ignores it, so neither side breaks. And the fold refuses the same call filed twice, which only a second writer can do, because the first writer cannot append the same event again.
 
+# 28. A tool is a program, and the arguments arrive on its standard input
+
+The manifest declares one program and its arguments: no shell, no substitution, no pattern language. The bytes the model wrote arrive on the tool's standard input, exactly as it wrote them.
+
+Templating the arguments into a command line would have put a parser between the model and the machine, and every tool would have needed its own escaping rules. Standard input has none: a tool that wants JSON parses JSON, a tool that wants a line reads a line, and a tool that wants nothing ignores it. The cost is that a shell one-liner needs a two-word wrapper rather than a template, which is a smaller cost than a quoting bug in every tool.
+
+The timeout is the manifest's, not the tool's. A process that outlives it is killed and recorded as `tool.failed` with `may_have_happened: true`, because a stopped process may have done half its work. A tool that lies about being idempotent is still a bug in the tool, and the flag is what keeps the log honest about the ones that are honest.
+
+Output longer than the manifest's bound keeps its first half and its last half, with the byte count of what was dropped between them. A program puts its summary and its error at the ends, and the middle of a large output is where the least is.
+
