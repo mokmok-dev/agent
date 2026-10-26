@@ -24,11 +24,20 @@ fn run(args: &Args) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     loop {
         let now = clock::now().map_err(|error| error.to_string())?;
-        if reactor.step(now).map_err(|error| error.to_string())? == Step::Idle {
-            if args.once {
-                return Ok(());
-            }
-            std::thread::sleep(IDLE_WAIT);
+        match reactor.step(now).map_err(|error| error.to_string())? {
+            Step::Append(_) | Step::RequestModel { .. } => {},
+            Step::Idle => {
+                if args.once {
+                    return Ok(());
+                }
+                std::thread::sleep(IDLE_WAIT);
+            },
+            Step::Wait { until } => {
+                if args.once {
+                    return Ok(());
+                }
+                std::thread::sleep(agent_runtime::wait_for(now, until));
+            },
         }
     }
 }

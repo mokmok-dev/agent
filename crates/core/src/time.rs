@@ -13,6 +13,7 @@
 
 use alloc::string::String;
 use core::fmt;
+use core::time::Duration;
 
 /// Why a timestamp could not be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +72,28 @@ impl Timestamp {
             return Err(TimeError::OutOfRange);
         }
         Ok(Self { secs, nanos })
+    }
+
+    /// This instant moved forward by a duration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TimeError::OutOfRange`] when the result would not fit or when
+    /// the duration is larger than an `i64` of seconds.
+    pub fn plus(
+        &self,
+        duration: Duration,
+    ) -> Result<Self, TimeError> {
+        let nanos = u64::from(self.nanos) + u64::from(duration.subsec_nanos());
+        let carry = i64::try_from(nanos / 1_000_000_000).map_err(|_| TimeError::OutOfRange)?;
+        let seconds = i64::try_from(duration.as_secs()).map_err(|_| TimeError::OutOfRange)?;
+        let secs = self
+            .secs
+            .checked_add(seconds)
+            .and_then(|sum| sum.checked_add(carry))
+            .ok_or(TimeError::OutOfRange)?;
+        let nanos = u32::try_from(nanos % 1_000_000_000).map_err(|_| TimeError::OutOfRange)?;
+        Self::new(secs, nanos)
     }
 
     #[must_use]
@@ -606,5 +629,40 @@ mod tests {
             TimeError::BeforeEpoch.to_string(),
             "the instant is before 1970-01-01T00:00:00Z"
         );
+    }
+}
+
+#[cfg(test)]
+mod plus_tests {
+    use super::Timestamp;
+    use core::time::Duration;
+
+    fn at() -> Timestamp {
+        Timestamp::new(1_790_000_000, 500_000_000).expect("valid")
+    }
+
+    #[test]
+    fn a_whole_second_moves_the_seconds() {
+        let later = at().plus(Duration::from_secs(2)).expect("fits");
+        assert_eq!(later.secs(), 1_790_000_002);
+        assert_eq!(later.nanos(), 500_000_000);
+    }
+
+    #[test]
+    fn nanoseconds_carry_into_the_second() {
+        let later = at().plus(Duration::from_millis(700)).expect("fits");
+        assert_eq!(later.secs(), 1_790_000_001);
+        assert_eq!(later.nanos(), 200_000_000);
+    }
+
+    #[test]
+    fn a_zero_duration_changes_nothing() {
+        assert_eq!(at().plus(Duration::ZERO).expect("fits"), at());
+    }
+
+    #[test]
+    fn a_duration_that_would_overflow_is_refused() {
+        let huge = Duration::from_secs(u64::MAX);
+        assert!(at().plus(huge).is_err());
     }
 }

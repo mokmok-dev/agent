@@ -253,3 +253,11 @@ The build times say almost nothing. The crate counts say a lot, and the third ro
 So the adapter uses `ureq`: blocking, small, and correct about HTTP. The cost accepted is 28 crates, one of which builds C code with `ring`, and a dependency whose API can change between major versions.
 
 The C dependency was the risk worth checking before committing, since this project builds in a Nix sandbox where a missing compiler is a build failure rather than a warning. `nix flake check` passes with the dependency in the tree, so `ring`'s C is built by the same toolchain the rest of the workspace uses.
+
+# 23. A turn's input joins the prompt without becoming a message
+
+A turn carries the text the operator asked with. The transcript carries the messages that have been appended. Those are two different facts, and the prompt needs both: what was said before, and what is being asked now.
+
+So the renderer is handed the transcript plus the open turn's input as one more user message. Nothing is appended to the log to make that happen, because the input is already recorded in `turn.requested` and appending `message.appended` with the same text would put the same words in the log twice, where a later reader would have to know which of them to believe.
+
+The cost is that two events describe one utterance. A reader that wants the transcript must read `turn.requested` for the asking and `message.appended` for the answering, which is exactly the distinction a replay needs anyway: the request is a fact about intent, the message is a fact about the transcript.

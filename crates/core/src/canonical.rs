@@ -242,6 +242,11 @@ fn write_data(
             object.boolean("retryable", *retryable);
             object.string("turn", &alloc::format!("{turn}"));
         },
+        EventKind::ScheduleArmed { attempt, due, turn } => {
+            object.uint("attempt", u64::from(*attempt));
+            object.string("due", &due.rfc3339());
+            object.string("turn", &alloc::format!("{turn}"));
+        },
         EventKind::MessageAppended {
             content,
             role,

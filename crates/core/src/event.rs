@@ -189,6 +189,12 @@ pub enum EventKind {
         retryable: bool,
         turn: TurnId,
     },
+    /// A retry is owed to this turn at `due`.
+    ScheduleArmed {
+        attempt: u32,
+        due: Timestamp,
+        turn: TurnId,
+    },
     MessageAppended {
         content: String,
         role: Role,
@@ -236,6 +242,7 @@ impl EventKind {
             Self::ModelResponded { .. } => taxonomy::MODEL_RESPONDED,
             Self::ModelCacheObserved { .. } => taxonomy::MODEL_CACHE_OBSERVED,
             Self::ModelFailed { .. } => taxonomy::MODEL_FAILED,
+            Self::ScheduleArmed { .. } => taxonomy::SCHEDULE_ARMED,
             Self::MessageAppended { .. } => taxonomy::MESSAGE_APPENDED,
             Self::ToolIntent { .. } => taxonomy::TOOL_INTENT,
             Self::ToolResult { .. } => taxonomy::TOOL_RESULT,
@@ -390,6 +397,11 @@ pub(crate) mod tests {
                 attempt: 1,
                 class: ErrorClass::Timeout,
                 retryable: true,
+                turn,
+            },
+            EventKind::ScheduleArmed {
+                attempt: 1,
+                due: crate::time::Timestamp::new(1_790_000_000, 0).expect("valid"),
                 turn,
             },
             EventKind::MessageAppended {
