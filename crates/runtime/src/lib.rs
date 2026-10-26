@@ -274,17 +274,14 @@ impl Reactor {
         let facts = state
             .branch(branch)
             .ok_or(ReactorError::Fold(FoldError::UnknownBranch(branch)))?;
-        let mut messages: Vec<(Role, &str)> = facts
+        let messages: Vec<(Role, &str)> = facts
             .messages
             .iter()
             .map(|message| (message.role, message.content.as_str()))
             .collect();
-        let asked = facts
-            .turns
-            .iter()
-            .find(|candidate| candidate.id == turn)
-            .ok_or(ReactorError::Fold(FoldError::UnknownTurn(turn)))?;
-        messages.push((Role::User, asked.input.as_str()));
+        if !facts.turns.iter().any(|candidate| candidate.id == turn) {
+            return Err(ReactorError::Fold(FoldError::UnknownTurn(turn)));
+        }
         let tools: Vec<ToolSchema<'_>> = settings
             .tools
             .iter()

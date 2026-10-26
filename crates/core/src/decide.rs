@@ -77,6 +77,27 @@ pub fn decide(
         return Step::Wait { until };
     }
 
+    // An answer the transcript does not hold yet is written first: it is the
+    // cheapest step, and a later turn cannot see the conversation until it lands.
+    for (branch, facts) in state.branches() {
+        if facts.archived {
+            continue;
+        }
+        let Some(unfiled) = &facts.unfiled else {
+            continue;
+        };
+        return Step::Append(Intent {
+            branch: *branch,
+            causation: None,
+            correlation: Some(unfiled.turn),
+            kind: EventKind::MessageAppended {
+                content: unfiled.content.clone(),
+                role: crate::event::Role::Assistant,
+                tokens: unfiled.tokens,
+            },
+        });
+    }
+
     for (branch, facts) in state.branches() {
         if facts.archived {
             continue;
@@ -157,6 +178,14 @@ mod tests {
             &mut self,
             kind: EventKind,
         ) -> Event {
+            self.push_correlated(kind, None)
+        }
+
+        fn push_correlated(
+            &mut self,
+            kind: EventKind,
+            correlation: Option<TurnId>,
+        ) -> Event {
             let event = Event {
                 branch: self.branch,
                 depth: self.depth,
@@ -164,7 +193,7 @@ mod tests {
                 time: now(),
                 actor: Actor::Process("test".to_string()),
                 causation: None,
-                correlation: None,
+                correlation,
                 model: None,
                 kind,
             };
@@ -242,6 +271,22 @@ mod tests {
                 retryable,
                 turn,
             })
+        }
+
+        fn message(
+            &mut self,
+            turn: TurnId,
+            content: &str,
+            tokens: u64,
+        ) -> Event {
+            self.push_correlated(
+                EventKind::MessageAppended {
+                    content: content.to_string(),
+                    role: crate::event::Role::Assistant,
+                    tokens,
+                },
+                Some(turn),
+            )
         }
 
         fn armed(
@@ -328,7 +373,54 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_turn_leaves_nothing_to_do() {
+    fn an_answer_the_transcript_lacks_is_written_before_anything_else() {
+        let mut state = State::default();
+        let turn = {
+            let mut chain = Chain::new(&mut state, 1);
+            chain.create();
+            let turn = chain.turn();
+            chain.requested(turn);
+            chain.responded(turn);
+            turn
+        };
+        match decide(&state, now()) {
+            Step::Append(Intent {
+                correlation,
+                kind:
+                    EventKind::MessageAppended {
+                        content,
+                        role,
+                        tokens,
+                    },
+                ..
+            }) => {
+                assert_eq!(content, "ok");
+                assert_eq!(role, crate::event::Role::Assistant);
+                assert_eq!(tokens, 1);
+                assert_eq!(correlation, Some(turn));
+            },
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_answer_already_in_the_transcript_is_not_written_again() {
+        let mut state = State::default();
+        let turn = {
+            let mut chain = Chain::new(&mut state, 1);
+            chain.create();
+            let turn = chain.turn();
+            chain.requested(turn);
+            chain.responded(turn);
+            chain.message(turn, "ok", 1);
+            turn
+        };
+        let _ = turn;
+        assert_eq!(decide(&state, now()), Step::Idle);
+    }
+
+    #[test]
+    fn a_finished_turn_leaves_only_its_answer_to_file() {
         let mut state = State::default();
         {
             let mut chain = Chain::new(&mut state, 1);
@@ -336,6 +428,7 @@ mod tests {
             let turn = chain.turn();
             chain.requested(turn);
             chain.responded(turn);
+            chain.message(turn, "ok", 1);
         }
         assert_eq!(decide(&state, now()), Step::Idle);
     }

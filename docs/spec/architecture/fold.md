@@ -14,7 +14,7 @@ The fold turns an ordered event slice into state. It keeps facts, not control fl
 
 | Fact | Shape | Written by |
 |---|---|---|
-| Transcript | Role, content, token count, and the turn that caused it, in order | `message.appended` |
+| Transcript | Role, content, token count, and the turn that caused it, in order | `message.appended`, and the asking projected from `turn.requested` |
 | Turns | Turn id and the input that requested it | `turn.requested` |
 | Unresolved calls | Call id and tool name, until a result or failure arrives | `tool.intent`, cleared by `tool.result` and `tool.failed` |
 | Cache totals | Cached and uncached tokens, and how many observations were reported | `model.cache.observed` |
