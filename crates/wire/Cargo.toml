@@ -1,0 +1,8 @@
+[package]
+edition.workspace = true
+name = "agent-wire"
+publish = false
+version = "0.0.0"
+
+[lints]
+workspace = true

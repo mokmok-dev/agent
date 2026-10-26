@@ -57,6 +57,7 @@ Layers, starting with the store.
 | `agent-store` | Schema, append-only triggers, chain verification, snapshots, backup, blobs | files |
 | `agent-prompt` | Canonical prompt rendering, segment hashing, prefix chain | none |
 | `agent-model` | Provider adapters over the model port | network |
+| `agent-wire` | Byte-level wire format: request encoding and server-sent event frames. `no_std` with `alloc` | none |
 | `agent-tools` | Tool registry, executors, sandbox policy | processes, network |
 | `agent-ipc` | Length-prefixed command protocol over a Unix socket | socket |
 | `agent-runtime` | Reactor, timers, scheduler, backpressure, service notification | time, socket |
