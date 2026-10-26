@@ -25,6 +25,10 @@
         treefmt-nix.flakeModule
       ];
 
+      flake = {
+        nixosModules.default = import ./nix/module.nix { inherit self; };
+      };
+
       perSystem =
         {
           config,
@@ -34,14 +38,14 @@
           ...
         }:
         let
-          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+          rustToolchain = pkgs.rust-bin.stable.latest.default;
+          craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+          src = pkgs.lib.cleanSourceWith { src = ./.; };
           commonArgs = {
             inherit src;
             strictDeps = true;
           };
-          craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-          rustToolchain = pkgs.rust-bin.stable.latest.default;
-          src = pkgs.lib.cleanSourceWith { src = ./.; };
+          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
         in
         {
           _module.args.pkgs = import nixpkgs {
@@ -53,7 +57,10 @@
             clippy = craneLib.cargoClippy (
               commonArgs
               // {
-                inherit cargoArtifacts src;
+                inherit
+                  src
+                  cargoArtifacts
+                  ;
                 cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
               }
             );
@@ -103,7 +110,10 @@
             test = craneLib.cargoNextest (
               commonArgs
               // {
-                inherit cargoArtifacts src;
+                inherit
+                  src
+                  cargoArtifacts
+                  ;
                 cargoNextestExtraArgs = "--workspace --all-features";
               }
             );
@@ -171,8 +181,6 @@
             };
           };
         };
-
-      flake.nixosModules.default = import ./nix/module.nix { inherit self; };
 
       systems = [
         "x86_64-linux"
