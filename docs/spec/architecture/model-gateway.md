@@ -10,7 +10,7 @@ verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 
 # The port
 
-`agent-core` declares the port. Adapters live in `agent-model`.
+`agent-model` holds the port, and the adapters beside it. `agent-core` declares no trait.
 
 The port has two operations. One reports the model profile, which states the model id, the context window, whether the provider caches prefixes, how long that cache is expected to live, and whether the provider reports cached token counts. The other takes a rendered request and returns a stream.
 
@@ -37,7 +37,7 @@ Retry is allowed only when all of these hold.
 
 Retry is refused for a 4xx that names a malformed request, a context-length rejection, and anything after the first token. A partial response that fails mid-stream is recorded as `model.failed` with `partial: true`, and the turn fails. It is not retried, because a retried retry would double the cost and could produce two different answers for one turn.
 
-Backoff is exponential with full jitter, starting at 500 ms and capped at 30 seconds. The next attempt instant is persisted as a `schedule.armed` event, so a restart resumes the backoff instead of resetting it.
+Backoff is exponential with full jitter, starting at 500 ms. With three attempts the ceiling rises from 500 ms to 1 second and no further, so the 30 second cap that earlier drafts named cannot bind. The code carries no bound it cannot reach. The next attempt instant is persisted as a `schedule.armed` event, so a restart resumes the backoff instead of resetting it.
 
 # Token accounting
 

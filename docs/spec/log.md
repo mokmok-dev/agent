@@ -16,3 +16,4 @@
 * **Update**: Recorded that the store owns the decoder, and why an unknown payload is kept as the bytes it arrived as.
 * **Update**: Recorded why error types are hand-written and why the reactor re-folds the whole log on each step.
 * **Update**: Recorded the tool block's framing, why the directive version stays out of the bytes, and what the token estimate is allowed to decide.
+* **Update**: Recorded where `no_std` applies and why, moved the model port into `agent-model`, and removed a backoff cap that three attempts cannot reach.

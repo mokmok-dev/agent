@@ -73,7 +73,7 @@ Dependencies point one way, toward `agent-core`.
 
 - `agent-core` depends on `serde` and `blake3`, nothing else, and compiles as `no_std` with `alloc`.
 - Every adapter depends on `agent-core` and on its own driver crate.
-- `agent-core` depends on no adapter. It takes clock readings, entropy, and rendered prompts as data. The traits that produce them live in `agent-runtime`, where they are implemented.
+- `agent-core` depends on no adapter. It takes clock readings, entropy, and rendered prompts as data. `Clock` and `Entropy` live in `agent-runtime`; the model port lives in `agent-model`, beside the adapters that implement it.
 
 The traits are narrow on purpose. `Clock` returns an instant. `Entropy` fills bytes. `ModelPort` takes a rendered request and returns a stream. `ToolPort` takes an intent and returns a result. `Notifier` sends a heartbeat.
 
