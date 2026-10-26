@@ -75,6 +75,8 @@ pub enum StoreError {
     },
     /// A stored event no longer matches its own identifier.
     Chain { id: EventId, detail: &'static str },
+    /// A stored body could not be decoded into an event.
+    Decode(DecodeError),
 }
 
 impl fmt::Display for StoreError {
@@ -105,6 +107,7 @@ impl fmt::Display for StoreError {
                 "branch {branch}: expected depth {expected}, got {found}"
             ),
             Self::Chain { id, detail } => write!(formatter, "event {id} failed {detail}"),
+            Self::Decode(error) => write!(formatter, "cannot decode a stored event: {error}"),
         }
     }
 }
@@ -212,6 +215,47 @@ impl Store {
             ));
         }
         Ok(out)
+    }
+
+    /// Every branch id in the store, in id order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Query`] when the read fails and
+    /// [`StoreError::Identifier`] when a stored branch id is not hex.
+    pub fn branches(&self) -> Result<Vec<BranchId>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT DISTINCT branch FROM events ORDER BY branch")?;
+        let mut rows = statement.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let text: String = row.get(0)?;
+            let Ok(branch) = BranchId::from_str(&text) else {
+                return Err(StoreError::Identifier(text));
+            };
+            out.push(branch);
+        }
+        Ok(out)
+    }
+
+    /// One branch, decoded into typed events, in depth order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Query`] when the read fails and
+    /// [`StoreError::Decode`] when a stored body cannot be read, which means
+    /// the store and this build disagree about the format.
+    pub fn load(
+        &self,
+        branch: BranchId,
+    ) -> Result<Vec<Event>, StoreError> {
+        let bodies = self.bodies(branch)?;
+        let mut events = Vec::with_capacity(bodies.len());
+        for (_, body) in bodies {
+            events.push(decode(&body).map_err(StoreError::Decode)?);
+        }
+        Ok(events)
     }
 
     /// Walks every stored event and re-derives what the writer promised.

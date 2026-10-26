@@ -14,6 +14,12 @@ verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 
 The CLI never writes events. It sends commands to `agentd` over `bus.sock`, or, for read-only commands, opens the database read-only. The exceptions are `gc` and `backup`, which touch files rather than history, and `doctor`, which requires the service to be stopped and says so.
 
+# The daemon's own flags
+
+`agentd` takes a state directory and one flag that ends the process after a single step. The supervisor passes the directory, from `StateDirectory` on Linux and the application support path on macOS. The single-step flag exists so a test can drive one iteration of the loop without a supervisor, and so an operator can run the loop under their own supervision if they prefer it to systemd's.
+
+Nothing else is configurable on the command line. Anything else would be a setting two processes have to agree on, and the file that both read is the store.
+
 # Commands
 
 | Command | Writes | Purpose |

@@ -152,6 +152,7 @@ pub enum EventKind {
         command: String,
         command_id: String,
         surface: String,
+        text: Option<String>,
     },
     TurnRequested {
         input: String,
@@ -352,6 +353,7 @@ pub(crate) mod tests {
                 command: "send".to_string(),
                 command_id: "c1".to_string(),
                 surface: "tui".to_string(),
+                text: Some("hello".to_string()),
             },
             EventKind::TurnRequested {
                 input: "hi".to_string(),
