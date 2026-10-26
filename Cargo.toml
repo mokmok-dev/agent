@@ -8,6 +8,7 @@ agent-store = { path = "crates/store" }
 blake3 = { version = "1", default-features = false }
 rusqlite = "0.37"
 serde = { version = "1", default-features = false }
+serde_json = { version = "1", features = ["raw_value"] }
 serde_yaml_ng = "0.10"
 
 [workspace.lints.clippy]

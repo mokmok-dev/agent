@@ -8,6 +8,8 @@ version = "0.0.0"
 agent-core.workspace = true
 blake3.workspace = true
 rusqlite = { workspace = true, features = ["bundled"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 
 [lints]
 workspace = true

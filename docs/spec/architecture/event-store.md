@@ -92,6 +92,17 @@ The DAG walk is needed only for the branch tree, which is a query over `branch.c
 
 A failed verification writes nothing and fails stopped. It does not attempt repair, because a repair that guesses is worse than a refusal.
 
+# Reading back
+
+The store also owns the decoder. The core writes an event and never reads one back, so the shape of a stored event is defined in exactly one place on each side: the writer in the core, the reader here.
+
+Two properties make the round trip total rather than nearly total.
+
+- An unknown payload is kept as the exact bytes it arrived as, not re-serialized. The decoder borrows the original slice of the body, so an event this build does not understand survives a decode and an encode unchanged.
+- An event whose schema version is newer than this build becomes unknown rather than truncated. Reading it into a known type would silently drop the fields the newer build added, and a re-encode would then change its identity.
+
+The test that matters runs every event type through the writer and the decoder and asserts both the value and the bytes. A decoder that agrees with the writer on meaning but not on bytes would still break every identifier.
+
 # Snapshots
 
 A snapshot is the folded state of one branch at one depth, with a hash over the state bytes and the tip event id.
