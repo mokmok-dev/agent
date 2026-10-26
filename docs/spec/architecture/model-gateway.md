@@ -51,7 +51,7 @@ Retry is allowed only when all of these hold.
 2. The error is transport-level, a 5xx, a 429, or a timeout.
 3. The attempt count is under 3.
 
-Retry is refused for a 4xx that names a malformed request, a context-length rejection, and anything after the first token. A partial response that fails mid-stream is recorded as `model.failed` with `partial: true`, and the turn fails. It is not retried, because a retried retry would double the cost and could produce two different answers for one turn.
+Retry is refused for a 4xx that names a malformed request, a context-length rejection, and anything after the first token. A partial response that fails mid-stream is recorded as `model.failed` with `partial: true`, and the turn fails. A stream counts as finished when the provider sends its end-of-stream sentinel or a finish reason, and as truncated when it ends with neither. Either signal alone is enough, because providers differ on which they send. It is not retried, because a retried retry would double the cost and could produce two different answers for one turn.
 
 Backoff is exponential with full jitter, starting at 500 ms. With three attempts the ceiling rises from 500 ms to 1 second and no further, so the 30 second cap that earlier drafts named cannot bind. The code carries no bound it cannot reach. The next attempt instant is persisted as a `schedule.armed` event, so a restart resumes the backoff instead of resetting it.
 

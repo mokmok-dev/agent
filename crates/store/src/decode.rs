@@ -427,6 +427,7 @@ fn parse_finish(text: &str) -> Result<FinishReason, DecodeError> {
         "length" => FinishReason::Length,
         "tool_calls" => FinishReason::ToolCalls,
         "content_filter" => FinishReason::ContentFilter,
+        "unknown" => FinishReason::Unknown,
         other => {
             return Err(DecodeError::Payload(format!(
                 "unknown finish reason {other}"

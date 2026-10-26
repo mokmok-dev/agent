@@ -8,11 +8,13 @@
 
 use std::time::Duration;
 
-use agent_core::event::{ErrorClass, Role};
+use agent_core::event::{ErrorClass, FinishReason, Role};
 use agent_prompt::{Kind, Prompt};
 
-pub mod openai;
 use agent_core::ids::PrefixHash;
+
+pub mod http;
+pub mod openai;
 
 /// How many attempts one request may take, counting the first.
 pub const MAX_ATTEMPTS: u32 = 3;
@@ -56,6 +58,8 @@ pub struct Request {
     pub tools: String,
     pub messages: Vec<Message>,
     pub max_output_tokens: u64,
+    /// The renderer's estimate of the input size, used only when the provider reports no usage.
+    pub input_tokens_estimate: u64,
 }
 
 /// One turn of a transcript, as a request carries it.
@@ -96,6 +100,7 @@ impl Request {
             tools,
             messages,
             max_output_tokens,
+            input_tokens_estimate: prompt.tokens,
         }
     }
 }
@@ -105,6 +110,14 @@ impl Request {
 pub enum Delta<'a> {
     /// A run of output text. Ephemeral, never appended.
     Text(&'a str),
+}
+
+/// A finished response: what it said, and what it cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Completion {
+    pub usage: Usage,
+    /// How the model stopped, when the provider said.
+    pub finish: Option<FinishReason>,
 }
 
 /// What a finished response cost.
@@ -228,7 +241,7 @@ pub trait Provider {
         &mut self,
         request: &Request,
         delta: &mut dyn FnMut(Delta<'_>),
-    ) -> Result<Usage, ProviderError>;
+    ) -> Result<Completion, ProviderError>;
 }
 
 #[cfg(test)]

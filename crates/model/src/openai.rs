@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::Request;
-use agent_core::event::Role;
+use agent_core::event::{FinishReason, Role};
 
 /// The provider's own end-of-stream sentinel, which is not a JSON frame.
 pub const DONE: &str = "[DONE]";
@@ -69,6 +69,22 @@ pub fn encode(request: &Request) -> String {
         max_tokens: request.max_output_tokens,
     };
     serde_json::to_string(&body).unwrap_or_default()
+}
+
+/// The finish reason a provider's word means.
+///
+/// The four the log knows are mapped exactly. Anything else is recorded as
+/// unknown rather than folded into one of them, because a provider that stops
+/// for a reason this build has never seen is a fact worth keeping.
+#[must_use]
+pub fn finish_of(reason: &str) -> FinishReason {
+    match reason {
+        "stop" => FinishReason::Stop,
+        "length" => FinishReason::Length,
+        "tool_calls" | "function_call" => FinishReason::ToolCalls,
+        "content_filter" => FinishReason::ContentFilter,
+        _ => FinishReason::Unknown,
+    }
 }
 
 /// One data frame, read.

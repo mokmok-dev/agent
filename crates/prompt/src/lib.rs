@@ -84,7 +84,12 @@ pub struct Prompt {
 /// Estimates the tokens in a byte string.
 #[must_use]
 pub const fn estimate_tokens(text: &str) -> u64 {
-    let bytes = text.len() as u64;
+    estimate_tokens_of_bytes(text.len() as u64)
+}
+
+/// Estimates the tokens in a byte count, for text this process never assembled.
+#[must_use]
+pub const fn estimate_tokens_of_bytes(bytes: u64) -> u64 {
     bytes.div_ceil(BYTES_PER_TOKEN)
 }
 
