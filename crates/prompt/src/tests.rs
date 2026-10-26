@@ -1,9 +1,17 @@
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use agent_core::event::Role;
 
-use super::{Directive, Kind, ToolSchema, estimate_tokens, render};
+fn msg(
+    role: Role,
+    text: &str,
+) -> Message<'_> {
+    Message::plain(role, text)
+}
+
+use super::{CallRef, Directive, Kind, Message, ToolSchema, estimate_tokens, render};
 
 fn directive() -> Directive<'static> {
     Directive {
@@ -65,7 +73,7 @@ fn messages_follow_the_tools_in_order() {
     let prompt = render(
         &directive(),
         &tools(),
-        &[(Role::User, "hello"), (Role::Assistant, "hi")],
+        &[msg(Role::User, "hello"), msg(Role::Assistant, "hi")],
     );
     assert_eq!(prompt.segments.len(), 4);
     assert_eq!(prompt.segments[2].text, "hello");
@@ -80,7 +88,7 @@ fn the_chain_has_one_entry_per_segment() {
     let prompt = render(
         &directive(),
         &tools(),
-        &[(Role::User, "a"), (Role::User, "b")],
+        &[msg(Role::User, "a"), msg(Role::User, "b")],
     );
     assert_eq!(prompt.chain.len(), prompt.segments.len());
 }
@@ -118,8 +126,8 @@ fn changing_the_directive_changes_the_whole_chain() {
 fn changing_a_tool_changes_the_chain_from_the_tool_segment_onwards() {
     let mut changed = tools();
     changed[0].schema = r#"{"path":"string","mode":"string"}"#;
-    let left = render(&directive(), &tools(), &[(Role::User, "hi")]);
-    let right = render(&directive(), &changed, &[(Role::User, "hi")]);
+    let left = render(&directive(), &tools(), &[msg(Role::User, "hi")]);
+    let right = render(&directive(), &changed, &[msg(Role::User, "hi")]);
     assert_eq!(left.shared_prefix(&right), 1, "the directive is untouched");
 }
 
@@ -139,14 +147,14 @@ fn the_version_is_recorded_beside_the_prompt_and_never_in_its_bytes() {
 #[test]
 fn a_fork_shares_every_segment_before_the_one_that_differs() {
     let prefix = [
-        (Role::User, "one"),
-        (Role::Assistant, "two"),
-        (Role::User, "three"),
+        msg(Role::User, "one"),
+        msg(Role::Assistant, "two"),
+        msg(Role::User, "three"),
     ];
     let mut left_messages = prefix.to_vec();
-    left_messages.push((Role::User, "left"));
+    left_messages.push(msg(Role::User, "left"));
     let mut right_messages = prefix.to_vec();
-    right_messages.push((Role::User, "right"));
+    right_messages.push(msg(Role::User, "right"));
 
     let left = render(&directive(), &tools(), &left_messages);
     let right = render(&directive(), &tools(), &right_messages);
@@ -159,12 +167,12 @@ fn a_fork_shares_every_segment_before_the_one_that_differs() {
 
 #[test]
 fn extending_a_prompt_by_hand_matches_rendering_it_in_one_go() {
-    let messages = [(Role::User, "one"), (Role::Assistant, "two")];
+    let messages = [msg(Role::User, "one"), msg(Role::Assistant, "two")];
     let one_go = render(&directive(), &tools(), &messages);
 
     let mut step_by_step = render(&directive(), &tools(), &[]);
-    for (role, content) in messages {
-        step_by_step.push_message(role, content);
+    for message in &messages {
+        step_by_step.push_structured(message);
     }
     assert_eq!(step_by_step.segments, one_go.segments);
     assert_eq!(step_by_step.chain, one_go.chain);
@@ -173,7 +181,7 @@ fn extending_a_prompt_by_hand_matches_rendering_it_in_one_go() {
 
 #[test]
 fn the_total_is_the_sum_of_the_segments() {
-    let prompt = render(&directive(), &tools(), &[(Role::User, "hello there")]);
+    let prompt = render(&directive(), &tools(), &[msg(Role::User, "hello there")]);
     let sum: u64 = prompt.segments.iter().map(|segment| segment.tokens).sum();
     assert_eq!(prompt.tokens, sum);
 }
@@ -190,13 +198,13 @@ fn the_estimate_is_four_bytes_to_the_token_rounded_up() {
 
 #[test]
 fn a_prompt_shares_everything_with_itself() {
-    let prompt = render(&directive(), &tools(), &[(Role::User, "hello")]);
+    let prompt = render(&directive(), &tools(), &[msg(Role::User, "hello")]);
     assert_eq!(prompt.shared_prefix(&prompt), prompt.segments.len());
 }
 
 #[test]
 fn a_prompt_shares_nothing_with_a_shorter_one_it_does_not_extend() {
-    let left = render(&directive(), &tools(), &[(Role::User, "hello")]);
+    let left = render(&directive(), &tools(), &[msg(Role::User, "hello")]);
     let right = render(&directive(), &[], &[]);
     assert_eq!(left.shared_prefix(&right), 1, "only the directive");
 }
@@ -241,7 +249,7 @@ fn a_tool_segment_cannot_be_confused_by_a_name_that_looks_like_a_length() {
 
 #[test]
 fn growing_a_prompt_does_not_disturb_the_original() {
-    let original = render(&directive(), &tools(), &[(Role::User, "hello")]);
+    let original = render(&directive(), &tools(), &[msg(Role::User, "hello")]);
     let mut grown = original.clone();
     grown.push_message(Role::Assistant, "hi");
     assert_eq!(original.segments.len(), 3);
@@ -264,4 +272,93 @@ fn the_directive_and_the_tool_block_carry_no_role() {
     let prompt = render(&directive(), &tools(), &[]);
     assert_eq!(prompt.segments[0].role, None);
     assert_eq!(prompt.segments[1].role, None);
+}
+
+#[test]
+fn a_message_carries_the_calls_it_asked_for() {
+    let calls = [agent_prompt_ref("t:0", "shell", r#"{"cmd":"date"}"#)];
+    let message = Message {
+        call: None,
+        calls: &calls,
+        role: Role::Assistant,
+        text: "",
+    };
+    let prompt = render(&directive(), &tools(), &[message]);
+    assert_eq!(prompt.segments[2].calls.len(), 1);
+    assert_eq!(prompt.segments[2].calls[0].tool, "shell");
+    assert_eq!(prompt.segments[2].call, None);
+}
+
+#[test]
+fn a_tool_message_carries_the_call_it_answers() {
+    let message = Message {
+        call: Some("t:0"),
+        calls: &[],
+        role: Role::Tool,
+        text: "noon",
+    };
+    let prompt = render(&directive(), &tools(), &[message]);
+    assert_eq!(prompt.segments[2].call.as_deref(), Some("t:0"));
+}
+
+#[test]
+fn two_calls_with_different_arguments_are_not_the_same_prefix() {
+    let left = [agent_prompt_ref("t:0", "shell", r#"{"cmd":"date"}"#)];
+    let right = [agent_prompt_ref("t:0", "shell", r#"{"cmd":"ls"}"#)];
+    let left = render(
+        &directive(),
+        &tools(),
+        &[Message {
+            call: None,
+            calls: &left,
+            role: Role::Assistant,
+            text: "",
+        }],
+    );
+    let right = render(
+        &directive(),
+        &tools(),
+        &[Message {
+            call: None,
+            calls: &right,
+            role: Role::Assistant,
+            text: "",
+        }],
+    );
+    // Same role, same (empty) text, different arguments: the provider reads
+    // different bytes, so the chain must not claim the prefix is shared.
+    assert_eq!(left.shared_prefix(&right), 2);
+}
+
+#[test]
+fn an_id_moved_between_two_messages_changes_the_prefix_too() {
+    let one = |role_at: usize| {
+        let calls = [agent_prompt_ref("t:0", "shell", "{}")];
+        let plain = Message::plain(Role::Assistant, "hi");
+        let structured = Message {
+            call: None,
+            calls: &calls,
+            role: Role::Assistant,
+            text: "hi",
+        };
+        let messages = if role_at == 0 {
+            vec![structured, plain]
+        } else {
+            vec![plain, structured]
+        };
+        render(&directive(), &tools(), &messages)
+    };
+    assert_eq!(one(0).shared_prefix(&one(1)), 2, "the two messages differ");
+}
+
+fn agent_prompt_ref(
+    id: &str,
+    tool: &str,
+    args: &str,
+) -> CallRef {
+    CallRef {
+        args: String::from(args),
+        id: String::from(id),
+        tool: String::from(tool),
+    }
 }

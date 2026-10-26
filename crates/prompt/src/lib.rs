@@ -43,6 +43,42 @@ pub enum Kind {
     Message,
 }
 
+/// One call a message asked for, as the provider will read it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallRef {
+    /// The id the answer will carry, so the two are joined.
+    pub id: String,
+    pub tool: String,
+    pub args: String,
+}
+
+/// One message, with whatever structure its role needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Message<'a> {
+    pub role: Role,
+    pub text: &'a str,
+    /// The calls this message asked for. Empty for anything but the answer that asked.
+    pub calls: &'a [CallRef],
+    /// The call this message answers, for a tool's output.
+    pub call: Option<&'a str>,
+}
+
+impl<'a> Message<'a> {
+    /// A message that is only words.
+    #[must_use]
+    pub const fn plain(
+        role: Role,
+        text: &'a str,
+    ) -> Self {
+        Self {
+            role,
+            text,
+            calls: &[],
+            call: None,
+        }
+    }
+}
+
 /// One immutable piece of a prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
@@ -51,6 +87,10 @@ pub struct Segment {
     pub role: Option<Role>,
     /// The content alone, with no role in front of it.
     pub text: String,
+    /// The calls this message asked for, in the order it asked.
+    pub calls: Vec<CallRef>,
+    /// The call this message answers.
+    pub call: Option<String>,
     pub tokens: u64,
 }
 
@@ -98,7 +138,7 @@ pub const fn estimate_tokens_of_bytes(bytes: u64) -> u64 {
 pub fn render(
     directive: &Directive<'_>,
     tools: &[ToolSchema<'_>],
-    messages: &[(Role, &str)],
+    messages: &[Message<'_>],
 ) -> Prompt {
     let mut prompt = Prompt {
         directive_version: String::from(directive.version),
@@ -108,8 +148,8 @@ pub fn render(
     };
     prompt.push(Kind::Directive, String::from(directive.text));
     prompt.push(Kind::Tools, tool_block(tools));
-    for (role, content) in messages {
-        prompt.push_message(*role, content);
+    for message in messages {
+        prompt.push_structured(message);
     }
     prompt
 }
@@ -126,6 +166,8 @@ impl Prompt {
     ) {
         self.push_segment(Segment {
             kind,
+            call: None,
+            calls: Vec::new(),
             role: None,
             tokens: estimate_tokens(&text),
             text,
@@ -138,11 +180,26 @@ impl Prompt {
         role: Role,
         content: &str,
     ) {
+        self.push_structured(&Message::plain(role, content));
+    }
+
+    /// Appends one message with whatever structure its role carries.
+    ///
+    /// The calls and the call id are part of what the provider reads, so they are
+    /// part of what the chain hashes: two prompts whose only difference is the
+    /// arguments of a call are not the same bytes, and the ledger must not say
+    /// they are.
+    pub fn push_structured(
+        &mut self,
+        message: &Message<'_>,
+    ) {
         self.push_segment(Segment {
             kind: Kind::Message,
-            role: Some(role),
-            tokens: estimate_tokens(content),
-            text: String::from(content),
+            call: message.call.map(String::from),
+            calls: message.calls.to_vec(),
+            role: Some(message.role),
+            tokens: estimate_tokens(message.text),
+            text: String::from(message.text),
         });
     }
 
@@ -213,7 +270,32 @@ fn chain_entry(
         buffer.push(b':');
     }
     buffer.extend_from_slice(segment.text.as_bytes());
+    if !segment.calls.is_empty() {
+        push_part(&mut buffer, "calls");
+        push_part(&mut buffer, &segment.calls.len().to_string());
+        for call in &segment.calls {
+            push_part(&mut buffer, &call.id);
+            push_part(&mut buffer, &call.tool);
+            push_part(&mut buffer, &call.args);
+        }
+    }
+    if let Some(call) = &segment.call {
+        push_part(&mut buffer, "call");
+        push_part(&mut buffer, call);
+    }
     digest(&buffer)
+}
+
+/// Writes one length-prefixed part, so two different structures cannot produce
+/// the same bytes.
+fn push_part(
+    buffer: &mut Vec<u8>,
+    part: &str,
+) {
+    buffer.push(0);
+    buffer.extend_from_slice(part.len().to_string().as_bytes());
+    buffer.push(b':');
+    buffer.extend_from_slice(part.as_bytes());
 }
 
 #[cfg(test)]

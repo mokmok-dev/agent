@@ -26,6 +26,24 @@ struct Body<'a> {
 struct WireMessage<'a> {
     role: &'a str,
     content: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<SentCall<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct SentCall<'a> {
+    id: &'a str,
+    #[serde(rename = "type")]
+    kind: &'a str,
+    function: SentFunction<'a>,
+}
+
+#[derive(Serialize)]
+struct SentFunction<'a> {
+    name: &'a str,
+    arguments: &'a str,
 }
 
 #[derive(Serialize)]
@@ -46,17 +64,43 @@ pub fn encode(request: &Request) -> String {
     messages.push(WireMessage {
         role: Role::System.as_str(),
         content: &request.directive,
+        tool_call_id: None,
+        tool_calls: None,
     });
     if !request.tools.is_empty() {
         messages.push(WireMessage {
             role: Role::System.as_str(),
             content: &request.tools,
+            tool_call_id: None,
+            tool_calls: None,
         });
     }
     for message in &request.messages {
+        // A message that asked for tools carries them, and a message that answers
+        // one carries its id: the provider joins the pair by that id alone.
+        let tool_calls = if message.calls.is_empty() {
+            None
+        } else {
+            Some(
+                message
+                    .calls
+                    .iter()
+                    .map(|call| SentCall {
+                        function: SentFunction {
+                            arguments: &call.args,
+                            name: &call.tool,
+                        },
+                        id: &call.id,
+                        kind: "function",
+                    })
+                    .collect(),
+            )
+        };
         messages.push(WireMessage {
             role: message.role.as_str(),
             content: &message.content,
+            tool_calls,
+            tool_call_id: message.call.as_deref(),
         });
     }
     let body = Body {

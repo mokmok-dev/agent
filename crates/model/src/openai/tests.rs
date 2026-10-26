@@ -2,6 +2,7 @@ use agent_core::event::{FinishReason, Role};
 
 use super::{Calls, Chunk, CodecError, DONE, Usage, decode, encode, finish_of};
 use crate::{Message, Request};
+use agent_prompt::CallRef;
 
 fn request() -> Request {
     Request {
@@ -10,10 +11,14 @@ fn request() -> Request {
         tools: "4:read17:{\"path\":\"string\"}".to_string(),
         messages: vec![
             Message {
+                call: None,
+                calls: Vec::new(),
                 role: Role::User,
                 content: "hello".to_string(),
             },
             Message {
+                call: None,
+                calls: Vec::new(),
                 role: Role::Assistant,
                 content: "hi".to_string(),
             },
@@ -220,4 +225,41 @@ fn two_calls_are_kept_in_the_order_their_indices_give() {
 fn a_frame_without_tools_leaves_the_calls_alone() {
     let frame = decode(r#"{"choices":[{"delta":{"content":"hi"}}]}"#).expect("reads");
     assert_eq!(frame.calls.len(), 0);
+}
+
+#[test]
+fn a_message_that_asked_for_tools_carries_them_on_the_wire() {
+    let calls = vec![CallRef {
+        args: r#"{"cmd":"date"}"#.to_string(),
+        id: "t:0".to_string(),
+        tool: "shell".to_string(),
+    }];
+    let prompt = crate::tests::prompt(&[agent_prompt::Message {
+        call: None,
+        calls: &calls,
+        role: agent_core::event::Role::Assistant,
+        text: "",
+    }]);
+    let request = crate::Request::of(&prompt, "m", 8);
+    let body = encode(&request);
+    assert!(
+        body.contains(r#"{"role":"assistant","content":"","tool_calls":[{"id":"t:0","type":"function","function":{"name":"shell","arguments":"{\"cmd\":\"date\"}"}}]}"#),
+        "{body}"
+    );
+}
+
+#[test]
+fn a_tool_message_carries_the_id_it_answers() {
+    let prompt = crate::tests::prompt(&[agent_prompt::Message {
+        call: Some("t:0"),
+        calls: &[],
+        role: agent_core::event::Role::Tool,
+        text: "noon",
+    }]);
+    let request = crate::Request::of(&prompt, "m", 8);
+    let body = encode(&request);
+    assert!(
+        body.contains(r#"{"role":"tool","content":"noon","tool_call_id":"t:0"}"#),
+        "{body}"
+    );
 }

@@ -372,19 +372,31 @@ fn a_second_turn_sees_the_first_answer() {
     assert_eq!(store.verify().expect("verifies").events, 12);
 }
 
-/// Answers one request by asking for a tool, which no answer of its own carries.
+/// Asks for a tool on the first request, then answers with words on the second.
 fn serve_tool_call() -> (String, std::thread::JoinHandle<Vec<Vec<u8>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("binds a port");
     let address = listener.local_addr().expect("an address");
     let handle = std::thread::spawn(move || {
+        let mut seen = Vec::new();
         let (mut socket, _) = listener.accept().expect("accepts a connection");
-        let seen = vec![read_request(&mut socket)];
+        seen.push(read_request(&mut socket));
         let frames = [
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"shell","arguments":"{\"cmd\":"}}]}}]}"#.to_string(),
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"date\"}"}}]}}]}"#
                 .to_string(),
             r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#.to_string(),
             r#"{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2}}"#.to_string(),
+            "[DONE]".to_string(),
+        ];
+        write_stream(&mut socket, &frames);
+
+        // The result comes back and the model answers with words.
+        let (mut socket, _) = listener.accept().expect("accepts a second connection");
+        seen.push(read_request(&mut socket));
+        let frames = [
+            r#"{"choices":[{"delta":{"content":"it is noon"}}]}"#.to_string(),
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#.to_string(),
+            r#"{"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":4}}"#.to_string(),
             "[DONE]".to_string(),
         ];
         write_stream(&mut socket, &frames);
@@ -410,11 +422,7 @@ fn a_tool_call_becomes_an_intent_with_a_key() {
     let events = store.load(ROOT).expect("loads");
     let kinds: Vec<&str> = events.iter().map(|event| event.kind.type_name()).collect();
     let requests = server.join().expect("the server finished");
-    assert_eq!(
-        requests.len(),
-        1,
-        "a turn that asks for a tool ends there: {kinds:?}"
-    );
+    assert_eq!(requests.len(), 2, "the result goes back: {kinds:?}");
     assert_eq!(
         kinds,
         vec![
@@ -426,8 +434,19 @@ fn a_tool_call_becomes_an_intent_with_a_key() {
             "dev.mokmok.agent.model.responded",
             "dev.mokmok.agent.tool.intent",
             "dev.mokmok.agent.tool.result",
+            "dev.mokmok.agent.model.requested",
+            "dev.mokmok.agent.model.responded",
+            "dev.mokmok.agent.message.appended",
         ]
     );
+
+    // The second request carries the pair the provider joins by id: the answer that
+    // asked, with its calls, and the tool's output addressed to one of them.
+    let second = String::from_utf8_lossy(&requests[1]).to_string();
+    assert!(second.contains(r#""tool_calls":[{"id":""#), "{second}");
+    assert!(second.contains(r#""type":"function""#), "{second}");
+    assert!(second.contains(r#""tool_call_id":"#), "{second}");
+    assert!(second.contains(r#""role":"tool""#), "{second}");
     assert_eq!(events[6].kind.type_name(), "dev.mokmok.agent.tool.intent");
     match &events[7].kind {
         EventKind::ToolResult {

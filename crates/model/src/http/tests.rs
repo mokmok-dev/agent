@@ -129,6 +129,8 @@ fn request() -> Request {
         directive: "be careful".to_string(),
         tools: String::new(),
         messages: vec![Message {
+            call: None,
+            calls: Vec::new(),
             role: Role::User,
             content: "hello".to_string(),
         }],

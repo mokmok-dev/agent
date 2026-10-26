@@ -69,6 +69,10 @@ pub struct Request {
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// The calls this message asked for, when it is the answer that asked.
+    pub calls: Vec<agent_prompt::CallRef>,
+    /// The call this message answers, when it is a tool's output.
+    pub call: Option<String>,
 }
 
 impl Request {
@@ -90,6 +94,8 @@ impl Request {
                     if let Some(role) = segment.role {
                         messages.push(Message {
                             role,
+                            call: segment.call.clone(),
+                            calls: segment.calls.clone(),
                             content: segment.text.clone(),
                         });
                     }

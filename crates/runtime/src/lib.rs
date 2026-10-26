@@ -29,12 +29,12 @@ pub fn wait_for(
 
 /// The longest the loop will sleep for a single retry.
 pub const MAX_WAIT: core::time::Duration = core::time::Duration::from_secs(5);
-use agent_core::event::{ErrorClass, Event, EventKind, FinishReason, Role, ToolRequest};
+use agent_core::event::{ErrorClass, Event, EventKind, FinishReason, ToolRequest};
 use agent_core::fold::{FoldError, State};
 use agent_core::ids::{Actor, BranchId, CallId, EventId, TurnId};
 use agent_core::time::{TimeError, Timestamp};
 use agent_model::{Provider, Purpose, Request, RequestRecord, backoff};
-use agent_prompt::{Directive, ToolSchema, render};
+use agent_prompt::{CallRef, Directive, Message as PromptMessage, ToolSchema, render};
 use agent_store::{Store, StoreError};
 use exec::Outcome;
 
@@ -382,30 +382,7 @@ impl Reactor {
             self.provider = Some(provider);
             return Err(ReactorError::NoModel);
         };
-        let facts = state
-            .branch(branch)
-            .ok_or(ReactorError::Fold(FoldError::UnknownBranch(branch)))?;
-        let messages: Vec<(Role, &str)> = facts
-            .messages
-            .iter()
-            .map(|message| (message.role, message.content.as_str()))
-            .collect();
-        if !facts.turns.iter().any(|candidate| candidate.id == turn) {
-            return Err(ReactorError::Fold(FoldError::UnknownTurn(turn)));
-        }
-        let tools: Vec<ToolSchema<'_>> = settings
-            .tools
-            .iter()
-            .map(|tool| ToolSchema {
-                name: tool.name.as_str(),
-                schema: tool.schema.as_str(),
-            })
-            .collect();
-        let directive = Directive {
-            version: &settings.directive_version,
-            text: &settings.directive,
-        };
-        let prompt = render(&directive, &tools, &messages);
+        let prompt = build_prompt(state, branch, &settings)?;
         let Some(record) = RequestRecord::of(&prompt, Purpose::Turn) else {
             self.provider = Some(provider);
             return Err(ReactorError::NoModel);
@@ -440,7 +417,7 @@ impl Reactor {
                     branch,
                     &state_after,
                     now,
-                    Some(settings.model.clone()),
+                    Some(settings.model),
                     Some(requested),
                     Some(turn),
                     EventKind::ModelResponded {
@@ -551,6 +528,62 @@ impl Reactor {
         self.store.append(&event)?;
         Ok(event.id())
     }
+}
+
+/// Renders one turn: the directive, the tool block, and the transcript with the
+/// structure each message carries.
+fn build_prompt(
+    state: &State,
+    branch: BranchId,
+    settings: &Settings,
+) -> Result<agent_prompt::Prompt, ReactorError> {
+    let facts = state
+        .branch(branch)
+        .ok_or(ReactorError::Fold(FoldError::UnknownBranch(branch)))?;
+    let calls: Vec<Vec<CallRef>> = facts
+        .messages
+        .iter()
+        .map(|message| {
+            message
+                .calls
+                .iter()
+                .map(|call| CallRef {
+                    args: call.args.clone(),
+                    id: call.call.to_string(),
+                    tool: call.tool.clone(),
+                })
+                .collect()
+        })
+        .collect();
+    let call_ids: Vec<Option<String>> = facts
+        .messages
+        .iter()
+        .map(|message| message.call.map(|call| call.to_string()))
+        .collect();
+    let messages: Vec<PromptMessage<'_>> = facts
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(at, message)| PromptMessage {
+            call: call_ids[at].as_deref(),
+            calls: &calls[at],
+            role: message.role,
+            text: message.content.as_str(),
+        })
+        .collect();
+    let tools: Vec<ToolSchema<'_>> = settings
+        .tools
+        .iter()
+        .map(|tool| ToolSchema {
+            name: tool.name.as_str(),
+            schema: tool.schema.as_str(),
+        })
+        .collect();
+    let directive = Directive {
+        version: &settings.directive_version,
+        text: &settings.directive,
+    };
+    Ok(render(&directive, &tools, &messages))
 }
 
 #[cfg(test)]
