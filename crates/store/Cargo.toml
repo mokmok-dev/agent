@@ -5,7 +5,7 @@ publish = false
 version = "0.0.0"
 
 [dependencies]
-agent-core = { path = "../core" }
+agent-core.workspace = true
 blake3.workspace = true
 rusqlite = { workspace = true, features = ["bundled"] }
 
