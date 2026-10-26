@@ -80,6 +80,14 @@ pub struct Message {
     pub turn: Option<TurnId>,
 }
 
+/// A command this branch has received and not yet turned into work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Command {
+    pub event: EventId,
+    pub name: String,
+    pub text: Option<String>,
+}
+
 /// A turn that was requested on this branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Turn {
@@ -108,6 +116,7 @@ pub struct Branch {
     pub messages: Vec<Message>,
     pub turns: Vec<Turn>,
     pub pending: BTreeMap<CallId, String>,
+    pub pending_command: Option<Command>,
     pub cache: Cache,
     pub failures: u32,
 }
@@ -129,6 +138,7 @@ impl Branch {
             messages: Vec::new(),
             turns: Vec::new(),
             pending: BTreeMap::new(),
+            pending_command: None,
             cache: Cache::default(),
             failures: 0,
         }
@@ -178,6 +188,10 @@ impl State {
     /// Returns a [`FoldError`] when the event contradicts the state: an unknown
     /// branch, a predecessor that does not match the tip, a depth that skips, a
     /// turn or call that was never opened.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one flat match over the taxonomy is the table itself; splitting it by event family would put the invariants of one branch in two places"
+    )]
     pub fn apply(
         &mut self,
         event: &Event,
@@ -230,6 +244,14 @@ impl State {
                     id: *turn,
                     input: input.clone(),
                 });
+                branch.pending_command = None;
+            },
+            EventKind::CommandReceived { command, text, .. } => {
+                branch.pending_command = Some(Command {
+                    event: event.id(),
+                    name: command.clone(),
+                    text: text.clone(),
+                });
             },
             EventKind::ModelRequested { turn, .. }
             | EventKind::ModelResponded { turn, .. }
@@ -278,7 +300,6 @@ impl State {
             | EventKind::InstanceStopping { .. }
             | EventKind::InstanceRecovered { .. }
             | EventKind::InstanceClockSkew { .. }
-            | EventKind::CommandReceived { .. }
             | EventKind::Unknown { .. } => {},
         }
         Ok(())
@@ -712,6 +733,7 @@ mod tests {
                 command: "send".to_string(),
                 command_id: "c".to_string(),
                 surface: "tui".to_string(),
+                text: None,
             },
             EventKind::Unknown {
                 schema: 1,

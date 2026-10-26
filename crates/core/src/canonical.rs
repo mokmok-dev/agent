@@ -177,10 +177,14 @@ fn write_data(
             command,
             command_id,
             surface,
+            text,
         } => {
             object.string("command", command);
             object.string("command_id", command_id);
             object.string("surface", surface);
+            if let Some(text) = text {
+                object.string("text", text);
+            }
         },
         EventKind::TurnRequested { input, turn } => {
             object.string("input", input);

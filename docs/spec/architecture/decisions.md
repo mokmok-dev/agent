@@ -197,3 +197,19 @@ Serialization is split deliberately. Core owns the canonical writer, which produ
 Cost accepted. `alloc` is required, so this is not bare-metal `no_std`. `HashMap` is out, and `BTreeMap` or a sorted `Vec` stands in, which is an improvement for determinism anyway. Integer formatting, hex, and the RFC 3339 calendar conversions are written here rather than taken from a crate, which is more code to own and more code the mutation gate can measure.
 
 The domain of a timestamp starts at the epoch. A pre-1970 instant from a running service is a broken clock, not history, and excluding it removes a branch from the calendar maths that no test could reach.
+
+# 18. Errors are written by hand, not derived
+
+Every error type implements `Display` and `Error` by hand. `thiserror` would remove about twelve lines per type and is not used.
+
+The gate is the reason. A `Display` match is code `cargo-mutants` can see, and a mutant that replaces the body with `Ok(())` is caught by the test that asserts the message. A derive moves the same text into an attribute, where the gate cannot reach it, and a test that only checks for a non-empty string keeps passing while the messages rot. The boilerplate is bounded, since there are five error types, and none of them chains a source.
+
+The condition to revisit is named in advance. When a third of the error types need `source()`, the hand-written versions become the error-prone part and `thiserror` wins. Until then the std-only form is the smaller thing to own.
+
+# 19. The reactor re-folds the whole log on every step
+
+A step reads every branch, folds it from the root, asks `decide` for one intent, and appends it. There is no incremental position, no cached state, and nothing in memory that a restart could lose.
+
+This is a first cut, and it is slower than the design describes. Two costs are accepted for now. The loop re-folds history it has already folded, so a step costs time proportional to the log rather than to the new events. And the loop sleeps for a fixed interval when there is nothing to do, where the design blocks on the socket and the store change notice, so an idle daemon wakes four times a second and a command waits up to that interval before it is turned into a turn.
+
+The order is deliberate. An incremental fold that is wrong diverges from the log silently, and every fact written after that divergence is wrong in a way no verification can catch, because the log itself is consistent. Re-folding is slow and cannot be wrong. The position cache lands when a measurement shows the cost, which is the point at which a snapshot also becomes worth its format.

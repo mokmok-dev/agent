@@ -14,3 +14,4 @@
 * **Creation**: Added the fold concept, which records what state a fold keeps and which contradictions it refuses.
 * **Update**: Recorded that the store keeps the core's canonical bytes verbatim, which is what makes verification a hash rather than a second encoder.
 * **Update**: Recorded that the store owns the decoder, and why an unknown payload is kept as the bytes it arrived as.
+* **Update**: Recorded why error types are hand-written and why the reactor re-folds the whole log on each step.

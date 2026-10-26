@@ -162,6 +162,8 @@ struct CommandReceived {
     command: String,
     command_id: String,
     surface: String,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -295,6 +297,7 @@ fn decode_kind(
                 command: payload.command,
                 command_id: payload.command_id,
                 surface: payload.surface,
+                text: payload.text,
             }
         },
         taxonomy::TURN_REQUESTED => {

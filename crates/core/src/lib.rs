@@ -12,6 +12,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod canonical;
+pub mod decide;
 pub mod event;
 pub mod fold;
 pub mod ids;

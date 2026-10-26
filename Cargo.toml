@@ -1,9 +1,17 @@
 [workspace]
-members = ["crates/core", "crates/removeme", "crates/store", "crates/xtask"]
+members = [
+  "crates/agentd",
+  "crates/core",
+  "crates/removeme",
+  "crates/runtime",
+  "crates/store",
+  "crates/xtask",
+]
 resolver = "3"
 
 [workspace.dependencies]
 agent-core = { path = "crates/core" }
+agent-runtime = { path = "crates/runtime" }
 agent-store = { path = "crates/store" }
 blake3 = { version = "1", default-features = false }
 rusqlite = "0.37"

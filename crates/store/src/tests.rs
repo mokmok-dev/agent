@@ -339,3 +339,85 @@ fn every_error_explains_itself() {
         assert_ne!(error.to_string(), "");
     }
 }
+
+#[test]
+fn branches_are_listed_in_id_order() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    for seed in [2_u8, 1] {
+        let first = event(branch(seed), 0, None, "main");
+        store.append(&first).expect("appends");
+    }
+    assert_eq!(
+        store.branches().expect("lists"),
+        vec![branch(1), branch(2)],
+        "the order is the one the reactor schedules on"
+    );
+}
+
+#[test]
+fn an_empty_store_has_no_branches() {
+    let scratch = Scratch::new();
+    let store = Store::open(&scratch.path).expect("opens");
+    assert_eq!(store.branches().expect("lists"), Vec::new());
+}
+
+#[test]
+fn load_returns_typed_events_in_depth_order() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    let first = event(branch(1), 0, None, "main");
+    let second = event(branch(1), 1, Some(first.id()), "next");
+    store.append(&first).expect("appends");
+    store.append(&second).expect("appends");
+    assert_eq!(store.load(branch(1)).expect("loads"), vec![first, second]);
+}
+
+#[test]
+fn load_on_a_branch_that_is_not_there_is_empty() {
+    let scratch = Scratch::new();
+    let store = Store::open(&scratch.path).expect("opens");
+    assert!(
+        store.load(branch(9)).expect("loads").is_empty(),
+        "a branch with no rows has no events"
+    );
+}
+
+#[test]
+fn load_refuses_a_body_it_cannot_decode() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    chain(&mut store, branch(1), 2);
+    let connection = Connection::open(&scratch.path).expect("opens raw");
+    connection
+        .execute_batch("DROP TRIGGER events_no_update;")
+        .expect("drops the guard");
+    connection
+        .execute(
+            "UPDATE events SET body = '{\"tampered\":true}' WHERE depth = 0",
+            [],
+        )
+        .expect("rewrites");
+    match store.load(branch(1)) {
+        Err(StoreError::Decode(_)) => {},
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn a_branch_id_that_is_not_hex_is_refused() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    chain(&mut store, branch(1), 1);
+    let connection = Connection::open(&scratch.path).expect("opens raw");
+    connection
+        .execute_batch("DROP TRIGGER events_no_update;")
+        .expect("drops the guard");
+    connection
+        .execute("UPDATE events SET branch = 'nope'", [])
+        .expect("rewrites");
+    match store.branches() {
+        Err(StoreError::Identifier(text)) => assert_eq!(text, "nope"),
+        other => panic!("unexpected {other:?}"),
+    }
+}

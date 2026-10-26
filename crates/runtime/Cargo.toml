@@ -1,0 +1,12 @@
+[package]
+edition.workspace = true
+name = "agent-runtime"
+publish = false
+version = "0.0.0"
+
+[dependencies]
+agent-core.workspace = true
+agent-store.workspace = true
+
+[lints]
+workspace = true
