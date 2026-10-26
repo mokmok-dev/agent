@@ -98,6 +98,69 @@ pub struct Chunk {
     pub usage: Option<Usage>,
     /// Whether this frame is the end-of-stream sentinel.
     pub done: bool,
+    /// Pieces of the tools the model is asking for, as the provider splits them.
+    pub calls: Vec<CallFrag>,
+}
+
+/// One piece of one tool call.
+///
+/// A provider may send the id and name in the first frame for an index and only
+/// the arguments after it, so nothing here is required to be present.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CallFrag {
+    pub index: u32,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub arguments: Option<String>,
+}
+
+/// A tool call the model asked for, whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Call {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// Collects the pieces of a call as they stream in.
+#[derive(Debug, Default)]
+pub struct Calls {
+    seen: Vec<Call>,
+}
+
+impl Calls {
+    /// Takes one frame's pieces.
+    pub fn absorb(
+        &mut self,
+        fragments: &[CallFrag],
+    ) {
+        for fragment in fragments {
+            let at = fragment.index as usize;
+            while self.seen.len() <= at {
+                self.seen.push(Call {
+                    id: String::new(),
+                    name: String::new(),
+                    arguments: String::new(),
+                });
+            }
+            let call = &mut self.seen[at];
+            if let Some(id) = &fragment.id {
+                call.id.clone_from(id);
+            }
+            if let Some(name) = &fragment.name {
+                call.name.clone_from(name);
+            }
+            if let Some(arguments) = &fragment.arguments {
+                call.arguments.push_str(arguments);
+            }
+        }
+    }
+
+    /// Everything that arrived.
+    #[must_use]
+    pub fn finish(self) -> Vec<Call> {
+        self.seen
+    }
 }
 
 /// Counts as the provider wrote them.
@@ -150,6 +213,26 @@ struct Choice {
 struct Delta {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<WireCall>,
+}
+
+#[derive(Deserialize)]
+struct WireCall {
+    #[serde(default)]
+    index: u32,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<WireFunction>,
+}
+
+#[derive(Deserialize)]
+struct WireFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -193,6 +276,22 @@ pub fn decode(data: &str) -> Result<Chunk, CodecError> {
         }
         if choice.finish_reason.is_some() {
             chunk.finish.clone_from(&choice.finish_reason);
+        }
+        if let Some(delta) = &choice.delta {
+            for piece in &delta.tool_calls {
+                chunk.calls.push(CallFrag {
+                    index: piece.index,
+                    id: piece.id.clone(),
+                    name: piece
+                        .function
+                        .as_ref()
+                        .and_then(|function| function.name.clone()),
+                    arguments: piece
+                        .function
+                        .as_ref()
+                        .and_then(|function| function.arguments.clone()),
+                });
+            }
         }
     }
     if let Some(usage) = &frame.usage {

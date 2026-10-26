@@ -9,7 +9,7 @@
 
 use alloc::string::String;
 
-use crate::event::{Event, EventKind};
+use crate::event::{Event, EventKind, ToolRequest};
 use crate::ids::EventId;
 
 const SOURCE: &str = "agent://mokmok";
@@ -126,6 +126,27 @@ impl<'a> Object<'a> {
         self.out.push_str(if value { "true" } else { "false" });
     }
 
+    /// A list of objects, keys in the order the payload declares them.
+    fn requests(
+        &mut self,
+        key: &str,
+        requests: &[ToolRequest],
+    ) {
+        self.key(key);
+        self.out.push('[');
+        for (index, request) in requests.iter().enumerate() {
+            if index > 0 {
+                self.out.push(',');
+            }
+            self.out.push_str("{\"args\":");
+            write_string(&request.args, self.out);
+            self.out.push_str(",\"tool\":");
+            write_string(&request.tool, self.out);
+            self.out.push('}');
+        }
+        self.out.push(']');
+    }
+
     fn finish(&mut self) {
         self.out.push('}');
     }
@@ -204,6 +225,7 @@ fn write_data(
             object.boolean("warm", *warm);
         },
         EventKind::ModelResponded {
+            calls,
             finish,
             input_tokens,
             output,
@@ -211,6 +233,7 @@ fn write_data(
             request,
             turn,
         } => {
+            object.requests("calls", calls);
             object.string("finish", finish.as_str());
             object.uint("input_tokens", *input_tokens);
             object.string("output", output);
@@ -354,7 +377,7 @@ fn write_int(
 #[cfg(test)]
 mod tests {
     use super::{canonical, event_id};
-    use crate::event::{ErrorClass, Event, EventKind, FinishReason, Role};
+    use crate::event::{ErrorClass, Event, EventKind, FinishReason, Role, ToolRequest};
     use crate::ids::{Actor, BranchId, CallId, EventId, PrefixHash, TurnId};
     use crate::time::Timestamp;
     use alloc::string::{String, ToString};
@@ -563,6 +586,7 @@ mod tests {
     #[test]
     fn a_response_carries_its_finish_reason() {
         let encoded = canonical(&event(EventKind::ModelResponded {
+            calls: alloc::vec::Vec::new(),
             finish: FinishReason::ToolCalls,
             input_tokens: 1,
             output: "x".to_string(),
@@ -571,6 +595,32 @@ mod tests {
             turn: turn(),
         }));
         assert!(encoded.contains(r#""finish":"tool_calls""#), "{encoded}");
+    }
+
+    #[test]
+    fn a_response_that_asked_for_tools_names_them() {
+        let encoded = canonical(&event(EventKind::ModelResponded {
+            calls: alloc::vec![
+                ToolRequest {
+                    args: r#"{"cmd":"ls"}"#.to_string(),
+                    tool: "shell".to_string(),
+                },
+                ToolRequest {
+                    args: "{}".to_string(),
+                    tool: "clock".to_string(),
+                },
+            ],
+            finish: FinishReason::ToolCalls,
+            input_tokens: 1,
+            output: String::new(),
+            output_tokens: 1,
+            request: "r".to_string(),
+            turn: turn(),
+        }));
+        assert!(
+            encoded.contains(r#""calls":[{"args":"{\"cmd\":\"ls\"}","tool":"shell"},{"args":"{}","tool":"clock"}]"#),
+            "{encoded}"
+        );
     }
 
     #[test]

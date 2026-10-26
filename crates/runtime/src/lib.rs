@@ -28,7 +28,7 @@ pub fn wait_for(
 
 /// The longest the loop will sleep for a single retry.
 pub const MAX_WAIT: core::time::Duration = core::time::Duration::from_secs(5);
-use agent_core::event::{Event, EventKind, FinishReason, Role};
+use agent_core::event::{Event, EventKind, FinishReason, Role, ToolRequest};
 use agent_core::fold::{FoldError, State};
 use agent_core::ids::{Actor, BranchId, EventId, TurnId};
 use agent_core::time::{TimeError, Timestamp};
@@ -333,6 +333,14 @@ impl Reactor {
                     Some(requested),
                     Some(turn),
                     EventKind::ModelResponded {
+                        calls: completion
+                            .calls
+                            .iter()
+                            .map(|call| ToolRequest {
+                                args: call.arguments.clone(),
+                                tool: call.name.clone(),
+                            })
+                            .collect(),
                         finish: completion.finish.unwrap_or(FinishReason::Unknown),
                         input_tokens: completion.usage.input_tokens,
                         output,

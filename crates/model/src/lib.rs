@@ -114,12 +114,14 @@ pub enum Delta<'a> {
     Text(&'a str),
 }
 
-/// A finished response: what it said, and what it cost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A finished response: what it said, what it cost, and what it asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Completion {
     pub usage: Usage,
     /// How the model stopped, when the provider said.
     pub finish: Option<FinishReason>,
+    /// The tools it asked to run, which the answer's text does not carry.
+    pub calls: Vec<openai::Call>,
 }
 
 /// What a finished response cost.

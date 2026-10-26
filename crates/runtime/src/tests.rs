@@ -69,6 +69,7 @@ impl Provider for Fake {
         self.failure.take().map_or_else(
             || {
                 Ok(Completion {
+                    calls: Vec::new(),
                     usage: Usage {
                         input_tokens: 3,
                         output_tokens: 2,

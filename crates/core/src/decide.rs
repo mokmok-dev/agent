@@ -6,7 +6,9 @@
 
 use crate::event::EventKind;
 use crate::fold::State;
-use crate::ids::{BranchId, EventId, TurnId};
+use alloc::string::String;
+
+use crate::ids::{BranchId, CallId, EventId, TurnId};
 use crate::time::Timestamp;
 
 /// The command name a surface uses to ask for a turn.
@@ -56,6 +58,20 @@ pub fn turn_for(command: EventId) -> TurnId {
 /// The wait is decided first. A retry owed at a future instant outranks any
 /// other work, because starting a second request for a turn that is already
 /// backing off would defeat the backoff.
+/// The idempotency key for one call: the tool, the arguments, and the call id,
+/// separated so that no two different triples produce the same bytes.
+#[must_use]
+pub fn key_of(
+    tool: &str,
+    args: &str,
+    call: CallId,
+) -> String {
+    alloc::format!(
+        "{}",
+        crate::hash::digest(alloc::format!("{tool}\0{args}\0{call}").as_bytes())
+    )
+}
+
 #[must_use]
 pub fn decide(
     state: &State,
@@ -98,6 +114,35 @@ pub fn decide(
         });
     }
 
+    // Then the tools the model asked for, one event per call. The call id is the
+    // turn and the step, so a re-fold of the same turn derives the same id and the
+    // same idempotency key, and a step already written is not written again.
+    for (branch, facts) in state.branches() {
+        if facts.archived {
+            continue;
+        }
+        for (turn, asked) in &facts.asked {
+            let Some(request) = asked.requests.get(asked.filed as usize) else {
+                continue;
+            };
+            let call = CallId {
+                turn: *turn,
+                step: asked.filed,
+            };
+            return Step::Append(Intent {
+                branch: *branch,
+                causation: None,
+                correlation: Some(*turn),
+                kind: EventKind::ToolIntent {
+                    args: request.args.clone(),
+                    call,
+                    key: key_of(&request.tool, &request.args, call),
+                    tool: request.tool.clone(),
+                },
+            });
+        }
+    }
+
     for (branch, facts) in state.branches() {
         if facts.archived {
             continue;
@@ -137,9 +182,11 @@ pub fn decide(
 
 #[cfg(test)]
 mod tests {
-    use super::{Intent, Step, decide, turn_for};
+    use super::{Intent, Step, decide, key_of, turn_for};
+    use crate::event::ToolRequest;
     use crate::event::{Event, EventKind, FinishReason};
     use crate::fold::State;
+    use crate::ids::CallId;
     use crate::ids::{Actor, BranchId, EventId, TurnId};
     use crate::time::Timestamp;
     use alloc::string::{String, ToString};
@@ -251,6 +298,7 @@ mod tests {
             turn: TurnId,
         ) -> Event {
             self.push(EventKind::ModelResponded {
+                calls: alloc::vec::Vec::new(),
                 finish: FinishReason::Stop,
                 input_tokens: 1,
                 output: "ok".to_string(),
@@ -370,6 +418,97 @@ mod tests {
             },
             "a requested attempt that has not answered is still owed a call"
         );
+    }
+
+    fn two_calls(
+        state: &mut State,
+        filed: u32,
+    ) -> TurnId {
+        let mut chain = Chain::new(state, 1);
+        chain.create();
+        let turn = chain.turn();
+        chain.requested(turn);
+        chain.push(EventKind::ModelResponded {
+            calls: alloc::vec![
+                ToolRequest {
+                    args: "{}".to_string(),
+                    tool: "clock".to_string(),
+                },
+                ToolRequest {
+                    args: "{}".to_string(),
+                    tool: "shell".to_string(),
+                },
+            ],
+            finish: crate::event::FinishReason::ToolCalls,
+            input_tokens: 1,
+            output: String::new(),
+            output_tokens: 0,
+            request: "r".to_string(),
+            turn,
+        });
+        for step in 0..filed {
+            let tool = if step == 0 { "clock" } else { "shell" };
+            let call = CallId { turn, step };
+            chain.push_correlated(
+                EventKind::ToolIntent {
+                    args: "{}".to_string(),
+                    call,
+                    key: key_of(tool, "{}", call),
+                    tool: tool.to_string(),
+                },
+                Some(turn),
+            );
+        }
+        turn
+    }
+
+    #[test]
+    fn a_response_that_asks_for_two_tools_writes_the_first_intent() {
+        let mut state = State::default();
+        let turn = two_calls(&mut state, 0);
+        match decide(&state, now()) {
+            Step::Append(Intent {
+                correlation,
+                kind:
+                    EventKind::ToolIntent {
+                        call, key, tool, ..
+                    },
+                ..
+            }) => {
+                assert_eq!(correlation, Some(turn));
+                assert_eq!(tool, "clock");
+                assert_eq!(call, CallId { turn, step: 0 });
+                assert_eq!(key, key_of("clock", "{}", call));
+            },
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_second_call_is_written_after_the_first_one_lands() {
+        let mut state = State::default();
+        let turn = two_calls(&mut state, 1);
+        match decide(&state, now()) {
+            Step::Append(Intent {
+                kind:
+                    EventKind::ToolIntent {
+                        call, key, tool, ..
+                    },
+                ..
+            }) => {
+                assert_eq!(tool, "shell");
+                assert_eq!(call, CallId { turn, step: 1 });
+                assert_ne!(key, key_of("clock", "{}", CallId { turn, step: 0 }));
+            },
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_turn_whose_tools_are_all_filed_waits() {
+        let mut state = State::default();
+        let _ = two_calls(&mut state, 2);
+        assert_eq!(decide(&state, now()), Step::Idle);
     }
 
     #[test]

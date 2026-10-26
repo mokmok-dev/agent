@@ -183,12 +183,21 @@ struct ModelRequested {
 
 #[derive(Deserialize)]
 struct ModelResponded {
+    /// Absent from events written before the response could ask for a tool.
+    #[serde(default)]
+    calls: Vec<WireRequest>,
     finish: String,
     input_tokens: u64,
     output: String,
     output_tokens: u64,
     request: String,
     turn: String,
+}
+
+#[derive(Deserialize)]
+struct WireRequest {
+    args: String,
+    tool: String,
 }
 
 #[derive(Deserialize)]
@@ -327,6 +336,14 @@ fn decode_kind(
         taxonomy::MODEL_RESPONDED => {
             let payload: ModelResponded = payload(raw)?;
             EventKind::ModelResponded {
+                calls: payload
+                    .calls
+                    .into_iter()
+                    .map(|call| agent_core::event::ToolRequest {
+                        args: call.args,
+                        tool: call.tool,
+                    })
+                    .collect(),
                 finish: parse_finish(&payload.finish)?,
                 input_tokens: payload.input_tokens,
                 output: payload.output,

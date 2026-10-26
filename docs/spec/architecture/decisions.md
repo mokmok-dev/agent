@@ -309,3 +309,16 @@ What would reverse it. A command surface that stops at five commands with no nes
 The reason is the window between them. A process that stops after recording the answer and before filing it would leave an answer no later turn can see, and no amount of verification would notice, because the log is consistent: it simply lacks a message. With the reply held in the folded state as something owed, the same loop that repairs a crashed turn files it on restart.
 
 The cost is one more step per turn: the loop writes the answer, then writes the message, then decides again. That is a second fold, and folding is what this design already does after every append.
+
+# 27. A tool request is recorded with the response, and the intent is a decision
+
+The model does not answer with text alone. It can answer by asking for a tool, and those bytes are not in the answer's text, so the response event carries the requests: the tool name and the arguments, unparsed.
+
+The alternative was to write `tool.intent` straight from the call that made the request. That loses the request if the process stops between recording the answer and recording the intent, and the loss is invisible: the log stays consistent and simply lacks a step. With the requests in the event, the intent is derived from what is already durable. `decide` writes one intent per step, and a step already written is not written again, because the call id is the turn and the step.
+
+The idempotency key is a digest of the tool, the arguments, and the call id, separated by a byte that cannot appear in the others. A re-fold of the same turn derives the same key.
+
+An answer with no words in it is not an answer. A response that exists only to ask for a tool files nothing into the transcript, so the conversation does not grow with empty assistant turns.
+
+Two costs. The payload of `model.responded` gained a field, which events written before it do not have: the reader treats it as absent rather than failing, and a reader that predates the field ignores it, so neither side breaks. And the fold refuses the same call filed twice, which only a second writer can do, because the first writer cannot append the same event again.
+
