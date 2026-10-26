@@ -43,6 +43,14 @@ Each entry names a decision that is expensive to reverse, the alternative that l
 | 15 | Fork appends a new root with a parent pointer | Rewriting or copying history |
 | 16 | Snapshots, so replay does not grow with history | Fold from genesis on every start |
 | 17 | `agent-core` is `no_std` with `alloc`, and serialization lives at the edge | A `std` core that parses JSON |
+| 18 | Errors are written by hand | A derive, as `thiserror` would |
+| 19 | The reactor re-folds the whole log on every step | An incremental position cache |
+| 20 | The token estimate is four bytes to the token | A tokenizer on the request path |
+| 21 | `no_std` marks where the temptation is, not where the code is pure | `no_std` across the workspace, or nowhere |
+| 22 | The HTTP client is `ureq`, chosen on a measurement | `reqwest`, or `rustls` directly |
+| 23 | A turn's input joins the prompt without becoming a message | Appending a `message.appended` for it |
+| 24 | Configuration is one TOML file, checked before anything opens | YAML, which the spec bundle already reads |
+| 25 | `agentctl` parses argv with `clap`, and `agentd` keeps its own parser | A table-driven parser in both, or `usage-rs` |
 
 # 1. The log is the only truth
 
