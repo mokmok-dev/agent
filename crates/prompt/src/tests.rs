@@ -68,8 +68,10 @@ fn messages_follow_the_tools_in_order() {
         &[(Role::User, "hello"), (Role::Assistant, "hi")],
     );
     assert_eq!(prompt.segments.len(), 4);
-    assert_eq!(prompt.segments[2].text, "user:hello");
-    assert_eq!(prompt.segments[3].text, "assistant:hi");
+    assert_eq!(prompt.segments[2].text, "hello");
+    assert_eq!(prompt.segments[2].role, Some(Role::User));
+    assert_eq!(prompt.segments[3].text, "hi");
+    assert_eq!(prompt.segments[3].role, Some(Role::Assistant));
     assert_eq!(prompt.segments[2].kind, Kind::Message);
 }
 
@@ -244,5 +246,22 @@ fn growing_a_prompt_does_not_disturb_the_original() {
     grown.push_message(Role::Assistant, "hi");
     assert_eq!(original.segments.len(), 3);
     assert_eq!(grown.segments.len(), 4);
-    assert_eq!(original.segments[2].text, "user:hello");
+    assert_eq!(original.segments[2].text, "hello");
+}
+
+#[test]
+fn a_message_hashes_its_role_and_its_content_joined_by_a_colon() {
+    let rendered = render(&directive(), &[], &[]);
+    let mut grown = rendered.clone();
+    grown.push_message(Role::User, "hello");
+    let mut buffer = Vec::from(rendered.chain[1].as_bytes());
+    buffer.extend_from_slice(b"user:hello");
+    assert_eq!(grown.chain[2], agent_core::hash::digest(&buffer));
+}
+
+#[test]
+fn the_directive_and_the_tool_block_carry_no_role() {
+    let prompt = render(&directive(), &tools(), &[]);
+    assert_eq!(prompt.segments[0].role, None);
+    assert_eq!(prompt.segments[1].role, None);
 }

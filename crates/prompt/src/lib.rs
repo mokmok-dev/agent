@@ -4,6 +4,11 @@
 //! prefixes. The chain is what makes "did this fork share a prefix" a question
 //! with a byte-level answer rather than a guess, and it is what gets recorded on
 //! every `model.requested`.
+//!
+//! A segment keeps its role beside its content instead of folding both into one
+//! string, because an adapter has to send them as separate fields. The chain
+//! still hashes them together, so splitting them does not change the identity of
+//! any prefix.
 
 #![no_std]
 
@@ -42,6 +47,9 @@ pub enum Kind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
     pub kind: Kind,
+    /// The speaker, for a message. Nothing for the directive and the tool block.
+    pub role: Option<Role>,
+    /// The content alone, with no role in front of it.
     pub text: String,
     pub tokens: u64,
 }
@@ -96,13 +104,13 @@ pub fn render(
     prompt.push(Kind::Directive, String::from(directive.text));
     prompt.push(Kind::Tools, tool_block(tools));
     for (role, content) in messages {
-        prompt.push(Kind::Message, message_text(*role, content));
+        prompt.push_message(*role, content);
     }
     prompt
 }
 
 impl Prompt {
-    /// Appends one segment and extends the chain by one entry.
+    /// Appends one segment whose content is all there is, and extends the chain.
     ///
     /// This is the operation a turn performs: everything before it stays byte
     /// identical, so the hash of the prefix up to this point is unchanged.
@@ -111,23 +119,36 @@ impl Prompt {
         kind: Kind,
         text: String,
     ) {
-        let tokens = estimate_tokens(&text);
-        self.tokens = self.tokens.saturating_add(tokens);
-        self.segments.push(Segment { kind, text, tokens });
-        let next = chain_entry(
-            self.chain.last().copied(),
-            &self.segments[self.segments.len() - 1],
-        );
-        self.chain.push(next);
+        self.push_segment(Segment {
+            kind,
+            role: None,
+            tokens: estimate_tokens(&text),
+            text,
+        });
     }
 
-    /// Appends one message to the end of the prompt.
+    /// Appends one message, keeping its speaker beside its content.
     pub fn push_message(
         &mut self,
         role: Role,
         content: &str,
     ) {
-        self.push(Kind::Message, message_text(role, content));
+        self.push_segment(Segment {
+            kind: Kind::Message,
+            role: Some(role),
+            tokens: estimate_tokens(content),
+            text: String::from(content),
+        });
+    }
+
+    fn push_segment(
+        &mut self,
+        segment: Segment,
+    ) {
+        self.tokens = self.tokens.saturating_add(segment.tokens);
+        let next = chain_entry(self.chain.last().copied(), &segment);
+        self.segments.push(segment);
+        self.chain.push(next);
     }
 
     /// How many leading chain entries two prompts agree on.
@@ -168,27 +189,23 @@ fn tool_block(tools: &[ToolSchema<'_>]) -> String {
     out
 }
 
-fn message_text(
-    role: Role,
-    content: &str,
-) -> String {
-    let mut out = String::from(role.as_str());
-    out.push(':');
-    out.push_str(content);
-    out
-}
-
 /// The next chain entry: the hash of the previous entry followed by this segment.
 ///
 /// The previous entry is already a digest of everything before it, so one hash
-/// over one digest and one segment covers the whole prefix.
+/// over one digest and one segment covers the whole prefix. A message
+/// contributes its role, a colon, and its content, which is the byte string a
+/// renderer keeping the role inside the text would have produced.
 fn chain_entry(
     previous: Option<PrefixHash>,
     segment: &Segment,
 ) -> PrefixHash {
-    let mut buffer = Vec::with_capacity(32 + segment.text.len());
+    let mut buffer = Vec::with_capacity(32 + segment.text.len() + 8);
     if let Some(previous) = previous {
         buffer.extend_from_slice(previous.as_bytes());
+    }
+    if let Some(role) = segment.role {
+        buffer.extend_from_slice(role.as_str().as_bytes());
+        buffer.push(b':');
     }
     buffer.extend_from_slice(segment.text.as_bytes());
     digest(&buffer)
