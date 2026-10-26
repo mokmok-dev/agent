@@ -250,4 +250,6 @@ The build times say almost nothing. The crate counts say a lot, and the third ro
 
 `rustls` alone has the smallest tree and the slowest build, and the crate count is a false economy. It is a TLS implementation, not an HTTP client: request framing, chunked bodies, redirects, and connection reuse would all be written here, in the thin shell, where the mutation gate cannot reach them because the code needs a socket. Hand-written HTTP is exactly the kind of code that looks right and fails once a month.
 
-So the adapter uses `ureq`: blocking, small, and correct about HTTP. The cost accepted is 28 crates, one of which builds C code with `ring`, and a dependency whose API can change between major versions. The dependency is not yet in the tree; it lands with the adapter.
+So the adapter uses `ureq`: blocking, small, and correct about HTTP. The cost accepted is 28 crates, one of which builds C code with `ring`, and a dependency whose API can change between major versions.
+
+The C dependency was the risk worth checking before committing, since this project builds in a Nix sandbox where a missing compiler is a build failure rather than a warning. `nix flake check` passes with the dependency in the tree, so `ring`'s C is built by the same toolchain the rest of the workspace uses.

@@ -260,6 +260,20 @@ fn an_unknown_role_is_refused() {
 }
 
 #[test]
+fn the_unknown_finish_reason_round_trips() {
+    let original = event(EventKind::ModelResponded {
+        finish: FinishReason::Unknown,
+        input_tokens: 1,
+        output: "x".to_string(),
+        output_tokens: 1,
+        request: "r".to_string(),
+        turn: turn(),
+    });
+    let body = agent_core::canonical::canonical(&original);
+    assert_eq!(decode(&body).expect("decodes"), original);
+}
+
+#[test]
 fn an_unknown_finish_reason_is_refused() {
     let body = agent_core::canonical::canonical(&event(EventKind::ModelResponded {
         finish: FinishReason::Stop,

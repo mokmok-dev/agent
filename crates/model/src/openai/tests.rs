@@ -1,6 +1,6 @@
-use agent_core::event::Role;
+use agent_core::event::{FinishReason, Role};
 
-use super::{Chunk, CodecError, DONE, Usage, decode, encode};
+use super::{Chunk, CodecError, DONE, Usage, decode, encode, finish_of};
 use crate::{Message, Request};
 
 fn request() -> Request {
@@ -19,6 +19,7 @@ fn request() -> Request {
             },
         ],
         max_output_tokens: 512,
+        input_tokens_estimate: 40,
     }
 }
 
@@ -165,4 +166,19 @@ fn a_frame_that_is_not_json_is_refused() {
 #[test]
 fn an_error_explains_itself() {
     assert_ne!(CodecError::Json("detail".to_string()).to_string(), "");
+}
+
+#[test]
+fn the_four_known_finish_reasons_map_exactly() {
+    assert_eq!(finish_of("stop"), FinishReason::Stop);
+    assert_eq!(finish_of("length"), FinishReason::Length);
+    assert_eq!(finish_of("tool_calls"), FinishReason::ToolCalls);
+    assert_eq!(finish_of("function_call"), FinishReason::ToolCalls);
+    assert_eq!(finish_of("content_filter"), FinishReason::ContentFilter);
+}
+
+#[test]
+fn a_finish_reason_this_build_does_not_know_is_kept_as_unknown() {
+    assert_eq!(finish_of("eos"), FinishReason::Unknown);
+    assert_eq!(finish_of(""), FinishReason::Unknown);
 }

@@ -76,6 +76,8 @@ pub enum FinishReason {
     Length,
     ToolCalls,
     ContentFilter,
+    /// A reason this build does not know, kept rather than guessed at.
+    Unknown,
 }
 
 impl FinishReason {
@@ -86,6 +88,7 @@ impl FinishReason {
             Self::Length => "length",
             Self::ToolCalls => "tool_calls",
             Self::ContentFilter => "content_filter",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -308,6 +311,8 @@ pub(crate) mod tests {
         assert_eq!(FinishReason::Length.as_str(), "length");
         assert_eq!(FinishReason::ToolCalls.as_str(), "tool_calls");
         assert_eq!(FinishReason::ContentFilter.as_str(), "content_filter");
+        assert_eq!(FinishReason::Unknown.as_str(), "unknown");
+        assert_ne!(FinishReason::Stop.as_str(), FinishReason::Unknown.as_str());
     }
 
     #[test]

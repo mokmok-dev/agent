@@ -1,11 +1,11 @@
 use std::time::Duration;
 
-use agent_core::event::ErrorClass;
+use agent_core::event::{ErrorClass, FinishReason};
 use agent_prompt::{Directive, Prompt, render};
 
 use super::{
-    Delta, Message, Profile, Provider, ProviderError, Purpose, Request, RequestRecord, Usage,
-    backoff,
+    Completion, Delta, Message, Profile, Provider, ProviderError, Purpose, Request, RequestRecord,
+    Usage, backoff,
 };
 
 fn prompt(messages: &[(agent_core::event::Role, &str)]) -> Prompt {
@@ -166,16 +166,19 @@ impl Provider for Scripted {
         &mut self,
         _request: &Request,
         delta: &mut dyn FnMut(Delta<'_>),
-    ) -> Result<Usage, ProviderError> {
+    ) -> Result<Completion, ProviderError> {
         for piece in std::mem::take(&mut self.pieces) {
             delta(Delta::Text(piece));
         }
         self.outcome.take().map_or(
-            Ok(Usage {
-                input_tokens: 10,
-                output_tokens: 2,
-                cached_tokens: Some(8),
-                estimated: false,
+            Ok(Completion {
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 2,
+                    cached_tokens: Some(8),
+                    estimated: false,
+                },
+                finish: Some(FinishReason::Stop),
             }),
             Err,
         )
@@ -192,6 +195,7 @@ fn request() -> Request {
             content: "hello".to_string(),
         }],
         max_output_tokens: 16,
+        input_tokens_estimate: 40,
     }
 }
 
@@ -208,9 +212,9 @@ fn a_provider_reports_its_text_and_its_usage() {
         })
         .expect("succeeds");
     assert_eq!(seen, "hello");
-    assert_eq!(usage.output_tokens, 2);
-    assert_eq!(usage.cached_tokens, Some(8));
-    assert!(!usage.estimated);
+    assert_eq!(usage.usage.output_tokens, 2);
+    assert_eq!(usage.usage.cached_tokens, Some(8));
+    assert!(!usage.usage.estimated);
 }
 
 #[test]
