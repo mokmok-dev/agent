@@ -262,13 +262,15 @@ So the adapter uses `ureq`: blocking, small, and correct about HTTP. The cost ac
 
 The C dependency was the risk worth checking before committing, since this project builds in a Nix sandbox where a missing compiler is a build failure rather than a warning. `nix flake check` passes with the dependency in the tree, so `ring`'s C is built by the same toolchain the rest of the workspace uses.
 
-# 23. A turn's input joins the prompt without becoming a message
+# 23. A turn's input is a transcript entry the fold derives
 
-A turn carries the text the operator asked with. The transcript carries the messages that have been appended. Those are two different facts, and the prompt needs both: what was said before, and what is being asked now.
+A turn carries the text the operator asked with. The transcript carries what was said. The prompt needs both, in order, or a second turn sees an answer to a question it cannot find.
 
-So the renderer is handed the transcript plus the open turn's input as one more user message. Nothing is appended to the log to make that happen, because the input is already recorded in `turn.requested` and appending `message.appended` with the same text would put the same words in the log twice, where a later reader would have to know which of them to believe.
+The log holds the asking once, as `turn.requested`. The fold projects it into the transcript as a user message at the moment it is applied, which puts it in the right position without a second event. A `message.appended` with the same words would put one utterance in the log twice, and a later reader would have to know which copy to believe.
 
-The cost is that two events describe one utterance. A reader that wants the transcript must read `turn.requested` for the asking and `message.appended` for the answering, which is exactly the distinction a replay needs anyway: the request is a fact about intent, the message is a fact about the transcript.
+The cost is a small asymmetry. A message the fold derived has no token count, because nobody counted it, so the field is optional rather than a zero that claims somebody did. The request's own size is recorded on `model.requested`, which is the number that matters for the cache.
+
+An earlier version of this decision kept the input out of the transcript entirely and had the renderer append it per request. That worked for one turn and lost the conversation at the second: the second request carried the first answer with no question in front of it. The test that runs two commands through the daemon found it.
 
 # 24. Configuration is one TOML file, checked before anything opens
 
@@ -299,3 +301,11 @@ Cost accepted. Ten crates in a tree of fifty-eight, and a command declaration th
 The entry was written before the code, in the same order as the rest of the bundle. The parser landed first, as `crates/agentctl`: the declared surface, the conversion to `Intent`, the exit table, and the error object, with `version` and `verify` behind it and every command that needs the daemon waiting on the command socket. PR 7 implements the rest of a choice rather than reopening it.
 
 What would reverse it. A command surface that stops at five commands with no nesting, where the table is smaller than the dependency. Or an objection to the gate going quiet, in which case the builder API declares the same commands in code the gate can read, for four crates instead of ten and roughly three times the lines.
+
+# 26. Filing an answer into the transcript is a decision, not a side effect
+
+`model.responded` records what the provider said. `message.appended` puts it in the transcript. They are separate events, and the second one is chosen by `decide` on the next step rather than written by the code that made the call.
+
+The reason is the window between them. A process that stops after recording the answer and before filing it would leave an answer no later turn can see, and no amount of verification would notice, because the log is consistent: it simply lacks a message. With the reply held in the folded state as something owed, the same loop that repairs a crashed turn files it on restart.
+
+The cost is one more step per turn: the loop writes the answer, then writes the message, then decides again. That is a second fold, and folding is what this design already does after every append.

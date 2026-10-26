@@ -27,3 +27,4 @@
 * **Update**: Added `schedule.armed` to the type table, and recorded the loop's four steps, the wait ordering, and how a turn's input reaches the prompt.
 * **Update**: Described the configuration file, what is checked at startup, and why the key is named rather than stored.
 * **Update**: Added the installation guide for the NixOS module, and the daemon's heartbeat to the supervision table.
+* **Update**: Revised the transcript rule after a second turn lost the first question, and recorded why filing an answer is a decision.

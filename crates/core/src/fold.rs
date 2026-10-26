@@ -77,7 +77,11 @@ impl core::error::Error for FoldError {}
 pub struct Message {
     pub role: Role,
     pub content: String,
-    pub tokens: u64,
+    /// The token count the writer reported, when there was one to report.
+    ///
+    /// An entry the fold derives from `turn.requested` has none: nobody counted
+    /// it, and a zero would claim somebody did.
+    pub tokens: Option<u64>,
     pub turn: Option<TurnId>,
 }
 
@@ -98,6 +102,19 @@ pub struct PendingModel {
     pub turn: TurnId,
     pub attempts: u32,
     pub due: Option<Timestamp>,
+}
+
+/// An answer the model gave that the transcript does not hold yet.
+///
+/// The reply is recorded by `model.responded` and by nothing else, so a process
+/// that stops between that event and the transcript entry would otherwise leave
+/// an answer no later turn can see. Keeping it here makes the entry a decision
+/// the loop can repeat after a restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnfiledReply {
+    pub turn: TurnId,
+    pub content: String,
+    pub tokens: u64,
 }
 
 /// A turn that was requested on this branch.
@@ -130,6 +147,7 @@ pub struct Branch {
     pub pending: BTreeMap<CallId, String>,
     pub pending_command: Option<Command>,
     pub pending_model: Option<PendingModel>,
+    pub unfiled: Option<UnfiledReply>,
     pub cache: Cache,
     pub failures: u32,
 }
@@ -153,6 +171,7 @@ impl Branch {
             pending: BTreeMap::new(),
             pending_command: None,
             pending_model: None,
+            unfiled: None,
             cache: Cache::default(),
             failures: 0,
         }
@@ -258,6 +277,15 @@ impl State {
                     id: *turn,
                     input: input.clone(),
                 });
+                // The asking is a fact about the transcript as much as the
+                // answering is. Projecting it here keeps the order right without
+                // a second event, and a later turn then sees what was asked.
+                branch.messages.push(Message {
+                    role: Role::User,
+                    content: input.clone(),
+                    tokens: None,
+                    turn: Some(*turn),
+                });
                 branch.pending_command = None;
                 branch.pending_model = Some(PendingModel {
                     turn: *turn,
@@ -283,11 +311,21 @@ impl State {
                     pending.due = None;
                 }
             },
-            EventKind::ModelResponded { turn, .. } => {
+            EventKind::ModelResponded {
+                turn,
+                output,
+                output_tokens,
+                ..
+            } => {
                 if !branch.has_turn(*turn) {
                     return Err(FoldError::UnknownTurn(*turn));
                 }
                 branch.pending_model = None;
+                branch.unfiled = Some(UnfiledReply {
+                    turn: *turn,
+                    content: output.clone(),
+                    tokens: *output_tokens,
+                });
             },
             EventKind::ModelFailed {
                 turn, retryable, ..
@@ -328,12 +366,21 @@ impl State {
                 content,
                 role,
                 tokens,
-            } => branch.messages.push(Message {
-                role: *role,
-                content: content.clone(),
-                tokens: *tokens,
-                turn: event.correlation,
-            }),
+            } => {
+                branch.messages.push(Message {
+                    role: *role,
+                    content: content.clone(),
+                    tokens: Some(*tokens),
+                    turn: event.correlation,
+                });
+                if branch
+                    .unfiled
+                    .as_ref()
+                    .is_some_and(|unfiled| event.correlation == Some(unfiled.turn))
+                {
+                    branch.unfiled = None;
+                }
+            },
             EventKind::ToolIntent { call, tool, .. } => {
                 branch.pending.insert(*call, tool.clone());
             },
@@ -664,7 +711,7 @@ mod tests {
         assert_eq!(branch.messages.len(), 1);
         assert_eq!(branch.messages[0].role, Role::Assistant);
         assert_eq!(branch.messages[0].content, "hi");
-        assert_eq!(branch.messages[0].tokens, 3);
+        assert_eq!(branch.messages[0].tokens, Some(3));
         assert_eq!(branch.messages[0].turn, Some(turn()));
     }
 

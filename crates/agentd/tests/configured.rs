@@ -28,6 +28,77 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// Answers `count` requests, one after another, and keeps what it was asked.
+fn serve_times(count: usize) -> (String, std::thread::JoinHandle<Vec<Vec<u8>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binds a port");
+    let address = listener.local_addr().expect("an address");
+    let handle = std::thread::spawn(move || {
+        let mut seen = Vec::with_capacity(count);
+        for reply in 0..count {
+            let (mut socket, _) = listener.accept().expect("accepts a connection");
+            seen.push(read_request(&mut socket));
+            let answer = format!("answer-{reply}");
+            let frames = [
+                format!(r#"{{"choices":[{{"delta":{{"content":"{answer}"}}}}]}}"#),
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#.to_string(),
+                r#"{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2}}"#.to_string(),
+                "[DONE]".to_string(),
+            ];
+            write_stream(&mut socket, &frames);
+        }
+        seen
+    });
+    (format!("http://{address}"), handle)
+}
+
+fn read_request(socket: &mut std::net::TcpStream) -> Vec<u8> {
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let head_end = loop {
+        let read = socket.read(&mut buffer).expect("reads the request");
+        if read == 0 {
+            return request;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if let Some(at) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            break at + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&request[..head_end]).to_lowercase();
+    let declared = head
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("content-length:")
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        })
+        .unwrap_or(0);
+    while request.len() < head_end + declared {
+        let read = socket.read(&mut buffer).expect("reads the body");
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+    }
+    request
+}
+
+fn write_stream(
+    socket: &mut std::net::TcpStream,
+    frames: &[String],
+) {
+    let mut response = String::from(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+    );
+    for frame in frames {
+        let data = format!("data: {frame}\n\n");
+        let length = data.len();
+        write!(response, "{length:x}\r\n{data}\r\n").expect("writing to a string cannot fail");
+    }
+    response.push_str("0\r\n\r\n");
+    socket.write_all(response.as_bytes()).expect("writes");
+    socket.flush().expect("flushes");
+}
+
 /// Answers one request with an event stream, then closes.
 fn serve() -> (String, std::thread::JoinHandle<Vec<u8>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("binds a port");
@@ -118,7 +189,10 @@ fn run(config: &Path) -> Output {
         .expect("runs the daemon")
 }
 
-fn append_command(dir: &Path) {
+fn append_command(
+    dir: &Path,
+    text: &str,
+) {
     let mut store = Store::open(&dir.join("agent.db")).expect("opens");
     let events = store.load(ROOT).expect("loads");
     let command = Event {
@@ -134,7 +208,7 @@ fn append_command(dir: &Path) {
             command: "send".to_string(),
             command_id: "c-1".to_string(),
             surface: "test".to_string(),
-            text: Some("hello".to_string()),
+            text: Some(text.to_string()),
         },
     };
     store.append(&command).expect("appends");
@@ -150,7 +224,7 @@ fn a_configured_daemon_answers_a_turn() {
         run(&config).status.success(),
         "the first pass starts the store"
     );
-    append_command(&dir);
+    append_command(&dir, "hello");
 
     let output = run(&config);
     assert!(
@@ -176,6 +250,7 @@ fn a_configured_daemon_answers_a_turn() {
             "dev.mokmok.agent.turn.requested",
             "dev.mokmok.agent.model.requested",
             "dev.mokmok.agent.model.responded",
+            "dev.mokmok.agent.message.appended",
         ]
     );
     match &events[4].kind {
@@ -204,7 +279,7 @@ fn a_configured_daemon_answers_a_turn() {
         },
         other => panic!("unexpected {other:?}"),
     }
-    assert_eq!(store.verify().expect("verifies").events, 6);
+    assert_eq!(store.verify().expect("verifies").events, 7);
 }
 
 #[test]
@@ -250,4 +325,46 @@ fn a_key_that_is_not_in_the_environment_is_refused_at_startup() {
         stderr.contains("AGENT_TEST_KEY_THAT_IS_NOT_SET"),
         "{stderr}"
     );
+}
+
+#[test]
+fn a_second_turn_sees_the_first_answer() {
+    let dir = scratch("history");
+    let (base_url, server) = serve_times(2);
+    let config = write_config(&dir, &base_url);
+
+    assert!(
+        run(&config).status.success(),
+        "the first pass starts the store"
+    );
+    append_command(&dir, "first question");
+    assert!(run(&config).status.success(), "the first turn is answered");
+    append_command(&dir, "second question");
+    assert!(run(&config).status.success(), "the second turn is answered");
+
+    let requests = server.join().expect("the server finished");
+    assert_eq!(requests.len(), 2);
+    let second = String::from_utf8_lossy(&requests[1]).to_string();
+    assert!(
+        second.contains("answer-0"),
+        "the first answer is in the second request: {second}"
+    );
+    assert!(second.contains("first question"), "{second}");
+    assert!(second.contains("second question"), "{second}");
+
+    let store = Store::open(&dir.join("agent.db")).expect("opens");
+    let events = store.load(ROOT).expect("loads");
+    let answers: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::MessageAppended { content, role, .. }
+                if *role == agent_core::event::Role::Assistant =>
+            {
+                Some(content.as_str())
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answers, vec!["answer-0", "answer-1"]);
+    assert_eq!(store.verify().expect("verifies").events, 12);
 }
