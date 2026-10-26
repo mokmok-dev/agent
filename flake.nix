@@ -98,7 +98,16 @@
                 unit=${pkgs.writeText "unit" unit}
                 grep -q "Type=notify" $unit
                 grep -q "WatchdogSec=30s" $unit
-                grep -q "StartLimitIntervalSec=0" $unit
+                # The rate limit belongs to [Unit]; in [Service] systemd ignores it
+                # and logs that it did, so a grep over the whole file would pass
+                # while the setting did nothing.
+                ${pkgs.gawk}/bin/awk '/^\[Unit\]/{unit=1} /^\[Service\]/{unit=0} unit' $unit \
+                  | grep -q "^StartLimitIntervalSec=0$"
+                if ${pkgs.gawk}/bin/awk '/^\[Service\]/{service=1} /^\[Install\]/{service=0} service' $unit \
+                  | grep -q "StartLimitIntervalSec"; then
+                  echo "StartLimitIntervalSec is in [Service], where systemd ignores it" >&2
+                  exit 1
+                fi
                 grep -q "StateDirectory=mokmok-agent" $unit
                 grep -q "LoadCredential=api_key:/dev/null" $unit
                 grep -q "NoNewPrivileges=true" $unit
@@ -158,6 +167,14 @@
                 ];
                 pname = "agentd";
                 version = "0.0.0";
+
+                # One binary. The dependency cache that comes in with
+                # cargoArtifacts leaves every workspace binary in target/release,
+                # so the default install hook would ship the repo's own task
+                # runner alongside the daemon.
+                installPhase = ''
+                  install -Dm755 target/release/agentd $out/bin/agentd
+                '';
               }
             );
             default = config.packages.agentd;

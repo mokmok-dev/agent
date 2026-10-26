@@ -38,6 +38,17 @@ The module does four things.
 
 An enabled configuration with no model, or with a key named twice, fails evaluation rather than starting a broken service.
 
+# Ordering against the secrets unit
+
+systemd resolves `LoadCredential` when the service starts, so a key that another
+unit writes has to exist by then. A secret manager that installs its files at
+boot, agenix and sops-nix among them, needs one line in the host configuration:
+make the agent start after that unit.
+
+Without it the first start after a reboot fails with a missing credential file,
+the supervisor restarts, and the second attempt succeeds because the file has
+arrived. The failure looks intermittent, which is the worst way for it to look.
+
 # What is checked and what is not
 
 The flake's check evaluates a configuration, reads the unit text systemd would receive, and asserts the settings this design depends on: the notify type, the watchdog interval, the disabled start rate limit, the state directory, the credential, and the two hardening directives that keep the binary and the home directory read-only.
