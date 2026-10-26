@@ -11,6 +11,7 @@
 //! formulas, written here because a dependency that brings a timezone database
 //! would also bring a clock.
 
+use alloc::string::String;
 use core::fmt;
 
 /// Why a timestamp could not be read.
@@ -106,6 +107,23 @@ impl Timestamp {
             write!(out, ".{:09}", self.nanos)?;
         }
         out.write_str("Z")
+    }
+
+    /// Renders the instant as an owned RFC 3339 string.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if writing into a `String` fails, which cannot happen.
+    #[must_use]
+    #[allow(
+        clippy::expect_used,
+        reason = "writing into a String cannot fail, and threading a Result through every caller buys nothing"
+    )]
+    pub fn rfc3339(&self) -> String {
+        let mut out = String::new();
+        self.write_rfc3339(&mut out)
+            .expect("a String accepts every write");
+        out
     }
 
     /// Reads RFC 3339 text with a `Z` offset or a `+HH:MM` or `-HH:MM` offset.

@@ -17,6 +17,8 @@ sources:
 
 Every event is one CloudEvents 1.0 message in structured mode with `datacontenttype: application/json`. The wire format on the socket, the export format, and the format inside the store are the same bytes. One representation, no translation layer.[^cloudevents-1-0]
 
+The canonical writer lives in the core and is the only code that produces those bytes. The store keeps what the writer produced, verbatim, and parses it for queries without ever re-encoding it. That is why one encoder is enough: nothing has to agree with the writer, because nothing else writes.
+
 | Attribute | Value | Notes |
 |---|---|---|
 | `specversion` | `1.0` | Constant. |
@@ -92,7 +94,7 @@ Type strings are fixed strings, not derived from Rust names, and a table in `age
 | `dev.mokmok.agent.task.created` | task | Task id, title, owning branch, parent task. |
 | `dev.mokmok.agent.task.state` | task | From state, to state, reason. |
 
-Adding a case to the taxonomy is a code change to the table plus a test that folds it. There is no runtime registration and no plugin-supplied type.
+Adding a case to the taxonomy is a code change to the table plus a test that folds it. There is no runtime registration and no plugin-supplied type. The schedule and task rows are added with the scheduler; until then the code's table holds seventeen types, and an event of a type it does not know is preserved byte for byte rather than rejected.
 
 # Payload rules
 
