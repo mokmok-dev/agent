@@ -10,6 +10,7 @@
 
   outputs =
     {
+      self,
       nixpkgs,
       flake-parts,
       git-hooks,
@@ -23,6 +24,10 @@
         git-hooks.flakeModule
         treefmt-nix.flakeModule
       ];
+
+      flake = {
+        nixosModules.default = import ./nix/module.nix { inherit self; };
+      };
 
       perSystem =
         {
@@ -59,6 +64,49 @@
                 cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
               }
             );
+            # The module is checked by evaluating a configuration and reading the
+            # unit systemd would be given. A virtual machine test would be stronger
+            # and cannot run in this sandbox, so this is the part that can be kept
+            # honest here: the options typecheck, the unit carries the settings the
+            # design asks for, and the daemon it points at builds.
+            module-eval =
+              let
+                configured = inputs.nixpkgs.lib.nixosSystem {
+                  system = "x86_64-linux";
+                  modules = [
+                    self.nixosModules.default
+                    {
+                      services.mokmok-agent = {
+                        apiKeyFile = "/dev/null";
+                        baseUrl = "https://example.test/v1";
+                        directive = "be careful";
+                        enable = true;
+                        model = "test-model";
+                        tools = [
+                          {
+                            name = "shell";
+                            schema = "{}";
+                          }
+                        ];
+                      };
+                    }
+                  ];
+                };
+                unit = configured.config.systemd.units."mokmok-agent.service".text;
+              in
+              pkgs.runCommand "mokmok-agent-module-eval" { } ''
+                unit=${pkgs.writeText "unit" unit}
+                grep -q "Type=notify" $unit
+                grep -q "WatchdogSec=30s" $unit
+                grep -q "StartLimitIntervalSec=0" $unit
+                grep -q "StateDirectory=mokmok-agent" $unit
+                grep -q "LoadCredential=api_key:/dev/null" $unit
+                grep -q "NoNewPrivileges=true" $unit
+                grep -q "ProtectSystem=strict" $unit
+                grep -q "agentd --config /nix/store/" $unit
+                touch $out
+              '';
+
             test = craneLib.cargoNextest (
               commonArgs
               // {
@@ -97,6 +145,22 @@
                 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="clang"
               ''}
             '';
+          };
+
+          packages = {
+            agentd = craneLib.buildPackage (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+                cargoBuildFlags = [
+                  "-p"
+                  "agentd"
+                ];
+                pname = "agentd";
+                version = "0.0.0";
+              }
+            );
+            default = config.packages.agentd;
           };
 
           pre-commit.settings = {

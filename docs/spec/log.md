@@ -25,3 +25,4 @@
 * **Update**: Recorded that the HTTP client is in the tree and builds in the sandbox, and what counts as a finished stream.
 * **Update**: Added `schedule.armed` to the type table, and recorded the loop's four steps, the wait ordering, and how a turn's input reaches the prompt.
 * **Update**: Described the configuration file, what is checked at startup, and why the key is named rather than stored.
+* **Update**: Added the installation guide for the NixOS module, and the daemon's heartbeat to the supervision table.

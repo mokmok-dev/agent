@@ -7,6 +7,7 @@
 pub mod cli;
 pub mod clock;
 pub mod config;
+pub mod notify;
 
 use std::fmt;
 use std::path::Path;
