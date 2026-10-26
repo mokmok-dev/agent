@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 
 use crate::event::{Event, EventKind, Role};
 use crate::ids::{BranchId, CallId, EventId, TurnId};
+use crate::time::Timestamp;
 
 /// Why an event could not be folded.
 ///
@@ -88,6 +89,17 @@ pub struct Command {
     pub text: Option<String>,
 }
 
+/// A turn that has been asked for and has not finished.
+///
+/// The attempts count is what the retry policy reads, and the due instant is
+/// what a restart resumes from, so neither has to be remembered anywhere else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingModel {
+    pub turn: TurnId,
+    pub attempts: u32,
+    pub due: Option<Timestamp>,
+}
+
 /// A turn that was requested on this branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Turn {
@@ -117,6 +129,7 @@ pub struct Branch {
     pub turns: Vec<Turn>,
     pub pending: BTreeMap<CallId, String>,
     pub pending_command: Option<Command>,
+    pub pending_model: Option<PendingModel>,
     pub cache: Cache,
     pub failures: u32,
 }
@@ -139,6 +152,7 @@ impl Branch {
             turns: Vec::new(),
             pending: BTreeMap::new(),
             pending_command: None,
+            pending_model: None,
             cache: Cache::default(),
             failures: 0,
         }
@@ -245,6 +259,11 @@ impl State {
                     input: input.clone(),
                 });
                 branch.pending_command = None;
+                branch.pending_model = Some(PendingModel {
+                    turn: *turn,
+                    attempts: 0,
+                    due: None,
+                });
             },
             EventKind::CommandReceived { command, text, .. } => {
                 branch.pending_command = Some(Command {
@@ -253,14 +272,42 @@ impl State {
                     text: text.clone(),
                 });
             },
-            EventKind::ModelRequested { turn, .. }
-            | EventKind::ModelResponded { turn, .. }
-            | EventKind::ModelFailed { turn, .. } => {
+            EventKind::ModelRequested { turn, .. } => {
                 if !branch.has_turn(*turn) {
                     return Err(FoldError::UnknownTurn(*turn));
                 }
-                if matches!(event.kind, EventKind::ModelFailed { .. }) {
-                    branch.failures += 1;
+                if let Some(pending) = &mut branch.pending_model
+                    && pending.turn == *turn
+                {
+                    pending.attempts = pending.attempts.saturating_add(1);
+                    pending.due = None;
+                }
+            },
+            EventKind::ModelResponded { turn, .. } => {
+                if !branch.has_turn(*turn) {
+                    return Err(FoldError::UnknownTurn(*turn));
+                }
+                branch.pending_model = None;
+            },
+            EventKind::ModelFailed {
+                turn, retryable, ..
+            } => {
+                if !branch.has_turn(*turn) {
+                    return Err(FoldError::UnknownTurn(*turn));
+                }
+                branch.failures = branch.failures.saturating_add(1);
+                if !retryable {
+                    branch.pending_model = None;
+                }
+            },
+            EventKind::ScheduleArmed { turn, due, .. } => {
+                if !branch.has_turn(*turn) {
+                    return Err(FoldError::UnknownTurn(*turn));
+                }
+                if let Some(pending) = &mut branch.pending_model
+                    && pending.turn == *turn
+                {
+                    pending.due = Some(*due);
                 }
             },
             EventKind::ModelCacheObserved {

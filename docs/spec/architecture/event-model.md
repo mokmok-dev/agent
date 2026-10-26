@@ -83,6 +83,7 @@ Type strings are fixed strings, not derived from Rust names, and a table in `age
 | `dev.mokmok.agent.model.responded` | branch | Turn id, output, finish reason, usage, provider request id. |
 | `dev.mokmok.agent.model.cache.observed` | branch | Turn id, prefix hash and length, reported flag, cached and uncached tokens, first token and total milliseconds. |
 | `dev.mokmok.agent.model.failed` | branch | Turn id, error class, retryable flag, attempt, partial flag. |
+| `dev.mokmok.agent.schedule.armed` | branch | Turn id, attempt, the instant the next attempt is owed. |
 | `dev.mokmok.agent.message.appended` | branch | Role, content, tool call ids, token count. |
 | `dev.mokmok.agent.tool.intent` | branch | Call id, tool name, arguments, idempotency key. |
 | `dev.mokmok.agent.tool.result` | branch | Call id, exit status, stdout ref, stderr ref, duration. |

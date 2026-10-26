@@ -65,6 +65,12 @@ Each iteration reads the events appended since the last folded position and fold
 
 `decide` returns one step, never a loop of steps. The loop re-folds after every append, so a decision never runs on state that a previous decision already invalidated.
 
+A step is one of four things. Append one event. Send one turn and record what came back. Wait until an instant. Do nothing. The wait is decided before anything else, because starting a second request for a turn that is already backing off would defeat the backoff it is waiting on.
+
+The instant a retry is owed lives in the log as `schedule.armed`, not in a timer in memory. A restart therefore resumes the backoff instead of resetting it, and the delay is computed from the attempt count the fold already knows. The jitter draw comes from the id of the request that failed, so a replay reproduces the same delay.
+
+The loop sleeps toward that instant in bounded steps rather than for the whole interval, so a clock that jumps forward cannot park the daemon for longer than the bound.
+
 # Timers
 
 - Durations use the monotonic clock. Absolute instants use the wall clock and are re-evaluated on each tick.

@@ -51,7 +51,7 @@ fn one_shot_starts_the_store_and_reports_nothing_to_do() {
 }
 
 #[test]
-fn one_shot_turns_a_command_into_a_turn() {
+fn one_shot_writes_the_turn_then_says_it_has_no_model() {
     let dir = scratch("turn");
     assert!(run_once(&dir).status.success());
 
@@ -77,7 +77,13 @@ fn one_shot_turns_a_command_into_a_turn() {
         store.append(&command).expect("appends");
     }
 
-    assert!(run_once(&dir).status.success());
+    let output = run_once(&dir);
+    assert!(
+        !output.status.success(),
+        "a turn with no model is a configuration error, not a silent success"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no model"), "{stderr}");
 
     let store = Store::open(&dir.join("agent.db")).expect("opens");
     let events = store.load(ROOT).expect("loads");
@@ -87,7 +93,6 @@ fn one_shot_turns_a_command_into_a_turn() {
         other => panic!("unexpected {other:?}"),
     }
     assert_eq!(turn.depth, 3);
-    assert!(turn.causation.is_some());
 }
 
 #[test]

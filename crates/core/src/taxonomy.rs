@@ -25,6 +25,9 @@ pub const MODEL_RESPONDED: &str = "dev.mokmok.agent.model.responded";
 pub const MODEL_CACHE_OBSERVED: &str = "dev.mokmok.agent.model.cache.observed";
 pub const MODEL_FAILED: &str = "dev.mokmok.agent.model.failed";
 
+/// A retry the reactor has promised to make, and when.
+pub const SCHEDULE_ARMED: &str = "dev.mokmok.agent.schedule.armed";
+
 pub const MESSAGE_APPENDED: &str = "dev.mokmok.agent.message.appended";
 
 pub const TOOL_INTENT: &str = "dev.mokmok.agent.tool.intent";
@@ -46,6 +49,7 @@ pub const ALL: &[&str] = &[
     MODEL_RESPONDED,
     MODEL_CACHE_OBSERVED,
     MODEL_FAILED,
+    SCHEDULE_ARMED,
     MESSAGE_APPENDED,
     TOOL_INTENT,
     TOOL_RESULT,

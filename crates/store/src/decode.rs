@@ -209,6 +209,13 @@ struct ModelFailed {
 }
 
 #[derive(Deserialize)]
+struct ScheduleArmed {
+    attempt: u32,
+    due: String,
+    turn: String,
+}
+
+#[derive(Deserialize)]
 struct MessageAppended {
     content: String,
     role: String,
@@ -344,6 +351,14 @@ fn decode_kind(
                 attempt: payload.attempt,
                 class: parse_error_class(&payload.class)?,
                 retryable: payload.retryable,
+                turn: parse_turn(&payload.turn)?,
+            }
+        },
+        taxonomy::SCHEDULE_ARMED => {
+            let payload: ScheduleArmed = payload(raw)?;
+            EventKind::ScheduleArmed {
+                attempt: payload.attempt,
+                due: Timestamp::parse(&payload.due).map_err(|_| DecodeError::Malformed("due"))?,
                 turn: parse_turn(&payload.turn)?,
             }
         },

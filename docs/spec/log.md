@@ -20,3 +20,4 @@
 * **Update**: Added the wire crate to the crate map and recorded what the server-sent event parser does and does not decide.
 * **Update**: Recorded that a request carries its parts separately, and the measured comparison behind choosing `ureq` for the adapter.
 * **Update**: Recorded that the HTTP client is in the tree and builds in the sandbox, and what counts as a finished stream.
+* **Update**: Added `schedule.armed` to the type table, and recorded the loop's four steps, the wait ordering, and how a turn's input reaches the prompt.
