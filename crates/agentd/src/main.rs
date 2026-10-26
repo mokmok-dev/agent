@@ -48,6 +48,8 @@ fn drive(
     reactor
         .start(clock::now().map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())?;
+    let supervisor = std::env::var_os("NOTIFY_SOCKET");
+    ping(supervisor.as_deref(), agent_runtime::notify::READY);
     loop {
         let now = clock::now().map_err(|error| error.to_string())?;
         match reactor.step(now).map_err(|error| error.to_string())? {
@@ -65,6 +67,20 @@ fn drive(
                 std::thread::sleep(agent_runtime::wait_for(now, until));
             },
         }
+        ping(supervisor.as_deref(), agent_runtime::notify::WATCHDOG);
+    }
+}
+
+/// Tells the supervisor what happened, and does not crash when it is not there.
+///
+/// A supervisor that has gone away is worth a line, not an exit: the next
+/// iteration may still be the one that finishes the work.
+fn ping(
+    socket: Option<&std::ffi::OsStr>,
+    message: &str,
+) {
+    if let Err(error) = agent_runtime::notify::notify(socket, message) {
+        eprintln!("agentd: cannot notify the supervisor: {error}");
     }
 }
 

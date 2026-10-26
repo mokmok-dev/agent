@@ -28,7 +28,7 @@ Separate processes buy three things. A surface crash cannot stall the reactor. A
 
 | Setting | Value | Why |
 |---|---|---|
-| `Type` with `WatchdogSec` | `notify`, 30 seconds | The ping is sent after a loop iteration completes, so a hang stops the ping and systemd restarts the process |
+| `Type` with `WatchdogSec` | `notify`, 30 seconds | The ping is sent after a loop iteration completes, so a hang stops the ping and systemd restarts the process. The module sets both; see [Installing on NixOS](../delivery/install.md) |
 | `Restart` with `RestartSec` | `always`, 2 seconds | A crash is a restart, not an outage |
 | `StartLimitIntervalSec` | `0` | Removes the rate limit, because the persisted backoff inside the agent is the real limiter. Without this, a repeatedly failing machine ends up with a dead unit and no agent |
 | `StateDirectory` | `agent`, mode 0700 | Exactly one writable path for a process that otherwise has no write access |
