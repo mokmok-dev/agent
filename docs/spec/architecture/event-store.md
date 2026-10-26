@@ -40,6 +40,8 @@ The events table. One row per event, and the row is the whole envelope.
 | `dataref` | text or null | Blob path when the payload is offloaded |
 | `bytes` | integer | Canonical payload length |
 
+The `payload` column holds the canonical bytes the core wrote, verbatim. Nothing in the store re-encodes an event, so a verification is a hash of stored bytes rather than a serializer that could drift from the writer. The `dataref` and `bytes` columns arrive with blob offloading, which lands with tool output.
+
 Three indexes. A unique index on branch and depth, so a branch cannot hold two events at the same depth. An index on `prev`, so chain verification and branch trees are cheap. An index on type and time, so the audit view and the metrics projection do not scan.
 
 Two more tables. `snapshots` holds folded state per branch per depth, with the state hash. `meta` holds the store schema version and the instance id.
@@ -60,7 +62,7 @@ The fourth layer is the one that matters over years. The first three stop our ow
 # Durability
 
 - The database runs in write-ahead logging mode with full synchronous commits. A committed transaction survives a power loss.
-- Group commit is one transaction per reactor batch. The batch closes at 5 ms or 256 events, and the commit returns before the reactor treats the events as accepted.
+- Group commit is one transaction per reactor batch. The batch closes at 5 ms or 256 events, and the commit returns before the reactor treats the events as accepted. A single append is a batch of one, so the same code path is exercised at both ends.
 - Crash recovery is SQLite's. An uncommitted transaction is rolled back on the next open. There is no torn file to truncate, because there is no frame format to tear.
 - The writer runs a passive checkpoint after a batch when the log grows past a threshold, so a long run does not leave a giant unreplayed log.
 

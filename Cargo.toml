@@ -1,9 +1,10 @@
 [workspace]
-members = ["crates/core", "crates/removeme", "crates/xtask"]
+members = ["crates/core", "crates/removeme", "crates/store", "crates/xtask"]
 resolver = "3"
 
 [workspace.dependencies]
 blake3 = { version = "1", default-features = false }
+rusqlite = "0.37"
 serde = { version = "1", default-features = false }
 serde_yaml_ng = "0.10"
 
