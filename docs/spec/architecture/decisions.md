@@ -296,6 +296,6 @@ What `clap` does not own is the part the interface spec pins down. Parsing produ
 
 Cost accepted. Ten crates in a tree of fifty-eight, and a command declaration that `cargo-mutants` cannot see, because a derive puts it in attributes and the gate reads source. That is decision 18's objection against `thiserror` at a larger scale. The mitigation is the layer [mutation policy](../delivery/mutation-policy.md) already names, process tests that start the binary and assert the exit code and the error object. The gate goes quiet on the declaration rather than failing on it, and that silence is the cost.
 
-`agentctl` does not exist yet, so this entry is written before the code, in the same order as the rest of the bundle. PR 7 implements a choice rather than reopening it.
+The entry was written before the code, in the same order as the rest of the bundle. The parser landed first, as `crates/agentctl`: the declared surface, the conversion to `Intent`, the exit table, and the error object, with `version` and `verify` behind it and every command that needs the daemon waiting on the command socket. PR 7 implements the rest of a choice rather than reopening it.
 
 What would reverse it. A command surface that stops at five commands with no nesting, where the table is smaller than the dependency. Or an objection to the gate going quiet, in which case the builder API declares the same commands in code the gate can read, for four crates instead of ten and roughly three times the lines.
