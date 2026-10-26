@@ -37,3 +37,4 @@
 * **Update**: Recorded that status reads the log rather than the socket.
 * **Update**: Recorded that the module installs the operator's command, not only the daemon.
 * **Update**: A failure says whether another attempt is coming, not whether the error looks retryable. Past the budget the two parted, and the loop asked a refusing provider 840 times in eight seconds.
+* **Update**: A yes written by the current process is the first yes a call waiting on a question ever had, so answering after a restart runs it instead of claiming the effect may have happened.
