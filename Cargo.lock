@@ -10,6 +10,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-model"
+version = "0.0.0"
+dependencies = [
+ "agent-core",
+ "agent-prompt",
+]
+
+[[package]]
 name = "agent-prompt"
 version = "0.0.0"
 dependencies = [

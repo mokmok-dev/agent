@@ -221,3 +221,15 @@ The order is deliberate. An incremental fold that is wrong diverges from the log
 The number is used for exactly one decision: whether a prefix clears a provider's minimum cacheable length, which the literature puts at 1,024 or 4,096 tokens depending on the provider. A four byte token underestimates Latin text and underestimates CJK text by more, and underestimating is the safe direction. A prefix wrongly believed too short sends a request that misses the cache; the opposite mistake records a saving that never happened, and the ledger would then be wrong in the direction that flatters it.
 
 Billing never reads this number. `model.responded` carries the input and output tokens the provider reported.
+
+# 21. `no_std` marks where the temptation is, not where the code is pure
+
+`agent-core` and `agent-prompt` compile with `#![no_std]` and `alloc`. `agent-store`, `agent-model`, and `agent-runtime` do not, and the rule is not that pure code is `no_std`.
+
+The flag buys one thing here: a function that reaches for a clock, a socket, or a file does not compile. That matters most where a branch would quietly start depending on the environment, which is the fold, the decisions, and the renderer. It matters least in code that already takes its inputs as arguments, where a backoff of `(attempt, draw)` cannot read a clock because it was never handed one.
+
+The cost is real and it lands on tests. `vec!`, `format!`, and `ToString` need explicit imports from `alloc`, anything that panics with a string needs a `std` crate under `cfg(test)`, and every dependency must be capable of `no_std`. Paying that inside a crate whose job is to hold a socket client buys nothing at all.
+
+So a crate is `no_std` when it holds logic that is tempting to make environmental, and `std` when its job is to talk to something. `agent-model` is the second case even though everything it holds today is pure, because the adapters that join it will not be.
+
+The same reasoning governs the Sans I/O split, which has not happened yet. When the HTTP adapter lands, the wire half, request bytes out and server-sent events in, becomes its own crate: that is where the branch density is, and where a test needs no server. The socket half stays a thin shell, excluded from the gate by the rule that already excludes a `main.rs`.
