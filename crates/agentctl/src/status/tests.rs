@@ -191,6 +191,7 @@ fn a_model_failure_is_reported_too() {
         kind: EventKind::ModelFailed {
             attempt: 1,
             class: agent_core::event::ErrorClass::RateLimited,
+            detail: None,
             retryable: true,
             turn: turn(),
         },
@@ -198,5 +199,31 @@ fn a_model_failure_is_reported_too() {
     assert_eq!(
         last_failure(&events).as_deref(),
         Some("model: rate_limited")
+    );
+}
+
+#[test]
+fn a_model_failure_shows_what_the_failure_said() {
+    let events = vec![Event {
+        branch: branch(),
+        depth: 0,
+        prev: None,
+        time: at(0),
+        actor: Actor::Process("test".to_string()),
+        causation: None,
+        correlation: None,
+        model: None,
+        kind: EventKind::ModelFailed {
+            attempt: 1,
+            class: agent_core::event::ErrorClass::Transport,
+            detail: Some("Connection refused (os error 111)".to_string()),
+            retryable: true,
+            turn: turn(),
+        },
+    }];
+    assert_eq!(
+        last_failure(&events).as_deref(),
+        Some("model: transport (Connection refused (os error 111))"),
+        "the class names the kind, the detail names the occasion"
     );
 }

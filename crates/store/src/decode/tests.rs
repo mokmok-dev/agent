@@ -89,6 +89,7 @@ fn kinds() -> Vec<EventKind> {
         EventKind::ModelFailed {
             attempt: 2,
             class: ErrorClass::RateLimited,
+            detail: None,
             retryable: true,
             turn: turn(),
         },
@@ -325,6 +326,7 @@ fn an_unknown_error_class_is_refused() {
     let body = agent_core::canonical::canonical(&event(EventKind::ModelFailed {
         attempt: 1,
         class: ErrorClass::Timeout,
+        detail: None,
         retryable: true,
         turn: turn(),
     }))
@@ -421,5 +423,36 @@ fn every_risk_word_round_trips() {
         let body = agent_core::canonical::canonical(&original);
         assert!(body.contains(word), "{word} is not in {body}");
         assert_eq!(decode(&body).expect("decodes"), original);
+    }
+}
+
+#[test]
+fn a_failure_written_before_the_detail_existed_still_decodes() {
+    // Adding a field to an event must not make every older log unreadable: the
+    // writer only omits it, so a body without the key is a body from before it.
+    let body = r#"{"actor":"agent:test","branch":"b-0101010101010101","causation":"0303030303030303030303030303030303030303030303030303030303030303","correlation":"0404040404040404","data":{"attempt":2,"class":"transport","retryable":true,"turn":"0404040404040404"},"datacontenttype":"application/json","depth":7,"model":"deepseek","prev":"0202020202020202020202020202020202020202020202020202020202020202","schemaver":1,"source":"agent://mokmok","specversion":"1.0","subject":"branch/b-0101010101010101","time":"2026-10-25T12:57:16Z","type":"dev.mokmok.agent.model.failed"}"#;
+    match decode(body).expect("decodes").kind {
+        EventKind::ModelFailed {
+            attempt,
+            detail,
+            class,
+            ..
+        } => {
+            assert_eq!(attempt, 2);
+            assert_eq!(class, ErrorClass::Transport);
+            assert_eq!(detail, None, "an older failure said nothing about itself");
+        },
+        other => panic!("unexpected {other:?}"),
+    }
+
+    let told = body.replace(
+        r#""retryable":true"#,
+        r#""detail":"connection refused","retryable":true"#,
+    );
+    match decode(&told).expect("decodes").kind {
+        EventKind::ModelFailed { detail, .. } => {
+            assert_eq!(detail.as_deref(), Some("connection refused"));
+        },
+        other => panic!("unexpected {other:?}"),
     }
 }

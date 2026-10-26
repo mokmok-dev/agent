@@ -95,7 +95,10 @@ pub fn read(path: &Path) -> Result<Status, StoreError> {
 /// The last failure the log records, in the words an operator needs.
 fn last_failure(events: &[agent_core::event::Event]) -> Option<String> {
     events.iter().rev().find_map(|event| match &event.kind {
-        EventKind::ModelFailed { class, .. } => Some(format!("model: {}", class.as_str())),
+        EventKind::ModelFailed { class, detail, .. } => Some(detail.as_ref().map_or_else(
+            || format!("model: {}", class.as_str()),
+            |detail| format!("model: {} ({detail})", class.as_str()),
+        )),
         EventKind::ToolFailed {
             class,
             may_have_happened,

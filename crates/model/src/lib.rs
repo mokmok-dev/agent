@@ -145,7 +145,10 @@ pub struct Usage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderError {
     /// The connection never opened, or died before a response began.
-    Transport,
+    ///
+    /// Carries what the socket said, which is the only thing that tells a typo in
+    /// the URL apart from a provider that is down. A class alone cannot.
+    Transport(String),
     /// No response within the deadline.
     Timeout,
     /// The provider answered with a status code.
@@ -154,12 +157,35 @@ pub enum ProviderError {
     AfterFirstToken(String),
 }
 
+/// How much of a failure's own words the log keeps.
+///
+/// A cause is a line, not a document: an operating system message, a status, a
+/// reason the stream stopped. The bound is on characters rather than bytes so a
+/// cut never lands inside one.
+pub const MAX_DETAIL: usize = 200;
+
 impl ProviderError {
+    /// What the failure said about itself, in as few words as it can.
+    ///
+    /// The class names the kind of failure; this names the occasion. It never
+    /// carries the request, the headers, or the body, so a credential cannot
+    /// reach the log through it.
+    #[must_use]
+    pub fn detail(&self) -> String {
+        let said = match self {
+            Self::Transport(cause) => cause.as_str(),
+            Self::Status(code) => return bounded(&format!("status {code}")),
+            Self::AfterFirstToken(reason) => reason.as_str(),
+            Self::Timeout => "no response within the deadline",
+        };
+        bounded(said)
+    }
+
     /// The closed set of classes the log records.
     #[must_use]
     pub fn class(&self) -> ErrorClass {
         match self {
-            Self::Transport => ErrorClass::Transport,
+            Self::Transport(_) => ErrorClass::Transport,
             Self::Timeout => ErrorClass::Timeout,
             Self::Status(429) => ErrorClass::RateLimited,
             Self::Status(413) => ErrorClass::ContextLength,
@@ -184,9 +210,19 @@ impl ProviderError {
         }
         matches!(
             self,
-            Self::Transport | Self::Timeout | Self::Status(429 | 500..=599)
+            Self::Transport(_) | Self::Timeout | Self::Status(429 | 500..=599)
         )
     }
+}
+
+/// Cuts a cause to [`MAX_DETAIL`], marking where it was cut.
+fn bounded(said: &str) -> String {
+    if said.chars().count() <= MAX_DETAIL {
+        return String::from(said);
+    }
+    let mut cut: String = said.chars().take(MAX_DETAIL).collect();
+    cut.push('…');
+    cut
 }
 
 /// The wait before the next attempt, or nothing when the attempts are spent.

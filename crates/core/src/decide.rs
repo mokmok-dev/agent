@@ -396,6 +396,7 @@ mod tests {
             self.push(EventKind::ModelFailed {
                 attempt: 1,
                 class: crate::event::ErrorClass::Transport,
+                detail: None,
                 retryable,
                 turn,
             })

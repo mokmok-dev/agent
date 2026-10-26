@@ -244,7 +244,16 @@ fn a_stream_that_dies_before_any_token_is_a_transport_failure() {
     let served = serve(stream(&[]));
     let (result, text, _) = call(&served);
     assert_eq!(text, "");
-    assert_eq!(result, Err(ProviderError::Transport));
+    match result {
+        Err(error @ ProviderError::Transport(_)) => {
+            assert_eq!(error.class(), agent_core::event::ErrorClass::Transport);
+            assert!(
+                !error.detail().is_empty(),
+                "the socket said something about why"
+            );
+        },
+        other => panic!("unexpected {other:?}"),
+    }
 }
 
 #[test]
