@@ -1,5 +1,6 @@
-//! Branch ids. A fork's id is derived from what the fork is doing, not drawn
-//! from entropy, so a replay of the same inputs names the same branch.
+//! Branch ids. A fork's id is derived from the process, a counter, the anchor,
+//! and the accepted instant, so one process cannot draw the same id twice and a
+//! test can pin the derivation.
 
 use std::format;
 

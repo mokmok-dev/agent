@@ -293,8 +293,9 @@ impl Reactor {
     ///
     /// # Errors
     ///
-    /// Returns [`ReactorError::Store`] when the append fails, and
-    /// [`ReactorError::Fold`] when the history cannot be read to place it.
+    /// Returns [`ReactorError::Store`] when the append fails,
+    /// [`ReactorError::Fold`] when the history cannot be read to place it, and
+    /// [`ReactorError::NoSuchBranch`] when the command names no branch.
     pub fn command(
         &mut self,
         branch: BranchId,
@@ -303,6 +304,9 @@ impl Reactor {
         now: Timestamp,
     ) -> Result<EventId, ReactorError> {
         let state = self.state()?;
+        state
+            .branch(branch)
+            .ok_or(ReactorError::NoSuchBranch(branch))?;
         self.append(
             branch,
             &state,
@@ -413,11 +417,28 @@ impl Reactor {
     ///
     /// Returns [`ReactorError::Store`] when a branch cannot be read and
     /// [`ReactorError::Fold`] with [`FoldError::UnknownBranch`] when a branch
-    /// has no rows or its first row is not its `branch.created`.
+    /// has no rows, its first row is not its `branch.created`, or its parent
+    /// pointers form a cycle.
     fn path(
         &self,
         branch: BranchId,
     ) -> Result<Vec<Event>, ReactorError> {
+        let mut seen = std::collections::BTreeSet::new();
+        self.path_from(branch, &mut seen)
+    }
+
+    /// The walk behind [`Self::path`], stopping if a parent pointer repeats.
+    fn path_from(
+        &self,
+        branch: BranchId,
+        seen: &mut std::collections::BTreeSet<BranchId>,
+    ) -> Result<Vec<Event>, ReactorError> {
+        if !seen.insert(branch) {
+            // The store's verification rejects a cycle, but the daemon does not
+            // verify at startup, and a corrupt parent pointer must fail the
+            // command rather than exhaust the stack.
+            return Err(ReactorError::Fold(FoldError::UnknownBranch(branch)));
+        }
         let events = self.store.load(branch)?;
         let Some(first) = events.first() else {
             return Err(ReactorError::Fold(FoldError::UnknownBranch(branch)));
@@ -431,10 +452,8 @@ impl Reactor {
         let Some(parent) = parent_of else {
             return Ok(events);
         };
-        // Each step moves to a branch that starts at or below this one's fork
-        // event, so the recursion strictly decreases depth and terminates.
         let cut = first.depth.saturating_sub(1);
-        let mut path = self.path(*parent)?;
+        let mut path = self.path_from(*parent, seen)?;
         path.retain(|event| event.depth <= cut);
         path.extend(events);
         Ok(path)

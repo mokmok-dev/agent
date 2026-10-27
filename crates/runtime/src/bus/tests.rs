@@ -367,6 +367,10 @@ fn a_reactor_error_becomes_the_class_the_client_reads() {
             "corrupt",
         ),
         (
+            ReactorError::Store(StoreError::BranchExists(branch(1))),
+            "failed",
+        ),
+        (
             ReactorError::Store(StoreError::Query(rusqlite::Error::InvalidQuery)),
             "storage",
         ),

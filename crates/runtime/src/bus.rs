@@ -269,12 +269,13 @@ pub fn refusal(error: &ReactorError) -> Refusal {
     match error {
         ReactorError::NoSuchBranch(_) | ReactorError::Fork(_) => Refusal::Usage(error.to_string()),
         ReactorError::ForkStranded { .. } => Refusal::Policy(error.to_string()),
+        ReactorError::Store(agent_store::StoreError::BranchExists(_))
+        | ReactorError::NoModel
+        | ReactorError::Time(_)
+        | ReactorError::NoSuchCall(_) => Refusal::Failed(error.to_string()),
         ReactorError::Store(store) if store.is_corrupt() => Refusal::Corrupt(error.to_string()),
         ReactorError::Store(_) => Refusal::Storage(error.to_string()),
         ReactorError::Fold(_) => Refusal::Corrupt(error.to_string()),
-        ReactorError::NoModel | ReactorError::Time(_) | ReactorError::NoSuchCall(_) => {
-            Refusal::Failed(error.to_string())
-        },
     }
 }
 

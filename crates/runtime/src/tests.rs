@@ -1484,6 +1484,34 @@ fn a_fork_of_a_branch_that_is_not_there_is_refused() {
 }
 
 #[test]
+fn a_command_on_a_branch_that_is_not_there_is_refused_and_the_reactor_survives() {
+    let scratch = Scratch::new();
+    let mut reactor = started(&scratch);
+    let missing = BranchId::from_bytes([9; 8]);
+    let error = reactor
+        .command(missing, "send", "hello", now())
+        .expect_err("no such branch");
+    match error {
+        ReactorError::NoSuchBranch(branch) => assert_eq!(branch, missing),
+        other => panic!("unexpected {other:?}"),
+    }
+    let command = crate::bus::Command::Send {
+        branch: missing,
+        text: "hello".to_string(),
+    };
+    let refusal = crate::route::route(&mut reactor, &command, now()).expect_err("usage");
+    match refusal {
+        crate::bus::Refusal::Usage(message) => assert!(message.contains("no branch")),
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(
+        total_events(&scratch),
+        2,
+        "the genesis and the start, and a refusal appends nothing"
+    );
+}
+
+#[test]
 fn a_fork_that_names_no_event_turn_or_genesis_is_refused() {
     let scratch = Scratch::new();
     let (mut reactor, _, turn) = seeded_turn(&scratch);
@@ -1651,6 +1679,44 @@ fn a_branch_whose_first_row_is_not_its_creation_is_a_fold_error() {
     let error = reactor.path(orphan).expect_err("no branch.created");
     match error {
         ReactorError::Fold(FoldError::UnknownBranch(branch)) => assert_eq!(branch, orphan),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn a_parent_cycle_is_a_fold_error_instead_of_a_stack_overflow() {
+    let scratch = Scratch::new();
+    drop(started(&scratch));
+    let mut store = Store::open(&scratch.path).expect("opens");
+    let tip = store
+        .load(ROOT_BRANCH)
+        .expect("loads")
+        .last()
+        .expect("a tip")
+        .clone();
+    let cyclic = BranchId::from_bytes([9; 8]);
+    let event = Event {
+        branch: cyclic,
+        depth: tip.depth + 1,
+        prev: Some(tip.id()),
+        time: now(),
+        actor: Actor::Process("test".to_string()),
+        causation: None,
+        correlation: None,
+        model: None,
+        kind: EventKind::BranchCreated {
+            parent: Some(cyclic),
+            fork: Some(tip.id()),
+            label: None,
+        },
+    };
+    store.append(&event).expect("appends");
+    drop(store);
+
+    let reactor = Reactor::open(&scratch.path).expect("opens");
+    let error = reactor.path(cyclic).expect_err("a cycle");
+    match error {
+        ReactorError::Fold(FoldError::UnknownBranch(branch)) => assert_eq!(branch, cyclic),
         other => panic!("unexpected {other:?}"),
     }
 }
