@@ -1,5 +1,9 @@
 # Directory Update Log
 
+## 2026-10-27
+* **Update**: Recorded the delivered PRs in the PR plan, and the work each partial unit still owes. The page had not changed since unit 3 landed.
+* **Update**: Added the units that remain, each one saying which planned unit it continues, and corrected the plan's count from twelve to fourteen.
+
 ## 2026-10-26
 * **Update**: Recorded which parser reads the command line, `clap` for `agentctl` and the existing hand-written parser for `agentd`, with the measurements behind dropping `usage-rs`.
 * **Update**: Landed the `agentctl` crate that decision 25 describes. `clap` declares the command surface, the parse hands on an `Intent`, and the exit table and the error object stay hand-written. `version` and `verify` answer; the commands that need the daemon wait on its command socket.
