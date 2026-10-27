@@ -17,6 +17,9 @@ serde.workspace = true
 serde_json.workspace = true
 toml = { version = "0.9", features = ["parse", "serde"] }
 
+[dev-dependencies]
+rusqlite.workspace = true
+
 [lints]
 workspace = true
 

@@ -38,6 +38,7 @@ dependencies = [
  "agent-store",
  "landlock",
  "libc",
+ "rusqlite",
  "rustix",
  "seccompiler",
  "serde",

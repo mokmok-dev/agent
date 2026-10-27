@@ -10,9 +10,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use agent_model::{HttpProvider, Profile};
+use agent_runtime::bus::Refusal;
 use agent_runtime::cli::{ArgError, Args, USAGE, parse};
 use agent_runtime::config;
-use agent_runtime::{Reactor, Step, clock};
+use agent_runtime::{Reactor, Step, clock, route};
 
 /// How long to wait before looking for work again when there was none.
 const IDLE_WAIT: Duration = Duration::from_millis(250);
@@ -61,12 +62,23 @@ fn drive(
         let now = clock::now().map_err(|error| error.to_string())?;
         // The socket is read before the step: a command that arrived while the
         // loop was sleeping belongs in the turn this iteration is about to make.
-        // A refused line has already been answered on the socket; there is nothing
-        // to write for it here.
-        for command in bus.poll().into_iter().flatten() {
-            reactor
-                .command(agent_runtime::ROOT_BRANCH, &command, now)
-                .map_err(|error| error.to_string())?;
+        // Each client is answered after the command has been written, and a
+        // storage failure exits after that answer so the client is not left
+        // holding a connection the daemon will never close.
+        for pending in bus.poll() {
+            let reply = match pending.command() {
+                Ok(command) => route::route(&mut reactor, command, now),
+                Err(refusal) => Err(refusal.clone()),
+            };
+            let fatal = reply
+                .as_ref()
+                .err()
+                .filter(|refusal| matches!(refusal, Refusal::Storage(_) | Refusal::Corrupt(_)))
+                .cloned();
+            pending.answer(&reply);
+            if let Some(refusal) = fatal {
+                return Err(refusal.message());
+            }
         }
         match reactor.step(now).map_err(|error| error.to_string())? {
             Step::Append(_) | Step::Execute { .. } | Step::RequestModel { .. } => {},
