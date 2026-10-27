@@ -174,7 +174,10 @@ fn a_genesis_that_skips_the_root_depth_is_refused() {
         },
         other => panic!("unexpected {other:?}"),
     }
-    assert!(store.load(branch(1)).expect("loads").is_empty());
+    assert!(
+        store.load(branch(1)).expect("loads").is_empty(),
+        "a refused first event leaves no row behind"
+    );
 }
 
 #[test]

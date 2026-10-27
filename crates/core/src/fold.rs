@@ -1737,11 +1737,15 @@ mod tests {
     #[test]
     fn an_unknown_branch_has_an_empty_transcript() {
         let (_chain, state) = with_branch();
-        assert!(state.transcript(BranchId::from_bytes(OTHER)).is_empty());
+        assert!(
+            state.transcript(BranchId::from_bytes(OTHER)).is_empty(),
+            "a branch the fold never saw inherits nothing"
+        );
         assert!(
             State::default()
                 .transcript(BranchId::from_bytes(OTHER))
-                .is_empty()
+                .is_empty(),
+            "an empty fold has nothing to inherit"
         );
     }
 
