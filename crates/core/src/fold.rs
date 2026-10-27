@@ -517,8 +517,10 @@ impl State {
                 uncached,
                 ..
             } => {
-                branch.cache.cached += cached;
-                branch.cache.uncached += uncached;
+                // Saturating, like the failure count: a pure fold must not panic
+                // on a number a log can carry.
+                branch.cache.cached = branch.cache.cached.saturating_add(*cached);
+                branch.cache.uncached = branch.cache.uncached.saturating_add(*uncached);
                 if *reported {
                     branch.cache.reported += 1;
                 } else {
@@ -1058,6 +1060,28 @@ mod tests {
         assert_eq!(cache.uncached, 7);
         assert_eq!(cache.reported, 1);
         assert_eq!(cache.unreported, 1);
+    }
+
+    #[test]
+    fn cache_totals_stop_at_the_largest_count() {
+        let (mut chain, mut state) = with_branch();
+        for (cached, uncached) in [(u64::MAX, u64::MAX), (1, 1)] {
+            let observed = chain.push(EventKind::ModelCacheObserved {
+                cached,
+                prefix: PrefixHash::from_bytes([0; 32]),
+                reported: true,
+                turn: turn(),
+                uncached,
+            });
+            state.apply(&observed).expect("folds");
+        }
+        let cache = state
+            .branch(BranchId::from_bytes(BRANCH))
+            .expect("exists")
+            .cache;
+        assert_eq!(cache.cached, u64::MAX);
+        assert_eq!(cache.uncached, u64::MAX);
+        assert_eq!(cache.reported, 2);
     }
 
     #[test]
