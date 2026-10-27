@@ -28,7 +28,7 @@ The parent branch receives no event. That is deliberate. A fork that wrote to it
 
 The branch tree is therefore a global projection. Every `branch.created` event in the store contributes an edge, so the tree is rebuilt from a scan, and a single branch's reader sees only its own path.
 
-A branch's transcript is its path, not its own events. The messages a child inherited stay on the branches that wrote them: the fold gives every message the depth of the event that projected it, and a reader takes the ancestors' messages up to the child's `branch.created` depth, then the child's own. Nothing is copied into the child, so a fork's cost does not grow with the history behind it.
+A branch's transcript is its path, not its own events. The messages a child inherited stay on the branches that wrote them: the fold gives every message the depth of the event that projected it, and a reader takes the ancestors' messages up to the depth just before the child's `branch.created`, then the child's own. Nothing is copied into the child, so a fork's cost does not grow with the history behind it.
 
 # Branch ids
 
@@ -50,10 +50,12 @@ The branch id is stable, short, and independent of the label. A rename appends `
 
 With none of the three, the fork is at the tip, which produces a branch with no events of its own. A retry that re-runs a turn names `--turn`, which points at the event before that turn's request.
 
+The selectors read the branch's whole path, ancestors included, so a point on an ancestor makes that ancestor's branch the parent of the new one. The transcript and the chain then agree on where the branch starts.
+
 Three guards apply.
 
 1. If the fork point is inside a turn, the new branch inherits messages only up to the last completed one. A partially streamed assistant message is not part of the prompt.
-2. If the fork point has an intent event with no matching result, the effect may or may not have happened. The command warns and requires `--force`. The warning names the intent so the operator can check the effect.
+2. If the fork point has an intent event with no matching result, the effect may or may not have happened. The command refuses with exit 65 unless `--force` is given. The refusal names the call and the tool so the operator can check the effect.
 3. If the fork point sits inside a prompt segment, the fork still works, but the cache advantage shrinks. See [prompt cache](prompt-cache.md) for why, and `--boundary` to move the point back to the last segment boundary at or before it.
 
 # Why branches never merge

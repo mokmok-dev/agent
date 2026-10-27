@@ -78,7 +78,7 @@ The reversal is recorded in [decisions](decisions.md).
 
 Reading a branch's own events is one indexed query over branch and depth up to a limit. No recursion, no DAG walk.
 
-A forked branch's prompt also reads the prefix it inherited: one range scan per ancestor, each cut at the fork anchor. The number of scans is the depth of the branch tree, not the length of history, and the events themselves stay in one branch each.
+A forked branch's prompt is not a second scan. The runtime folds every branch into one state and the reader takes each ancestor's messages up to the cut; the events stay in the branch that wrote them, and the walk is over the in-memory tree, one parent hop per generation.
 
 # Startup and recovery
 

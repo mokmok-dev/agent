@@ -475,7 +475,7 @@ Cost accepted. The store's rule is now "a branch's first event anchors to a stor
 
 # 40. A fork is answered after its event is committed
 
-Decision 32 says the socket carries a line and the daemon writes the event, so the client never writes. The reply meant "the line was read", and the CLI printed that. A fork cannot answer that way: its result is the new branch id, which the append creates, and a fork that leaves a tool intent unresolved must reach the operator as refused by policy with exit 65 rather than as taken. So the daemon reads the line, performs the append or the refusal, and only then answers. Commands that need only "taken" still get it after their own append, so their meaning does not change.
+Decision 32 says the socket carries a line and the daemon writes the event, so the client never writes. The reply meant "the line was read", and the CLI printed that. A fork cannot answer that way: its result is the new branch id, which the append creates, and a fork that leaves a tool intent unresolved must reach the operator as refused by policy with exit 65 rather than as taken. So the daemon reads the line, performs the append or the refusal, and only then answers. Commands that need only "taken" now get it after their own append instead of when the line was read; what the answer means does not change.
 
 The alternative was a client-chosen branch id and a preflight: the CLI would derive the id, fold the log to find the policy problem, and print the id before asking. The log would then hold an id the daemon may refuse, and the policy check would run against a state the append did not commit.
 

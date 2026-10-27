@@ -16,7 +16,7 @@ verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 
 **Log.** The total order of rows in the events table, in insert order. A row's physical position is its row id.
 
-**Branch.** A named path through the event DAG. The store holds many branches. A branch is identified by a stable string such as `main` or `b-01JA3`.
+**Branch.** A named path through the event DAG. The store holds many branches. A branch is identified by a stable string such as `b-7f3a2c4d5e6f7a8b`; the genesis is `b-0000000000000000`.
 
 **Fork.** The act of creating a branch whose first event's predecessor is an event on another branch. A fork copies no events.
 
