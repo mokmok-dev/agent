@@ -8,7 +8,9 @@
 use std::path::Path;
 use std::time::Duration;
 
-use super::{Outcome, run};
+use std::os::unix::fs::PermissionsExt as _;
+
+use super::{Outcome, run, search};
 use crate::Tool;
 
 fn tool(
@@ -24,6 +26,7 @@ fn tool(
         name: "test".to_string(),
         schema: "{}".to_string(),
         timeout: Duration::from_millis(timeout_ms),
+        env: Vec::new(),
     }
 }
 
@@ -38,6 +41,39 @@ fn a_tool_reads_the_arguments_it_was_given_on_stdin() {
             assert_eq!(ran.output, r#"{"cmd":"date"}"#);
             assert_eq!(ran.status, 0);
             assert!(!ran.truncated);
+        },
+        Outcome::Failed(class, happened) => panic!("unexpected {class:?} {happened}"),
+    }
+}
+
+#[test]
+fn a_tool_that_declares_no_environment_sees_none() {
+    match run(&tool(&["env"], 4096, 5000), "", Path::new(".")) {
+        Outcome::Ran(ran) => assert!(
+            ran.output.is_empty(),
+            "the tool saw variables it never declared: {}",
+            ran.output
+        ),
+        Outcome::Failed(class, happened) => panic!("unexpected {class:?} {happened}"),
+    }
+}
+
+#[test]
+fn a_tool_sees_only_the_variables_its_manifest_declares() {
+    let mut declared = tool(&["env"], 4096, 5000);
+    declared.env = vec!["PATH".to_string()];
+    let withheld = ["HOME", "PWD", "USER"]
+        .into_iter()
+        .find(|name| std::env::var_os(name).is_some())
+        .expect("a variable of the test process to withhold");
+    match run(&declared, "", Path::new(".")) {
+        Outcome::Ran(ran) => {
+            assert!(ran.output.contains("PATH="), "{}", ran.output);
+            assert!(
+                !ran.output.contains(&format!("{withheld}=")),
+                "{withheld} leaked to the tool: {}",
+                ran.output
+            );
         },
         Outcome::Failed(class, happened) => panic!("unexpected {class:?} {happened}"),
     }
@@ -103,4 +139,61 @@ fn a_process_that_dies_by_a_signal_has_no_exit_code() {
         Outcome::Ran(ran) => assert_eq!(ran.status, -1),
         Outcome::Failed(class, happened) => panic!("unexpected {class:?} {happened}"),
     }
+}
+
+/// A directory that is removed when the test ends.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("agent-exec-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates the scratch directory");
+        Self(dir)
+    }
+
+    fn file(
+        &self,
+        relative: &str,
+        mode: u32,
+    ) -> std::path::PathBuf {
+        let path = self.0.join(relative);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("creates a directory");
+        std::fs::write(&path, "").expect("writes a file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+            .expect("sets permissions");
+        path
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn a_directory_or_a_file_that_cannot_run_is_not_the_program() {
+    let scratch = Scratch::new("shadowed");
+    // A PATH is searched in order, and the first entry with the program's name
+    // wins. A directory of that name and a file the daemon cannot execute both
+    // appear earlier than the one that runs, which is the case a loader has to
+    // get right and the case that decides whether the tool starts at all.
+    let unexecutable = scratch.file("file/tool", 0o644);
+    let directory = scratch.0.join("directory/tool");
+    std::fs::create_dir_all(&directory).expect("creates a directory");
+    let runnable = scratch.file("real/tool", 0o755);
+    let path = format!(
+        "{}:{}:{}",
+        unexecutable.parent().expect("a parent").display(),
+        directory.parent().expect("a parent").display(),
+        runnable.parent().expect("a parent").display()
+    );
+
+    assert_eq!(
+        search("tool", std::ffi::OsStr::new(&path)),
+        Some(runnable),
+        "the third entry is the only one that could run"
+    );
+    assert_eq!(search("tool", std::ffi::OsStr::new("")), None);
 }

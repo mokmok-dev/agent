@@ -34,6 +34,7 @@ let
         schema
         ;
       max_output_bytes = tool.maxOutputBytes;
+      permissions.env = tool.env;
       timeout_ms = tool.timeoutMs;
     }) cfg.tools;
   }
@@ -179,6 +180,15 @@ in
                 Whether running it twice is the same as running it once. A tool that
                 is not idempotent is never re-run after a crash; the log records
                 that the effect may have happened instead.
+              '';
+            };
+            env = mkOption {
+              type = types.listOf types.str;
+              description = ''
+                The environment variable names the tool's process may see. It sees
+                no others, so a tool that needs PATH or HOME has to say so. There is
+                no default: an empty list is a real answer and means the process runs
+                with an empty environment, but it is still the operator's answer.
               '';
             };
             maxOutputBytes = mkOption {

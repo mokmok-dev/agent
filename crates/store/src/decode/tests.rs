@@ -125,6 +125,7 @@ fn kinds() -> Vec<EventKind> {
             call,
             key: "sha256:abc".to_string(),
             tool: "shell".to_string(),
+            env: Vec::new(),
         },
         EventKind::ToolResult {
             output: String::new(),
@@ -344,6 +345,7 @@ fn a_call_id_that_is_not_a_pair_is_refused() {
         },
         key: "k".to_string(),
         tool: "shell".to_string(),
+        env: Vec::new(),
     }))
     .replace(r#""call":"0404040404040404:0""#, r#""call":"nocolon""#);
     assert!(matches!(decode(&body), Err(DecodeError::Payload(_))));
@@ -359,9 +361,34 @@ fn a_call_step_that_is_not_a_number_is_refused() {
         },
         key: "k".to_string(),
         tool: "shell".to_string(),
+        env: Vec::new(),
     }))
     .replace(r#":0""#, r#":x""#);
     assert!(matches!(decode(&body), Err(DecodeError::Payload(_))));
+}
+
+#[test]
+fn an_intent_written_before_the_environment_was_recorded_still_decodes() {
+    let body = agent_core::canonical::canonical(&event(EventKind::ToolIntent {
+        args: "{}".to_string(),
+        call: CallId {
+            turn: turn(),
+            step: 0,
+        },
+        env: Vec::new(),
+        key: "k".to_string(),
+        tool: "shell".to_string(),
+    }));
+    assert!(
+        !body.contains("\"env\""),
+        "the writer emitted a key an older log does not have: {body}"
+    );
+    match decode(&body).expect("decodes").kind {
+        EventKind::ToolIntent { env, .. } => {
+            assert!(env.is_empty(), "an older intent names no environment");
+        },
+        other => panic!("unexpected {other:?}"),
+    }
 }
 
 #[test]

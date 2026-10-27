@@ -85,6 +85,22 @@ pub struct Tool {
     pub timeout: std::time::Duration,
     /// The most bytes of its output one event may carry.
     pub max_output: usize,
+    /// The environment variable names its process may see; nothing else is
+    /// passed to it.
+    pub env: Vec<String>,
+}
+
+/// The environment names a tool's manifest declares.
+///
+/// An intent is decided from the log, and the log holds no manifests, so the
+/// names are attached where the caller appends it and the settings are in hand.
+fn env_declared_for(
+    settings: Option<&Settings>,
+    tool: &str,
+) -> Vec<String> {
+    settings
+        .and_then(|settings| settings.tools.iter().find(|declared| declared.name == tool))
+        .map_or_else(Vec::new, |declared| declared.env.clone())
 }
 
 /// What the reactor needs in order to run a turn.
@@ -331,14 +347,19 @@ impl Reactor {
         let step = decide(&state, now);
         match &step {
             Step::Append(intent) => {
+                let mut kind = intent.kind.clone();
                 // Filing an intent is what makes this process the one that asked,
                 // and the next process the one that finds it left behind.
-                if let EventKind::ToolIntent { call, .. } = &intent.kind {
+                if let EventKind::ToolIntent {
+                    call, tool, env, ..
+                } = &mut kind
+                {
                     self.started.insert(*call);
+                    *env = env_declared_for(self.settings.as_ref(), tool);
                 }
                 if let EventKind::ApprovalDecided {
                     allow: true, call, ..
-                } = &intent.kind
+                } = &kind
                 {
                     self.answered.insert(*call);
                 }
@@ -349,7 +370,7 @@ impl Reactor {
                     None,
                     intent.causation,
                     intent.correlation,
-                    intent.kind.clone(),
+                    kind,
                 )?;
             },
             Step::RequestModel { branch, turn } => {

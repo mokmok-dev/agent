@@ -49,6 +49,10 @@ pub enum ConfigError {
     DuplicateTool(String),
     /// A tool declared a class that is neither of the two this build knows.
     ToolClass(String),
+    /// A tool declared a name that is not an environment variable name.
+    BadEnvName(String),
+    /// A tool declared a variable and the process has no such variable.
+    EnvMissing(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -80,6 +84,12 @@ impl std::fmt::Display for ConfigError {
                 formatter,
                 "a tool class is idempotent or non-idempotent, not {class}"
             ),
+            Self::BadEnvName(name) => {
+                write!(formatter, "{name} is not an environment variable name")
+            },
+            Self::EnvMissing(name) => {
+                write!(formatter, "{name} is declared by a tool but is not set")
+            },
         }
     }
 }
@@ -118,6 +128,16 @@ struct RawTool {
     timeout_ms: Option<u64>,
     #[serde(default)]
     max_output_bytes: Option<usize>,
+    #[serde(default)]
+    permissions: Option<RawPermissions>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPermissions {
+    /// Absent is not the same as empty: an empty list means the tool sees no
+    /// environment at all, and a missing list means the operator said nothing.
+    #[serde(default)]
+    env: Option<Vec<String>>,
 }
 
 /// A configuration that has been checked.
@@ -216,6 +236,22 @@ pub fn parse(
         if max_output == 0 {
             return Err(ConfigError::Zero("tools[].max_output_bytes"));
         }
+        let Some(permissions) = tool.permissions else {
+            return Err(ConfigError::Missing("tools[].permissions.env"));
+        };
+        let Some(declared) = permissions.env else {
+            return Err(ConfigError::Missing("tools[].permissions.env"));
+        };
+        let mut names = BTreeSet::new();
+        for name in declared {
+            if name.is_empty() || name.contains(['=', '\0']) {
+                return Err(ConfigError::BadEnvName(name));
+            }
+            if env(&name).is_none() {
+                return Err(ConfigError::EnvMissing(name));
+            }
+            names.insert(name);
+        }
         tools.push(Tool {
             argv: tool.argv,
             idempotent,
@@ -224,6 +260,7 @@ pub fn parse(
             risk,
             schema: tool.schema,
             timeout: Duration::from_millis(timeout_ms),
+            env: names.into_iter().collect(),
         });
     }
 
@@ -299,6 +336,9 @@ argv = ["/bin/cat"]
 name = "shell"
 risk = "read"
 schema = '{"argv":"string"}'
+
+[tools.permissions]
+env = []
 "#;
 
     fn no_env(_: &str) -> Option<String> {
@@ -474,7 +514,7 @@ schema = '{"argv":"string"}'
     #[test]
     fn a_risk_is_read_into_the_tool() {
         let text = format!(
-            "{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"other\"\nrisk = \"destructive\"\nschema = '{{}}'\n"
+            "{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"other\"\nrisk = \"destructive\"\nschema = '{{}}'\n[tools.permissions]\nenv = []\n"
         );
         let config = parse(&text, &no_env).expect("parses");
         let other = config
@@ -547,6 +587,64 @@ schema = '{"argv":"string"}'
     }
 
     #[test]
+    fn a_tool_that_does_not_say_what_it_may_see_is_refused() {
+        let text = MINIMAL.replace("[tools.permissions]\nenv = []\n", "");
+        assert_eq!(
+            parse(&text, &no_env),
+            Err(ConfigError::Missing("tools[].permissions.env"))
+        );
+
+        let text = MINIMAL.replace("env = []\n", "");
+        assert_eq!(
+            parse(&text, &no_env),
+            Err(ConfigError::Missing("tools[].permissions.env"))
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_not_an_environment_variable_name_is_refused() {
+        let text = MINIMAL.replace("env = []", "env = [\"A=B\"]");
+        assert_eq!(
+            parse(&text, &no_env),
+            Err(ConfigError::BadEnvName("A=B".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_declared_variable_the_process_does_not_have_is_refused_by_name() {
+        let text = MINIMAL.replace("env = []", "env = [\"SET\", \"UNSET\"]");
+        let env = |name: &str| match name {
+            "SET" => Some("s3cr3t".to_string()),
+            _ => None,
+        };
+        match parse(&text, &env) {
+            Err(ConfigError::EnvMissing(name)) => {
+                assert_eq!(name, "UNSET");
+                let message = ConfigError::EnvMissing(name).to_string();
+                assert!(message.contains("UNSET"), "{message}");
+                assert!(
+                    !message.contains("s3cr3t"),
+                    "the message carried a value: {message}"
+                );
+            },
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_tools_that_declare_the_same_names_in_any_order_are_the_same() {
+        let text = MINIMAL.replace("env = []", "env = [\"B\", \"A\"]")
+            + "\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"other\"\nrisk = \"read\"\nschema = '{}'\n[tools.permissions]\nenv = [\"A\", \"B\", \"A\"]\n";
+        let env = |name: &str| match name {
+            "A" | "B" => Some("x".to_string()),
+            _ => None,
+        };
+        let config = parse(&text, &env).expect("parses");
+        assert_eq!(config.settings.tools[0].env, vec!["A", "B"]);
+        assert_eq!(config.settings.tools[0].env, config.settings.tools[1].env);
+    }
+
+    #[test]
     fn a_file_that_is_not_toml_is_refused() {
         assert!(matches!(
             parse("this is not toml ][", &no_env),
@@ -563,6 +661,8 @@ schema = '{"argv":"string"}'
             ConfigError::KeyEmpty,
             ConfigError::Zero("timeout_seconds"),
             ConfigError::DuplicateTool("shell".to_string()),
+            ConfigError::BadEnvName("A=B".to_string()),
+            ConfigError::EnvMissing("HOME".to_string()),
         ] {
             assert_ne!(error.to_string(), "");
         }

@@ -147,6 +147,22 @@ impl<'a> Object<'a> {
         self.out.push(']');
     }
 
+    fn strings(
+        &mut self,
+        key: &str,
+        values: &[String],
+    ) {
+        self.key(key);
+        self.out.push('[');
+        for (index, value) in values.iter().enumerate() {
+            if index > 0 {
+                self.out.push(',');
+            }
+            write_string(value, self.out);
+        }
+        self.out.push(']');
+    }
+
     fn finish(&mut self) {
         self.out.push('}');
     }
@@ -304,11 +320,15 @@ fn write_data(
         EventKind::ToolIntent {
             args,
             call,
+            env,
             key,
             tool,
         } => {
             object.string("args", args);
             object.string("call", &alloc::format!("{call}"));
+            if !env.is_empty() {
+                object.strings("env", env);
+            }
             object.string("key", key);
             object.string("tool", tool);
         },
@@ -658,6 +678,37 @@ mod tests {
         }));
         assert!(encoded.contains(r#""data":{"fork":"0808080808080808080808080808080808080808080808080808080808080808","label":"retry","parent":"b-0707070707070707"}"#), "{encoded}");
     }
+
+    #[test]
+    fn a_tool_intent_names_its_environment_only_when_it_had_one() {
+        let call = CallId {
+            turn: turn(),
+            step: 0,
+        };
+        let bare = canonical(&event(EventKind::ToolIntent {
+            args: "{}".to_string(),
+            call,
+            env: alloc::vec::Vec::new(),
+            key: "k".to_string(),
+            tool: "shell".to_string(),
+        }));
+        assert!(!bare.contains("env"), "{bare}");
+
+        let named = canonical(&event(EventKind::ToolIntent {
+            args: "{}".to_string(),
+            call,
+            env: alloc::vec!["HOME".to_string(), "PATH".to_string()],
+            key: "k".to_string(),
+            tool: "shell".to_string(),
+        }));
+        assert!(
+            named.contains(
+                r#""data":{"args":"{}","call":"0202020202020202:0","env":["HOME","PATH"],"key":"k","tool":"shell"}"#
+            ),
+            "{named}"
+        );
+    }
+
     #[test]
     fn a_failure_without_a_detail_keeps_the_bytes_it_always_had() {
         // The field is optional so a log written before it existed still verifies:

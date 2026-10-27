@@ -265,6 +265,8 @@ pub enum EventKind {
     ToolIntent {
         args: String,
         call: CallId,
+        /// The environment variable names the call had; never their values.
+        env: Vec<String>,
         key: String,
         tool: String,
     },
@@ -524,6 +526,7 @@ pub(crate) mod tests {
                 call,
                 key: "k".to_string(),
                 tool: "shell".to_string(),
+                env: alloc::vec::Vec::new(),
             },
             EventKind::ToolResult {
                 output: String::new(),

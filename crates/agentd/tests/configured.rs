@@ -176,6 +176,9 @@ risk = "read"
 schema = '{{"argv":"string"}}'
 timeout_ms = 5000
 max_output_bytes = 4096
+
+[tools.permissions]
+env = []
 "#,
         state = dir.to_string_lossy(),
         base = base_url
@@ -494,10 +497,15 @@ fn a_tool_call_becomes_an_intent_with_a_key() {
         EventKind::ToolIntent {
             args,
             call,
+            env,
             key,
             tool,
         } => {
             assert_eq!(tool, "shell");
+            assert!(
+                env.is_empty(),
+                "the fixture declares no environment, so the intent names none"
+            );
             assert_eq!(args, r#"{"cmd":"date"}"#);
             assert_eq!(call.step, 0);
             assert_eq!(call.turn, events[3].correlation.expect("a turn"));

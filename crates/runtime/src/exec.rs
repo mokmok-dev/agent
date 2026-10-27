@@ -9,7 +9,8 @@
 //! bytes it wrote. Nothing in this build parses them.
 
 use std::io::{Read as _, Write as _};
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -48,15 +49,26 @@ pub fn run(
     let Some((program, rest)) = tool.argv.split_first() else {
         return Outcome::Failed(ErrorClass::Unknown, false);
     };
+    let Some(program) = resolve(program) else {
+        return Outcome::Failed(ErrorClass::Unknown, false);
+    };
     let started = Instant::now();
-    let Ok(mut child) = Command::new(program)
+    let mut command = Command::new(&program);
+    command
         .args(rest)
         .current_dir(working)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
+        .stderr(Stdio::null());
+    // Inheriting the daemon's environment would let any tool print a credential
+    // into a log that is append-only and copied by fork.
+    command.env_clear();
+    for name in &tool.env {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    let Ok(mut child) = command.spawn() else {
         return Outcome::Failed(ErrorClass::Unknown, false);
     };
 
@@ -96,6 +108,35 @@ pub fn run(
         status: status.code().unwrap_or(-1),
         truncated,
     })
+}
+
+/// The program the manifest's `argv` names.
+///
+/// The child is given only the names its manifest declares, and a program named
+/// without a path is found through `PATH`, so the lookup has to happen here,
+/// against the daemon's environment, or a tool that declares no environment
+/// could not start at all. Which program runs is the manifest's statement about
+/// `argv`; what it sees is its statement about `permissions`, and one must not
+/// decide the other.
+fn resolve(program: &str) -> Option<PathBuf> {
+    if program.contains('/') {
+        return Some(PathBuf::from(program));
+    }
+    search(program, &std::env::var_os("PATH")?)
+}
+
+fn search(
+    program: &str,
+    path: &std::ffi::OsStr,
+) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .map(|directory| directory.join(program))
+        .find(|candidate| is_executable(candidate))
+}
+
+fn is_executable(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .is_ok_and(|meta| meta.is_file() && (meta.permissions().mode() & 0o111) != 0)
 }
 
 /// Waits for the process, or gives up.

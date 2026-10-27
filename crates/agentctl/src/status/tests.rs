@@ -80,6 +80,7 @@ fn with_a_question(path: &std::path::Path) {
             },
             key: "k".to_string(),
             tool: "shell".to_string(),
+            env: Vec::new(),
         },
         Some(turn()),
     );

@@ -253,6 +253,9 @@ struct ApprovalDecided {
 struct ToolIntent {
     args: String,
     call: String,
+    /// Absent from events written before an intent recorded its environment.
+    #[serde(default)]
+    env: Vec<String>,
     key: String,
     tool: String,
 }
@@ -432,6 +435,7 @@ fn decode_kind(
             EventKind::ToolIntent {
                 args: payload.args,
                 call: parse_call(&payload.call)?,
+                env: payload.env,
                 key: payload.key,
                 tool: payload.tool,
             }

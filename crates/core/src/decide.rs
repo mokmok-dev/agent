@@ -162,6 +162,7 @@ fn next_intent(state: &State) -> Option<Step> {
                     call,
                     key: key_of(&request.tool, &request.args, call),
                     tool: request.tool.clone(),
+                    env: alloc::vec::Vec::new(),
                 },
             }));
         }
@@ -536,6 +537,7 @@ mod tests {
                     call,
                     key: key_of(tool, "{}", call),
                     tool: tool.to_string(),
+                    env: alloc::vec::Vec::new(),
                 },
                 Some(turn),
             );
@@ -557,6 +559,7 @@ mod tests {
                     call: CallId { turn, step: 0 },
                     key: "k".to_string(),
                     tool: "shell".to_string(),
+                    env: alloc::vec::Vec::new(),
                 },
                 Some(turn),
             );
@@ -605,6 +608,7 @@ mod tests {
                     call: CallId { turn, step: 0 },
                     key: "k".to_string(),
                     tool: "shell".to_string(),
+                    env: alloc::vec::Vec::new(),
                 },
                 Some(turn),
             );
@@ -650,6 +654,7 @@ mod tests {
                     call: CallId { turn, step: 0 },
                     key: "k".to_string(),
                     tool: "shell".to_string(),
+                    env: alloc::vec::Vec::new(),
                 },
                 Some(turn),
             );

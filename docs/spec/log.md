@@ -40,3 +40,4 @@
 * **Update**: A yes written by the current process is the first yes a call waiting on a question ever had, so answering after a restart runs it instead of claiming the effect may have happened.
 * **Update**: The daemon locks the store it writes, so a second agentd on the same state directory exits instead of doubling every turn.
 * **Update**: A failure records what it said about itself, bounded and without the request, so `transport` is no longer the end of the diagnosis.
+* **Update**: A tool's process sees the variable names its manifest declares and nothing else, and the intent records the names it was given.
