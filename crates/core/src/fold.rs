@@ -384,9 +384,6 @@ impl State {
                 found: event.depth,
             });
         }
-        branch.depth = event.depth;
-        branch.tip = Some(event.id());
-
         match &event.kind {
             EventKind::BranchLabeled { label } => branch.label = Some(label.clone()),
             EventKind::BranchArchived { .. } => branch.archived = true,
@@ -580,9 +577,10 @@ impl State {
                 branch.pending_command = None;
             },
             EventKind::ToolIntent { call, tool, .. } => {
-                if branch.pending.insert(*call, tool.clone()).is_some() {
+                if branch.pending.contains_key(call) {
                     return Err(FoldError::RepeatedCall(*call));
                 }
+                branch.pending.insert(*call, tool.clone());
                 if let Some(asked) = branch.asked.get_mut(&call.turn) {
                     asked.filed = asked.filed.max(call.step + 1);
                 }
@@ -616,6 +614,9 @@ impl State {
             | EventKind::InstanceClockSkew { .. }
             | EventKind::Unknown { .. } => {},
         }
+        // Moving this above the match would let a rejected event advance the tip.
+        branch.depth = event.depth;
+        branch.tip = Some(event.id());
         Ok(())
     }
 }
@@ -871,6 +872,26 @@ mod tests {
             turn: turn(),
         });
         assert_eq!(state.apply(&second), Err(FoldError::DuplicateTurn(turn())));
+    }
+
+    #[test]
+    fn a_rejected_event_leaves_the_state_it_started_with() {
+        let (mut chain, mut state) = with_branch();
+        let first = chain.push(EventKind::TurnRequested {
+            input: "hello".to_string(),
+            turn: turn(),
+        });
+        state.apply(&first).expect("folds");
+        let before = state.clone();
+        let duplicate = chain.push(EventKind::TurnRequested {
+            input: "again".to_string(),
+            turn: turn(),
+        });
+        assert_eq!(
+            state.apply(&duplicate),
+            Err(FoldError::DuplicateTurn(turn()))
+        );
+        assert_eq!(state, before);
     }
 
     #[test]
