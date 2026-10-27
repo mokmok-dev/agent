@@ -5,7 +5,7 @@ use agent_core::ids::{Actor, BranchId, EventId};
 use agent_core::time::Timestamp;
 use rusqlite::Connection;
 
-use super::{Store, StoreError};
+use super::{DecodeError, Store, StoreError};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -125,20 +125,99 @@ fn a_wrong_predecessor_is_refused() {
 }
 
 #[test]
-fn a_first_event_with_a_predecessor_is_refused() {
+fn a_genesis_on_an_empty_store_appends() {
     let scratch = Scratch::new();
     let mut store = Store::open(&scratch.path).expect("opens");
-    let orphan = event(branch(1), 0, Some(EventId::from_bytes([9; 32])), "a");
-    let error = store.append(&orphan).expect_err("refuses");
+    let genesis = event(branch(1), 0, None, "main");
+    store.append(&genesis).expect("appends");
+    assert_eq!(store.load(branch(1)).expect("loads"), vec![genesis]);
+}
+
+#[test]
+fn a_genesis_that_skips_the_root_depth_is_refused() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    let error = store
+        .append(&event(branch(1), 2, None, "main"))
+        .expect_err("refuses");
     match error {
-        StoreError::PrevMismatch {
+        StoreError::DepthGap {
             expected, found, ..
         } => {
-            assert_eq!(expected, None);
-            assert_eq!(found, Some(EventId::from_bytes([9; 32])));
+            assert_eq!(expected, 0);
+            assert_eq!(found, 2);
         },
         other => panic!("unexpected {other:?}"),
     }
+    assert!(store.load(branch(1)).expect("loads").is_empty());
+}
+
+#[test]
+fn a_second_genesis_is_refused() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    chain(&mut store, branch(1), 1);
+    let error = store
+        .append(&event(branch(2), 0, None, "second"))
+        .expect_err("refuses");
+    match error {
+        StoreError::SecondGenesis(at) => assert_eq!(at, branch(2)),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn a_first_event_with_an_unknown_predecessor_is_refused() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    chain(&mut store, branch(1), 1);
+    let missing = EventId::from_bytes([9; 32]);
+    let error = store
+        .append(&event(branch(2), 1, Some(missing), "orphan"))
+        .expect_err("refuses");
+    match error {
+        StoreError::UnknownPredecessor { branch: at, prev } => {
+            assert_eq!(at, branch(2));
+            assert_eq!(prev, missing);
+        },
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn a_first_event_with_a_wrong_depth_is_refused() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    chain(&mut store, branch(1), 3);
+    let anchor = store.bodies(branch(1)).expect("reads")[2].0;
+    let error = store
+        .append(&event(branch(2), 1, Some(anchor), "side"))
+        .expect_err("refuses");
+    match error {
+        StoreError::DepthGap {
+            expected, found, ..
+        } => {
+            assert_eq!(expected, 3);
+            assert_eq!(found, 1);
+        },
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn a_first_event_of_a_branch_anchors_to_a_stored_event() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    chain(&mut store, branch(1), 3);
+    let anchor = store.bodies(branch(1)).expect("reads")[1].0;
+    let first = event(branch(2), 2, Some(anchor), "side");
+    let first_id = store.append(&first).expect("appends");
+    let second = event(branch(2), 3, Some(first_id), "side");
+    store.append(&second).expect("appends");
+    assert_eq!(store.load(branch(2)).expect("loads"), vec![first, second]);
+    let report = store.verify().expect("verifies");
+    assert_eq!(report.events, 5);
+    assert_eq!(report.branches, 2);
 }
 
 #[test]
@@ -166,7 +245,21 @@ fn two_branches_do_not_share_a_tip() {
     let scratch = Scratch::new();
     let mut store = Store::open(&scratch.path).expect("opens");
     chain(&mut store, branch(1), 2);
-    chain(&mut store, branch(2), 1);
+    let parent_tip = store.bodies(branch(1)).expect("reads")[1].0;
+    let parent_root = store.bodies(branch(1)).expect("reads")[0].0;
+    let side = event(branch(2), 1, Some(parent_root), "side");
+    let side_id = store.append(&side).expect("appends");
+    let wrong = event(branch(1), 2, Some(side_id), "main");
+    let error = store.append(&wrong).expect_err("refuses");
+    match error {
+        StoreError::PrevMismatch {
+            expected, found, ..
+        } => {
+            assert_eq!(expected, Some(parent_tip));
+            assert_eq!(found, Some(side_id));
+        },
+        other => panic!("unexpected {other:?}"),
+    }
     assert_eq!(store.bodies(branch(1)).expect("reads").len(), 2);
     assert_eq!(store.bodies(branch(2)).expect("reads").len(), 1);
     let report = store.verify().expect("verifies");
@@ -263,6 +356,113 @@ fn verification_catches_a_depth_that_skips() {
 }
 
 #[test]
+fn verification_catches_a_missing_fork_anchor() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    chain(&mut store, branch(1), 2);
+    let anchor = store.bodies(branch(1)).expect("reads")[1].0;
+    let fork = event(branch(2), 2, Some(anchor), "side");
+    store.append(&fork).expect("appends");
+    let connection = Connection::open(&scratch.path).expect("opens raw");
+    connection
+        .execute_batch("DROP TRIGGER events_no_update;")
+        .expect("drops the guard");
+    connection
+        .execute(
+            "UPDATE events SET prev = ?1 WHERE id = ?2",
+            rusqlite::params![
+                EventId::from_bytes([7; 32]).to_string(),
+                fork.id().to_string()
+            ],
+        )
+        .expect("rewrites");
+    let error = store.verify().expect_err("detects");
+    match error {
+        StoreError::Chain { detail, .. } => assert_eq!(detail, "the fork anchor"),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn verification_catches_a_wrong_fork_depth() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    chain(&mut store, branch(1), 2);
+    let anchor = store.bodies(branch(1)).expect("reads")[1].0;
+    let fork = event(branch(2), 2, Some(anchor), "side");
+    store.append(&fork).expect("appends");
+    let connection = Connection::open(&scratch.path).expect("opens raw");
+    connection
+        .execute_batch("DROP TRIGGER events_no_update;")
+        .expect("drops the guard");
+    connection
+        .execute(
+            "UPDATE events SET depth = 5 WHERE id = ?1",
+            rusqlite::params![fork.id().to_string()],
+        )
+        .expect("renumbers");
+    let error = store.verify().expect_err("detects");
+    match error {
+        StoreError::Chain { detail, .. } => assert_eq!(detail, "the fork depth"),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn verification_catches_a_genesis_at_a_non_zero_depth() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    let genesis = store
+        .append(&event(branch(1), 0, None, "main"))
+        .expect("appends");
+    let connection = Connection::open(&scratch.path).expect("opens raw");
+    connection
+        .execute_batch("DROP TRIGGER events_no_update;")
+        .expect("drops the guard");
+    connection
+        .execute(
+            "UPDATE events SET depth = 3 WHERE id = ?1",
+            rusqlite::params![genesis.to_string()],
+        )
+        .expect("renumbers");
+    let error = store.verify().expect_err("detects");
+    match error {
+        StoreError::Chain { detail, .. } => assert_eq!(detail, "the genesis depth"),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn verification_catches_a_second_genesis() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    chain(&mut store, branch(1), 1);
+    let second = event(branch(2), 0, None, "second");
+    let connection = Connection::open(&scratch.path).expect("opens raw");
+    connection
+        .execute(
+            "INSERT INTO events (id, branch, depth, prev, type, time, actor, body)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                second.id().to_string(),
+                second.branch.to_string(),
+                second.depth,
+                None::<String>,
+                second.type_name(),
+                second.time.rfc3339(),
+                second.actor.to_string(),
+                agent_core::canonical::canonical(&second),
+            ],
+        )
+        .expect("inserts");
+    let error = store.verify().expect_err("detects");
+    match error {
+        StoreError::Chain { detail, .. } => assert_eq!(detail, "the genesis"),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
 fn the_bodies_are_the_canonical_bytes() {
     let scratch = Scratch::new();
     let mut store = Store::open(&scratch.path).expect("opens");
@@ -319,6 +519,11 @@ fn a_corrupt_identifier_is_reported() {
 #[test]
 fn every_error_explains_itself() {
     let errors = [
+        StoreError::Open {
+            path: std::path::PathBuf::from("agent.db"),
+            source: rusqlite::Error::QueryReturnedNoRows,
+        },
+        StoreError::Query(rusqlite::Error::QueryReturnedNoRows),
         StoreError::Identifier("x".to_string()),
         StoreError::PrevMismatch {
             branch: branch(1),
@@ -330,10 +535,16 @@ fn every_error_explains_itself() {
             expected: 1,
             found: 2,
         },
+        StoreError::SecondGenesis(branch(1)),
+        StoreError::UnknownPredecessor {
+            branch: branch(1),
+            prev: EventId::from_bytes([9; 32]),
+        },
         StoreError::Chain {
             id: EventId::from_bytes([0; 32]),
             detail: "the chain",
         },
+        StoreError::Decode(DecodeError::NotAnObject),
     ];
     for error in errors {
         assert_ne!(error.to_string(), "");
@@ -341,13 +552,55 @@ fn every_error_explains_itself() {
 }
 
 #[test]
+fn is_corrupt_separates_a_broken_store_from_a_store_that_could_not_be_read() {
+    let corrupt = [
+        StoreError::Identifier("x".to_string()),
+        StoreError::PrevMismatch {
+            branch: branch(1),
+            expected: None,
+            found: None,
+        },
+        StoreError::DepthGap {
+            branch: branch(1),
+            expected: 1,
+            found: 2,
+        },
+        StoreError::SecondGenesis(branch(1)),
+        StoreError::UnknownPredecessor {
+            branch: branch(1),
+            prev: EventId::from_bytes([9; 32]),
+        },
+        StoreError::Chain {
+            id: EventId::from_bytes([0; 32]),
+            detail: "the chain",
+        },
+        StoreError::Decode(DecodeError::NotAnObject),
+    ];
+    for error in corrupt {
+        assert!(error.is_corrupt(), "{error}");
+    }
+    let readable = [
+        StoreError::Open {
+            path: std::path::PathBuf::from("agent.db"),
+            source: rusqlite::Error::QueryReturnedNoRows,
+        },
+        StoreError::Query(rusqlite::Error::QueryReturnedNoRows),
+    ];
+    for error in readable {
+        assert!(!error.is_corrupt(), "{error}");
+    }
+}
+
+#[test]
 fn branches_are_listed_in_id_order() {
     let scratch = Scratch::new();
     let mut store = Store::open(&scratch.path).expect("opens");
-    for seed in [2_u8, 1] {
-        let first = event(branch(seed), 0, None, "main");
-        store.append(&first).expect("appends");
-    }
+    let root = store
+        .append(&event(branch(2), 0, None, "main"))
+        .expect("appends");
+    store
+        .append(&event(branch(1), 1, Some(root), "side"))
+        .expect("appends");
     assert_eq!(
         store.branches().expect("lists"),
         vec![branch(1), branch(2)],

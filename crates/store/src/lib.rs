@@ -73,10 +73,32 @@ pub enum StoreError {
         expected: u64,
         found: u64,
     },
+    /// The store already has a genesis, so a second root is refused.
+    SecondGenesis(BranchId),
+    /// A branch's first event names an anchor that is not a stored event.
+    UnknownPredecessor { branch: BranchId, prev: EventId },
     /// A stored event no longer matches its own identifier.
     Chain { id: EventId, detail: &'static str },
     /// A stored body could not be decoded into an event.
     Decode(DecodeError),
+}
+
+impl StoreError {
+    /// Whether the failure is the data disagreeing with what the writer
+    /// promised, as opposed to a store that could not be read.
+    #[must_use]
+    pub const fn is_corrupt(&self) -> bool {
+        matches!(
+            self,
+            Self::Identifier(_)
+                | Self::PrevMismatch { .. }
+                | Self::DepthGap { .. }
+                | Self::SecondGenesis(_)
+                | Self::UnknownPredecessor { .. }
+                | Self::Chain { .. }
+                | Self::Decode(_)
+        )
+    }
 }
 
 impl fmt::Display for StoreError {
@@ -106,6 +128,18 @@ impl fmt::Display for StoreError {
                 formatter,
                 "branch {branch}: expected depth {expected}, got {found}"
             ),
+            Self::SecondGenesis(branch) => {
+                write!(
+                    formatter,
+                    "branch {branch}: the store already has a genesis"
+                )
+            },
+            Self::UnknownPredecessor { branch, prev } => {
+                write!(
+                    formatter,
+                    "branch {branch}: predecessor {prev} is not stored"
+                )
+            },
             Self::Chain { id, detail } => write!(formatter, "event {id} failed {detail}"),
             Self::Decode(error) => write!(formatter, "cannot decode a stored event: {error}"),
         }
@@ -189,7 +223,10 @@ impl Store {
     ///
     /// Returns [`StoreError::PrevMismatch`] when the predecessor is not the
     /// branch's tip, [`StoreError::DepthGap`] when the depth is not one past it,
-    /// and [`StoreError::Query`] when the insert itself fails.
+    /// [`StoreError::SecondGenesis`] when a second root is appended,
+    /// [`StoreError::UnknownPredecessor`] when a branch's first event names an
+    /// anchor that is not stored, and [`StoreError::Query`] when the insert
+    /// itself fails.
     pub fn append(
         &mut self,
         event: &Event,
@@ -286,9 +323,17 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::Chain`] when a body no longer hashes to its id, or
-    /// when a branch's predecessor or depth does not follow its own row.
+    /// Returns [`StoreError::Chain`] when a body no longer hashes to its id,
+    /// when a branch's predecessor or depth does not follow its own row, when
+    /// the store does not have exactly one genesis at depth zero, or when a
+    /// branch's fork anchor does not resolve one depth past its event.
     pub fn verify(&self) -> Result<VerifyReport, StoreError> {
+        let (report, anchors) = self.scan()?;
+        verify_anchors(&self.connection, &anchors)?;
+        Ok(report)
+    }
+
+    fn scan(&self) -> Result<(VerifyReport, Vec<Anchor>), StoreError> {
         let mut statement = self
             .connection
             .prepare("SELECT id, branch, depth, prev, body FROM events ORDER BY branch, depth")?;
@@ -296,6 +341,7 @@ impl Store {
         let mut events = 0_u64;
         let mut branches = 0_usize;
         let mut current: Option<(BranchId, u64, String)> = None;
+        let mut anchors = Vec::new();
 
         while let Some(row) = rows.next()? {
             let id_text: String = row.get(0)?;
@@ -334,37 +380,109 @@ impl Store {
                         });
                     }
                 },
-                _ => branches += 1,
+                _ => {
+                    branches += 1;
+                    let prev = prev_text
+                        .as_deref()
+                        .map(|text| {
+                            EventId::from_str(text)
+                                .map_err(|_| StoreError::Identifier(text.to_string()))
+                        })
+                        .transpose()?;
+                    anchors.push(Anchor { id, depth, prev });
+                },
             }
 
             current = Some((branch, depth, id_text));
             events += 1;
         }
 
-        Ok(VerifyReport { events, branches })
+        Ok((VerifyReport { events, branches }, anchors))
     }
+}
+
+/// The first row of one branch: the genesis, or the fork anchor it hangs from.
+struct Anchor {
+    id: EventId,
+    depth: u64,
+    prev: Option<EventId>,
+}
+
+fn verify_anchors(
+    connection: &Connection,
+    anchors: &[Anchor],
+) -> Result<(), StoreError> {
+    let mut genesis: Option<&Anchor> = None;
+    for anchor in anchors {
+        if anchor.prev.is_some() {
+            continue;
+        }
+        if genesis.is_some() {
+            return Err(StoreError::Chain {
+                id: anchor.id,
+                detail: "the genesis",
+            });
+        }
+        genesis = Some(anchor);
+    }
+    if let Some(anchor) = genesis
+        && anchor.depth != 0
+    {
+        return Err(StoreError::Chain {
+            id: anchor.id,
+            detail: "the genesis depth",
+        });
+    }
+
+    // A non-empty store with no genesis cannot pass the checks below: every
+    // anchor must sit one depth past its target, so anchors cannot form a
+    // cycle and some branch must end at a prev-less row.
+    let mut statement = connection.prepare("SELECT depth FROM events WHERE id = ?1")?;
+    for anchor in anchors {
+        let Some(prev) = anchor.prev else {
+            continue;
+        };
+        let mut rows = statement.query(params![prev.to_string()])?;
+        let Some(row) = rows.next()? else {
+            return Err(StoreError::Chain {
+                id: anchor.id,
+                detail: "the fork anchor",
+            });
+        };
+        let depth: u64 = row.get(0)?;
+        if Some(anchor.depth) != depth.checked_add(1) {
+            return Err(StoreError::Chain {
+                id: anchor.id,
+                detail: "the fork depth",
+            });
+        }
+    }
+    Ok(())
 }
 
 fn check_position(
     transaction: &Transaction<'_>,
     event: &Event,
 ) -> Result<(), StoreError> {
-    let mut statement = transaction
-        .prepare("SELECT depth, id FROM events WHERE branch = ?1 ORDER BY depth DESC LIMIT 1")?;
-    let mut rows = statement.query(params![event.branch.to_string()])?;
-
-    let Some(row) = rows.next()? else {
-        return event.prev.map_or(Ok(()), |found| {
-            Err(StoreError::PrevMismatch {
-                branch: event.branch,
-                expected: None,
-                found: Some(found),
-            })
-        });
+    let tip = {
+        let mut statement = transaction.prepare(
+            "SELECT depth, id FROM events WHERE branch = ?1 ORDER BY depth DESC LIMIT 1",
+        )?;
+        let mut rows = statement.query(params![event.branch.to_string()])?;
+        match rows.next()? {
+            Some(row) => {
+                let depth: u64 = row.get(0)?;
+                let id_text: String = row.get(1)?;
+                Some((depth, id_text))
+            },
+            None => None,
+        }
     };
 
-    let depth: u64 = row.get(0)?;
-    let id_text: String = row.get(1)?;
+    let Some((depth, id_text)) = tip else {
+        return check_anchor(transaction, event);
+    };
+
     let tip = EventId::from_str(&id_text).map_err(|_| StoreError::Identifier(id_text))?;
     if event.prev != Some(tip) {
         return Err(StoreError::PrevMismatch {
@@ -373,7 +491,49 @@ fn check_position(
             found: event.prev,
         });
     }
-    let expected = depth + 1;
+    let expected = depth.saturating_add(1);
+    if event.depth != expected {
+        return Err(StoreError::DepthGap {
+            branch: event.branch,
+            expected,
+            found: event.depth,
+        });
+    }
+    Ok(())
+}
+
+/// A branch with no rows yet either establishes the one genesis or forks from
+/// an event that is already stored.
+fn check_anchor(
+    transaction: &Transaction<'_>,
+    event: &Event,
+) -> Result<(), StoreError> {
+    let Some(prev) = event.prev else {
+        let mut statement = transaction.prepare("SELECT EXISTS (SELECT 1 FROM events)")?;
+        let stored: bool = statement.query_row([], |row| row.get(0))?;
+        if stored {
+            return Err(StoreError::SecondGenesis(event.branch));
+        }
+        if event.depth != 0 {
+            return Err(StoreError::DepthGap {
+                branch: event.branch,
+                expected: 0,
+                found: event.depth,
+            });
+        }
+        return Ok(());
+    };
+
+    let mut statement = transaction.prepare("SELECT depth FROM events WHERE id = ?1")?;
+    let mut rows = statement.query(params![prev.to_string()])?;
+    let Some(row) = rows.next()? else {
+        return Err(StoreError::UnknownPredecessor {
+            branch: event.branch,
+            prev,
+        });
+    };
+    let depth: u64 = row.get(0)?;
+    let expected = depth.saturating_add(1);
     if event.depth != expected {
         return Err(StoreError::DepthGap {
             branch: event.branch,
