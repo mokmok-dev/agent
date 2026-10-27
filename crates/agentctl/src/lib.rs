@@ -11,5 +11,5 @@ pub mod exit;
 pub mod report;
 pub mod status;
 
-pub use cli::{ForkPoint, Intent, Invocation, Parsed, Supervisor, parse};
+pub use cli::{Intent, Invocation, Parsed, Supervisor, parse};
 pub use exit::{Class, Exit, Failure};

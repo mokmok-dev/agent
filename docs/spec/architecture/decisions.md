@@ -64,6 +64,9 @@ Each entry names a decision that is expensive to reverse, the alternative that l
 | 36 | A failure records what it said, not what was asked | A class alone, or the provider's body |
 | 37 | A tool's environment is what its manifest declares | Inheritance from the daemon's environment |
 | 38 | The bounds are syscalls the tool's own process makes | A launcher from outside the package, or a systemd scope |
+| 39 | A fork is a chain edge, not a second genesis | A prev-less root whose payload names the parent |
+| 40 | A fork is answered after its event is committed | A client-chosen branch id, answered when the line is read |
+| 41 | The inherited transcript is read from the DAG | Copying it into the fork event or into the child's fold |
 
 # 1. The log is the only truth
 
@@ -461,3 +464,27 @@ Then it was bubblewrap with `prlimit`, which worked here and did not work on the
 The cost is a second binary to ship, and the fact that the bounds are attached to the process rather than to a container around it. Landlock needs the kernel to have it (5.13 for the first ABI, 6.2 for truncation, which is the one this build asks for), and a kernel without it is refused at startup rather than silently unbounded. The network bound is all or nothing: a filter can refuse an address family, not a list of hosts. And the two limits bound address space and one file's size, not the memory a process actually touches.
 
 The alternative to all of this was to keep `permissions` a document. That is what it was, and a reader of the configuration believed a boundary existed.
+
+# 39. A fork is a chain edge, not a second genesis
+
+[branching.md](branching.md), [event-store.md](event-store.md), and the glossary describe a fork the same way: the child's `branch.created` has the fork event as its `prev`, a depth one past it, and a payload that names the parent branch and the fork event. Decision 15's title says "a new root with a parent pointer", which is the view from inside the new branch: its first row, and nothing copied. The two descriptions agree once "root" means the branch's first row rather than a history with no predecessor.
+
+The alternative was a second genesis: `prev` null, depth zero, and the parent link carried only in the payload. It keeps the store's oldest rule intact and makes every branch's depth start at zero. It also makes depth branch-local, so ordering two events on different branches needs the payload, and a reader cannot tell from the chain whether the parent pointer is real. Verification would have to trust the payload to reconstruct a tree the events already describe.
+
+Cost accepted. The store's rule is now "a branch's first event anchors to a stored event" instead of "a branch's first event has no predecessor", so the append path and verification each carry one extra lookup, and the log can express a branch that hangs from any event, not only the tip of the branch the operator named.
+
+# 40. A fork is answered after its event is committed
+
+Decision 32 says the socket carries a line and the daemon writes the event, so the client never writes. The reply meant "the line was read", and the CLI printed that. A fork cannot answer that way: its result is the new branch id, which the append creates, and a fork that leaves a tool intent unresolved must reach the operator as refused by policy with exit 65 rather than as taken. So the daemon reads the line, performs the append or the refusal, and only then answers. Commands that need only "taken" now get it after their own append instead of when the line was read; what the answer means does not change.
+
+The alternative was a client-chosen branch id and a preflight: the CLI would derive the id, fold the log to find the policy problem, and print the id before asking. The log would then hold an id the daemon may refuse, and the policy check would run against a state the append did not commit.
+
+Cost accepted. A client waits for the append, bounded by the socket's write timeout. If the daemon dies between commit and reply, the branch exists and the client saw an error; retrying creates a second branch with a different id, which is visible and harmless but is a duplicate the operator has to know about.
+
+# 41. The inherited transcript is read from the DAG
+
+A branch's prompt is the path from the genesis to its tip: its ancestors' messages before its `branch.created` depth, then its own. The fold records the depth of the event that projected each message and the depth of each branch's creation, and a reader walks the parent edges. The log stores each message once.
+
+The alternative was to copy the prefix where it is needed: into the fork event's payload, or into the child's folded branch. The payload route makes a fork cost grow with the history behind it, and an event payload is bounded at 128 KiB by the event model, so it fails on exactly the long conversations a fork is most useful for. The fold route keeps the prompt cheap to read but pays the copy on every step for every branch, and makes folding one branch depend on folding its parent first.
+
+Cost accepted. Every reader that wants a transcript asks for it by name, and the walk costs one parent hop per generation. Two depth fields exist that no surface renders, because without them the path cannot be split into inherited and own messages.

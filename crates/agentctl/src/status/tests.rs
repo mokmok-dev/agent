@@ -204,6 +204,85 @@ fn a_model_failure_is_reported_too() {
 }
 
 #[test]
+fn a_forked_branch_counts_the_messages_it_inherited() {
+    let path = scratch();
+    let child = BranchId::from_bytes([2; 8]);
+    let mut store = Store::open(&path).expect("opens");
+    let created = Event {
+        branch: branch(),
+        depth: 0,
+        prev: None,
+        time: at(0),
+        actor: Actor::Process("test".to_string()),
+        causation: None,
+        correlation: None,
+        model: None,
+        kind: EventKind::BranchCreated {
+            fork: None,
+            label: None,
+            parent: None,
+        },
+    };
+    let created_id = created.id();
+    store.append(&created).expect("appends");
+    let asked = Event {
+        branch: branch(),
+        depth: 1,
+        prev: Some(created_id),
+        time: at(1),
+        actor: Actor::Process("test".to_string()),
+        causation: None,
+        correlation: Some(turn()),
+        model: None,
+        kind: EventKind::TurnRequested {
+            input: "hello".to_string(),
+            turn: turn(),
+        },
+    };
+    let asked_id = asked.id();
+    store.append(&asked).expect("appends");
+    store
+        .append(&Event {
+            branch: child,
+            depth: 2,
+            prev: Some(asked_id),
+            time: at(2),
+            actor: Actor::Process("test".to_string()),
+            causation: None,
+            correlation: None,
+            model: None,
+            kind: EventKind::BranchCreated {
+                fork: Some(asked_id),
+                label: None,
+                parent: Some(branch()),
+            },
+        })
+        .expect("appends");
+    drop(store);
+
+    let status = read(&path).expect("reads");
+    let child_row = status
+        .branches
+        .iter()
+        .find(|row| row.id == child)
+        .expect("the child has a row");
+    assert_eq!(child_row.depth, 2);
+    assert_eq!(
+        child_row.messages, 1,
+        "the child reads its parent's transcript"
+    );
+    let parent_row = status
+        .branches
+        .iter()
+        .find(|row| row.id == branch())
+        .expect("the parent has a row");
+    assert_eq!(
+        parent_row.messages, 1,
+        "a root still counts only its own messages"
+    );
+}
+
+#[test]
 fn a_model_failure_shows_what_the_failure_said() {
     let events = vec![Event {
         branch: branch(),

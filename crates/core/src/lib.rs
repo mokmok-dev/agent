@@ -15,6 +15,7 @@ pub mod canonical;
 pub mod decide;
 pub mod event;
 pub mod fold;
+pub mod fork;
 pub mod hash;
 pub mod ids;
 pub mod taxonomy;

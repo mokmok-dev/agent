@@ -56,16 +56,20 @@ pub fn read(path: &Path) -> Result<Status, StoreError> {
     let store = Store::open_read_only(path)?;
     let verified = store.verify()?;
     let branches = store.branches()?;
-    let mut out = Vec::with_capacity(branches.len());
+    let mut state = State::default();
+    let mut loaded = Vec::with_capacity(branches.len());
     for id in branches {
         let events = store.load(id)?;
-        let mut state = State::default();
         for event in &events {
             // A fold that contradicts itself is a corrupt store, and `verify` has
             // already refused that case, so an event this build cannot fold is the
             // only thing left: it is skipped rather than failing the status.
             let _ = state.apply(event);
         }
+        loaded.push((id, events));
+    }
+    let mut out = Vec::with_capacity(loaded.len());
+    for (id, events) in loaded {
         let Some(facts) = state.branch(id) else {
             continue;
         };
@@ -73,7 +77,7 @@ pub fn read(path: &Path) -> Result<Status, StoreError> {
             id,
             depth: facts.depth,
             tip: events.last().map(|event| event.time),
-            messages: facts.messages.len(),
+            messages: state.transcript(id).len(),
             archived: facts.archived,
             waiting: facts.approval.as_ref().map(|approval| Waiting {
                 call: approval.call,

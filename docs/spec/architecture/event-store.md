@@ -76,16 +76,16 @@ The reversal is recorded in [decisions](decisions.md).
 
 # Fork reads are a range scan
 
-Reading a branch is one indexed query over branch and depth up to a limit. No recursion, no DAG walk.
+Reading a branch's own events is one indexed query over branch and depth up to a limit. No recursion, no DAG walk.
 
-The DAG walk is needed only for the branch tree, which is a query over `branch.created` events across all branches. That is why the fork stays cheap: the fork appends one row, and both reads stay cheap because of the two indexes.
+A forked branch's prompt is not a second scan. The runtime folds every branch into one state and the reader takes each ancestor's messages up to the cut; the events stay in the branch that wrote them, and the walk is over the in-memory tree, one parent hop per generation.
 
 # Startup and recovery
 
 1. Open the database read-write and take the lock. A second writer exits with code 75 instead of waiting.
 2. Read the store schema version from `meta`. Refuse a newer version. Migrate an older one forward, recording the migration both in `meta` and as an event.
 3. Run SQLite's quick integrity check.
-4. Verify the chain forward from the newest snapshot of every active branch: each id equals the hash of its row, each `prev` resolves, each depth is its predecessor's depth plus one, and each event sits on the branch its predecessor implies.
+4. Verify the chain forward from the newest snapshot of every active branch: each id equals the hash of its row, each `prev` resolves, each depth is its predecessor's depth plus one, and each event sits on the branch its predecessor implies. A branch's first row is checked the same way: its anchor resolves one depth past, and its payload names that anchor's branch and event.
 5. Load snapshots, discarding any whose state hash disagrees with its bytes.
 6. Fold forward from the newest usable snapshot.
 7. Append `instance.started` with the row count, the snapshot count, and the verification outcome.
@@ -159,6 +159,6 @@ Checked in tests and in `agentctl verify`.
 1. Every event's id equals the hash recomputed from its row.
 2. Every event except genesis has a `prev` that resolves to an existing row.
 3. Every event's depth equals its predecessor's depth plus one.
-4. An event's predecessor is on the same branch, or the event is the branch's first and its predecessor is on the parent branch.
+4. An event's predecessor is on the same branch, or the event is the branch's first and its predecessor is on the parent branch the payload names. Its payload names that predecessor as the fork event.
 5. Branch and depth are unique together.
 6. No event is updated or deleted after commit. A correction is a new event.

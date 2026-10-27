@@ -39,7 +39,7 @@ Nothing else is configurable on the command line. Anything else would be a setti
 | `agentctl branch show <id>` | no | One branch, with the last N turns |
 | `agentctl fork` | command | Create a branch at the chosen point |
 | `agentctl send --branch <id> <message>` | command | Request a turn |
-| `agentctl approve <id>` and `agentctl deny <id>` | command | Decide a pending approval |
+| `agentctl approve <id>` and `agentctl deny <id>` | command | Decide a pending approval; `--branch` names the branch when the call is on a fork |
 | `agentctl archive --branch <id>` | command | Stop scheduling a branch |
 | `agentctl warm --branch <id>` | command | Refresh the provider cache for a prefix |
 | `agentctl replay --branch <id> [--from <id>] [--to <id>]` | no | Print the folded state transitions as text |
@@ -53,7 +53,9 @@ Nothing else is configurable on the command line. Anything else would be a setti
 | `agentctl spec check` | no | Validate the OKF bundle under `docs/spec` |
 | `agentctl version` | no | Binary version, store format, git describe |
 
-A fork names its parent branch and one selector. `--at` takes an event id, `--rewind` takes a count back from the tip, and `--turn` takes a turn id. `--label` names the branch, and `--boundary` snaps the fork to the nearest prompt segment edge.
+A fork names its parent branch and at most one selector. `--at` takes an event id, `--rewind` takes a count back from the branch's path, and `--turn` takes a turn id; with none of them the fork is at the tip. The selectors read the branch's whole path, ancestors included, so a point on an ancestor makes that ancestor's branch the parent of the new one. `--label` names the branch, `--boundary` moves the fork back to the last prompt segment edge at or before the point, and `--force` accepts a fork point that leaves a tool intent without a result. A fork that would do the latter is refused with exit 65 unless `--force` is given, and the refusal names the call and the tool.
+
+A successful fork prints the new branch id and its depth, and in JSON mode prints `agentctl.fork/1` with `branch` and `depth`. It does not print a transcript: the daemon owns the fold, and the command prints what the append produced.
 
 # Exit codes
 

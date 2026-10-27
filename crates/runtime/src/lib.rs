@@ -9,9 +9,11 @@ pub mod cli;
 pub mod clock;
 pub mod config;
 pub mod confine;
+pub mod entropy;
 pub mod exec;
 pub mod lock;
 pub mod notify;
+pub mod route;
 
 extern crate alloc;
 
@@ -48,6 +50,7 @@ pub const DEFAULT_APPROVAL_GRACE: core::time::Duration = core::time::Duration::f
 pub const MAX_WAIT: core::time::Duration = core::time::Duration::from_secs(5);
 use agent_core::event::{ErrorClass, Event, EventKind, FinishReason, ToolRequest};
 use agent_core::fold::{FoldError, State};
+use agent_core::fork;
 use agent_core::ids::{Actor, BranchId, CallId, EventId, TurnId};
 use agent_core::time::{TimeError, Timestamp};
 use agent_model::{Provider, Purpose, Request, RequestRecord, backoff};
@@ -155,6 +158,17 @@ pub enum ReactorError {
     Store(StoreError),
     /// The history contradicts itself.
     Fold(FoldError),
+    /// A fork named a branch the store does not have.
+    NoSuchBranch(BranchId),
+    /// A fork selector names no event on the parent's lineage.
+    Fork(fork::ForkError),
+    /// A fork would leave a call's effect unknown, and the request did not force it.
+    ForkStranded {
+        /// The call whose intent has no result.
+        call: CallId,
+        /// The tool the call would run, for the operator to check.
+        tool: String,
+    },
     /// A turn is ready but this reactor has no model to send it to.
     NoModel,
     /// An instant could not be computed.
@@ -172,6 +186,14 @@ impl fmt::Display for ReactorError {
         match self {
             Self::Store(error) => write!(formatter, "store: {error}"),
             Self::Fold(error) => write!(formatter, "fold: {error}"),
+            Self::NoSuchBranch(branch) => write!(formatter, "no branch {branch}"),
+            Self::Fork(error) => write!(formatter, "fork: {error}"),
+            Self::ForkStranded { call, tool } => {
+                write!(
+                    formatter,
+                    "fork would leave {tool} call {call} without a result"
+                )
+            },
             Self::NoModel => write!(formatter, "a turn is ready but no model is configured"),
             Self::Time(error) => write!(formatter, "time: {error}"),
             Self::NoSuchCall(call) => write!(formatter, "no call {call} is waiting"),
@@ -199,6 +221,28 @@ impl From<FoldError> for ReactorError {
     }
 }
 
+impl From<fork::ForkError> for ReactorError {
+    fn from(error: fork::ForkError) -> Self {
+        Self::Fork(error)
+    }
+}
+
+/// What a fork appended, and where the new branch starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Forked {
+    /// The new branch.
+    pub branch: BranchId,
+    /// The `branch.created` event that opened it.
+    pub event: EventId,
+    /// The branch the fork point belongs to.
+    pub parent: BranchId,
+    /// The event the new branch anchored to.
+    pub fork: EventId,
+    /// The new branch's first depth, one past the fork event.
+    pub depth: u64,
+    pub label: Option<String>,
+}
+
 /// The process that decides and appends.
 pub struct Reactor {
     store: Store,
@@ -215,6 +259,9 @@ pub struct Reactor {
     /// this process was alive, and this process has not run the call yet, so the
     /// effect is still ahead of us even when the intent is older.
     answered: std::collections::BTreeSet<CallId>,
+    /// How many forks this process has opened. It is part of a new branch id, so
+    /// two forks of the same event differ even when they share an instant.
+    forks: u64,
 }
 
 impl Reactor {
@@ -234,6 +281,7 @@ impl Reactor {
                 .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
             started: std::collections::BTreeSet::new(),
             answered: std::collections::BTreeSet::new(),
+            forks: 0,
         })
     }
 
@@ -245,16 +293,20 @@ impl Reactor {
     ///
     /// # Errors
     ///
-    /// Returns [`ReactorError::Store`] when the append fails, and
-    /// [`ReactorError::Fold`] when the history cannot be read to place it.
+    /// Returns [`ReactorError::Store`] when the append fails,
+    /// [`ReactorError::Fold`] when the history cannot be read to place it, and
+    /// [`ReactorError::NoSuchBranch`] when the command names no branch.
     pub fn command(
         &mut self,
         branch: BranchId,
-        command: &bus::Command,
+        name: &str,
+        text: &str,
         now: Timestamp,
     ) -> Result<EventId, ReactorError> {
         let state = self.state()?;
-        let name = command.command.clone();
+        state
+            .branch(branch)
+            .ok_or(ReactorError::NoSuchBranch(branch))?;
         self.append(
             branch,
             &state,
@@ -263,10 +315,10 @@ impl Reactor {
             None,
             None,
             EventKind::CommandReceived {
-                command: name.clone(),
+                command: name.to_string(),
                 command_id: alloc::format!("{name}-{}", now.secs()),
                 surface: "bus".to_string(),
-                text: Some(command.text.clone()),
+                text: Some(text.to_string()),
             },
         )
     }
@@ -302,6 +354,109 @@ impl Reactor {
             }
         }
         Ok(state)
+    }
+
+    /// Opens a branch at the event the request selects.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReactorError::NoSuchBranch`] when the parent is not in the
+    /// history, [`ReactorError::Fork`] when the selector names no event on the
+    /// parent's path, [`ReactorError::ForkStranded`] when the point would leave
+    /// a call's effect unknown and the request is not forced, and
+    /// [`ReactorError::Store`] or [`ReactorError::Fold`] when the history cannot
+    /// be read or the append fails.
+    pub fn fork(
+        &mut self,
+        request: &bus::ForkRequest,
+        now: Timestamp,
+    ) -> Result<Forked, ReactorError> {
+        let state = self.state()?;
+        if state.branch(request.parent).is_none() {
+            return Err(ReactorError::NoSuchBranch(request.parent));
+        }
+        let path = self.path(request.parent)?;
+        let point = fork::resolve(&path, request.selector, request.boundary)?;
+        if let Some((call, tool)) = fork::unresolved(&path, point.depth)
+            && !request.force
+        {
+            return Err(ReactorError::ForkStranded { call, tool });
+        }
+        self.forks = self.forks.wrapping_add(1);
+        let branch = entropy::branch(std::process::id(), self.forks, point.event, now);
+        let event = Event {
+            branch,
+            depth: point.depth.saturating_add(1),
+            prev: Some(point.event),
+            time: now,
+            actor: Actor::Process(REACTOR_ACTOR.to_string()),
+            causation: None,
+            correlation: None,
+            model: None,
+            kind: EventKind::BranchCreated {
+                parent: Some(point.branch),
+                fork: Some(point.event),
+                label: request.label.clone(),
+            },
+        };
+        let event_id = event.id();
+        self.store.append(&event)?;
+        Ok(Forked {
+            branch,
+            event: event_id,
+            parent: point.branch,
+            fork: point.event,
+            depth: point.depth.saturating_add(1),
+            label: request.label.clone(),
+        })
+    }
+
+    /// The events from the genesis to this branch's tip, by depth.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReactorError::Store`] when a branch cannot be read and
+    /// [`ReactorError::Fold`] with [`FoldError::UnknownBranch`] when a branch
+    /// has no rows, its first row is not its `branch.created`, or its parent
+    /// pointers form a cycle.
+    fn path(
+        &self,
+        branch: BranchId,
+    ) -> Result<Vec<Event>, ReactorError> {
+        let mut seen = std::collections::BTreeSet::new();
+        self.path_from(branch, &mut seen)
+    }
+
+    /// The walk behind [`Self::path`], stopping if a parent pointer repeats.
+    fn path_from(
+        &self,
+        branch: BranchId,
+        seen: &mut std::collections::BTreeSet<BranchId>,
+    ) -> Result<Vec<Event>, ReactorError> {
+        if !seen.insert(branch) {
+            // The store's verification rejects a cycle, but the daemon does not
+            // verify at startup, and a corrupt parent pointer must fail the
+            // command rather than exhaust the stack.
+            return Err(ReactorError::Fold(FoldError::UnknownBranch(branch)));
+        }
+        let events = self.store.load(branch)?;
+        let Some(first) = events.first() else {
+            return Err(ReactorError::Fold(FoldError::UnknownBranch(branch)));
+        };
+        let EventKind::BranchCreated {
+            parent: parent_of, ..
+        } = &first.kind
+        else {
+            return Err(ReactorError::Fold(FoldError::UnknownBranch(branch)));
+        };
+        let Some(parent) = parent_of else {
+            return Ok(events);
+        };
+        let cut = first.depth.saturating_sub(1);
+        let mut path = self.path_from(*parent, seen)?;
+        path.retain(|event| event.depth <= cut);
+        path.extend(events);
+        Ok(path)
     }
 
     /// Creates the root branch and records the start, if this is a new store.
@@ -839,11 +994,11 @@ fn build_prompt(
     branch: BranchId,
     settings: &Settings,
 ) -> Result<agent_prompt::Prompt, ReactorError> {
-    let facts = state
+    state
         .branch(branch)
         .ok_or(ReactorError::Fold(FoldError::UnknownBranch(branch)))?;
-    let calls: Vec<Vec<CallRef>> = facts
-        .messages
+    let transcript = state.transcript(branch);
+    let calls: Vec<Vec<CallRef>> = transcript
         .iter()
         .map(|message| {
             message
@@ -857,13 +1012,11 @@ fn build_prompt(
                 .collect()
         })
         .collect();
-    let call_ids: Vec<Option<String>> = facts
-        .messages
+    let call_ids: Vec<Option<String>> = transcript
         .iter()
         .map(|message| message.call.map(|call| call.to_string()))
         .collect();
-    let messages: Vec<PromptMessage<'_>> = facts
-        .messages
+    let messages: Vec<PromptMessage<'_>> = transcript
         .iter()
         .enumerate()
         .map(|(at, message)| PromptMessage {

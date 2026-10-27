@@ -49,11 +49,11 @@ Three things did not go as the plan wrote them.
 
 # What remains
 
-Four things the definition of done names are not yet true. Nothing accepts a turn from the TUI or from a chat thread. Nothing forks a branch at an earlier turn. Nothing records a cache ledger with reported cached tokens. The first four rows close them, and the rest is work the plan's own units still owe.
+Four things the definition of done names are not yet true. Nothing accepts a turn from the TUI or from a chat thread. The fork command now forks at an earlier turn and `send` continues on the child, but the branch listing, replay, and audit commands that share its unit are still missing. Nothing records a cache ledger with reported cached tokens. The first four rows close them, and the rest is work the plan's own units still owe.
 
 | # | Unit | Continues | Why here |
 |---|---|---|---|
-| 13 | `feat(cli): fork, branch, replay, audit` | 7 | `agentctl fork` is declared and not implemented, and the done sentence about forking has no command behind it. |
+| 13 | `feat(cli): fork, branch, replay, audit` | 7 | `agentctl fork` is implemented; `branch list`, `branch show`, `replay`, and `audit` are declared and not implemented, and the unit's remaining commands belong together. |
 | 14 | `feat(prompt): the cache ledger records what the provider reported` | 5 | Nothing records cached tokens yet, and the done sentence asks for them. |
 | 15 | `feat(tui): terminal surface` | 8 | The done sentence names the TUI. |
 | 16 | `feat(chat): discord surface` | 10 | The done sentence names a chat thread. |

@@ -4,6 +4,9 @@
 //! so neither comes from `clap`. `clap` renders its own failures as text; this
 //! module turns them into the same object a runtime failure produces.
 
+use std::str::FromStr;
+
+use agent_core::ids::BranchId;
 use serde_json::{Value, json};
 
 /// What the process exits with.
@@ -42,6 +45,20 @@ impl Exit {
             Self::Config => 78,
         }
     }
+
+    /// The exit a failure of this kind produces.
+    #[must_use]
+    pub const fn of_class(class: Class) -> Self {
+        match class {
+            Class::Usage => Self::Usage,
+            Class::Runtime | Class::Unsupported => Self::Failed,
+            Class::Policy => Self::Policy,
+            Class::Storage => Self::Storage,
+            Class::Corrupt => Self::Corrupt,
+            Class::Locked => Self::Locked,
+            Class::Config => Self::Config,
+        }
+    }
 }
 
 /// What kind of failure this is, in a word a script can match on.
@@ -70,6 +87,26 @@ impl Class {
             Self::Locked => "locked",
             Self::Config => "config",
             Self::Unsupported => "unsupported",
+        }
+    }
+
+    /// The class a daemon's refusal names.
+    ///
+    /// The socket's vocabulary has three words for a runtime failure that the
+    /// error object does not: a bad line, a command it does not know, and one
+    /// that carried nothing. They all exit 64 and print as `runtime`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "usage" => Some(Self::Usage),
+            "runtime" | "failed" | "malformed" | "unknown" | "empty" => Some(Self::Runtime),
+            "policy" => Some(Self::Policy),
+            "storage" => Some(Self::Storage),
+            "corrupt" => Some(Self::Corrupt),
+            "locked" => Some(Self::Locked),
+            "config" => Some(Self::Config),
+            "unsupported" => Some(Self::Unsupported),
+            _ => None,
         }
     }
 }
@@ -137,6 +174,20 @@ impl Failure {
         }
     }
 
+    /// The daemon refused a command, naming the kind of refusal.
+    #[must_use]
+    pub const fn refused(
+        class: Class,
+        message: String,
+    ) -> Self {
+        Self {
+            exit: Exit::of_class(class),
+            class,
+            message,
+            hint: None,
+        }
+    }
+
     #[must_use]
     pub fn config(message: String) -> Self {
         Self {
@@ -184,9 +235,67 @@ impl Failure {
     }
 }
 
+/// Reads the daemon's answer to a command that had nothing else to report.
+///
+/// # Errors
+///
+/// Returns a [`Failure`] when the line is not the JSON this socket documents, or
+/// when the daemon says `ok: false`; the refusal's class and message are kept.
+pub fn taken_reply(line: &str) -> Result<(), Failure> {
+    accepted(line).map(|_| ())
+}
+
+/// Reads the branch and depth the daemon's fork answer names.
+///
+/// # Errors
+///
+/// Returns a [`Failure`] when the line is not the JSON this socket documents,
+/// when the daemon says `ok: false`, or when `ok` omits the branch or depth the
+/// fork command needs to print an answer.
+pub fn forked_reply(line: &str) -> Result<(BranchId, u64), Failure> {
+    let value = accepted(line)?;
+    let branch = value.get("branch").and_then(Value::as_str).ok_or_else(|| {
+        Failure::runtime("the daemon accepted the fork but named no branch".to_string())
+    })?;
+    let branch = BranchId::from_str(branch).map_err(|_| {
+        Failure::runtime(
+            "the daemon accepted the fork but named a branch that is not an id".to_string(),
+        )
+    })?;
+    let depth = value.get("depth").and_then(Value::as_u64).ok_or_else(|| {
+        Failure::runtime("the daemon accepted the fork but named no depth".to_string())
+    })?;
+    Ok((branch, depth))
+}
+
+fn accepted(line: &str) -> Result<Value, Failure> {
+    let value: Value = serde_json::from_str(line.trim_end())
+        .map_err(|_| Failure::runtime("the socket answered with something else".to_string()))?;
+    match value.get("ok").and_then(Value::as_bool) {
+        Some(true) => Ok(value),
+        Some(false) => Err(refusal(&value)),
+        None => Err(Failure::runtime(
+            "the socket answered with something else".to_string(),
+        )),
+    }
+}
+
+fn refusal(value: &Value) -> Failure {
+    let message = value
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("the daemon refused it");
+    let class = value
+        .get("class")
+        .and_then(Value::as_str)
+        .and_then(Class::from_name)
+        .unwrap_or(Class::Runtime);
+    Failure::refused(class, message.to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Class, Exit, Failure};
+    use super::{Class, Exit, Failure, forked_reply, taken_reply};
     use serde_json::json;
 
     #[test]
@@ -316,5 +425,159 @@ mod tests {
         assert_eq!(failure.render(false), failure.text());
         assert_eq!(failure.render(true), failure.object().to_string());
         assert!(failure.render(true).starts_with("{\"error\":"));
+    }
+
+    #[test]
+    fn every_class_has_a_name_it_reads_back_from() {
+        let table = [
+            (Class::Usage, "usage"),
+            (Class::Runtime, "runtime"),
+            (Class::Policy, "policy"),
+            (Class::Storage, "storage"),
+            (Class::Corrupt, "corrupt"),
+            (Class::Locked, "locked"),
+            (Class::Config, "config"),
+            (Class::Unsupported, "unsupported"),
+        ];
+        for (class, name) in table {
+            assert_eq!(Class::from_name(name), Some(class));
+        }
+    }
+
+    #[test]
+    fn the_sockets_runtime_words_all_read_as_runtime() {
+        for name in ["failed", "malformed", "unknown", "empty"] {
+            assert_eq!(Class::from_name(name), Some(Class::Runtime), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_class_is_not_guessed() {
+        assert_eq!(Class::from_name("weird"), None);
+        assert_eq!(Class::from_name(""), None);
+    }
+
+    #[test]
+    fn every_class_maps_to_its_exit_code() {
+        let table = [
+            (Class::Usage, 2),
+            (Class::Runtime, 64),
+            (Class::Policy, 65),
+            (Class::Storage, 70),
+            (Class::Corrupt, 74),
+            (Class::Locked, 75),
+            (Class::Config, 78),
+            (Class::Unsupported, 64),
+        ];
+        for (class, code) in table {
+            assert_eq!(Exit::of_class(class).code(), code, "{class:?}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_keeps_the_class_and_message_it_was_given() {
+        let failure = Failure::refused(Class::Policy, "the fork is inside a call".to_string());
+        assert_eq!(failure.exit, Exit::Policy);
+        assert_eq!(failure.class, Class::Policy);
+        assert_eq!(failure.message, "the fork is inside a call");
+        assert!(failure.hint.is_none());
+    }
+
+    #[test]
+    fn a_taken_reply_is_ok_and_ignores_extra_fields() {
+        assert_eq!(taken_reply(r#"{"ok":true}"#), Ok(()));
+        assert_eq!(
+            taken_reply(r#"{"ok":true,"branch":"b-0123456789abcdef"}"#),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn every_refusal_class_from_the_socket_becomes_its_exit() {
+        let table = [
+            ("usage", 2, "usage"),
+            ("policy", 65, "policy"),
+            ("storage", 70, "storage"),
+            ("corrupt", 74, "corrupt"),
+            ("failed", 64, "runtime"),
+            ("malformed", 64, "runtime"),
+            ("unknown", 64, "runtime"),
+            ("empty", 64, "runtime"),
+        ];
+        for (name, code, class) in table {
+            let line = json!({"ok": false, "class": name, "message": "no"}).to_string();
+            let failure = taken_reply(&line).expect_err("refused");
+            assert_eq!(failure.exit.code(), code, "{name}");
+            assert_eq!(failure.class.name(), class, "{name}");
+            assert_eq!(failure.message, "no", "{name}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_refusal_class_is_a_runtime_failure() {
+        let failure =
+            taken_reply(r#"{"ok":false,"class":"weird","message":"no"}"#).expect_err("refused");
+        assert_eq!(failure.exit.code(), 64);
+        assert_eq!(failure.class, Class::Runtime);
+        assert_eq!(failure.message, "no");
+    }
+
+    #[test]
+    fn a_refusal_without_a_class_or_message_still_reports_runtime() {
+        let failure = taken_reply(r#"{"ok":false}"#).expect_err("refused");
+        assert_eq!(failure.exit.code(), 64);
+        assert_eq!(failure.class, Class::Runtime);
+        assert_eq!(failure.message, "the daemon refused it");
+    }
+
+    #[test]
+    fn a_line_that_is_not_an_ok_answer_is_a_runtime_failure() {
+        for line in [
+            r#"{"nope":true}"#,
+            r#"{"ok":"yes"}"#,
+            r#"{"ok":1}"#,
+            r"{}",
+            r"true",
+            "not json",
+        ] {
+            let failure = taken_reply(line).expect_err("malformed");
+            assert_eq!(failure.exit.code(), 64, "{line}");
+            assert_eq!(failure.class, Class::Runtime, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_fork_reply_names_the_new_branch_and_its_depth() {
+        let (branch, depth) =
+            forked_reply(r#"{"ok":true,"branch":"b-0123456789abcdef","depth":3}"#)
+                .expect("a fork answer");
+        assert_eq!(branch.to_string(), "b-0123456789abcdef");
+        assert_eq!(depth, 3);
+    }
+
+    #[test]
+    fn a_fork_reply_without_a_branch_or_depth_is_a_runtime_failure() {
+        for line in [
+            r#"{"ok":true}"#,
+            r#"{"ok":true,"depth":3}"#,
+            r#"{"ok":true,"branch":"b-0123456789abcdef"}"#,
+            r#"{"ok":true,"branch":"nope","depth":3}"#,
+            r#"{"ok":true,"branch":"b-0123456789abcdef","depth":-1}"#,
+        ] {
+            let failure = forked_reply(line).expect_err("unusable answer");
+            assert_eq!(failure.exit.code(), 64, "{line}");
+            assert_eq!(failure.class, Class::Runtime, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_refused_fork_reply_reports_the_refusal_not_a_missing_branch() {
+        let failure = forked_reply(
+            r#"{"ok":false,"class":"policy","message":"the fork point leaves a call open"}"#,
+        )
+        .expect_err("refused");
+        assert_eq!(failure.exit.code(), 65);
+        assert_eq!(failure.class, Class::Policy);
+        assert_eq!(failure.message, "the fork point leaves a call open");
     }
 }
