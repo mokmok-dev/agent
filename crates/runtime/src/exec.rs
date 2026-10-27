@@ -9,14 +9,13 @@
 //! bytes it wrote. Nothing in this build parses them.
 
 use std::io::{Read as _, Write as _};
-use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use agent_core::event::ErrorClass;
 
-use crate::Tool;
+use crate::{Tool, confine};
 
 /// How long to wait before asking a running process again whether it is done.
 const POLL: Duration = Duration::from_millis(5);
@@ -46,17 +45,34 @@ pub fn run(
     args: &str,
     working: &Path,
 ) -> Outcome {
-    let Some((program, rest)) = tool.argv.split_first() else {
+    let Some((program, _)) = tool.argv.split_first() else {
         return Outcome::Failed(ErrorClass::Unknown, false);
     };
-    let Some(program) = resolve(program) else {
+    let Some(program) = confine::resolve(program) else {
         return Outcome::Failed(ErrorClass::Unknown, false);
     };
+    // A tool that the configuration bounds is started by the launcher, which puts
+    // the bounds on itself and then becomes the program. Nothing else can put them
+    // on a child, and a bound the child did not inherit is not a bound.
+    let line = if tool.confined {
+        let Ok(launcher) = confine::launcher() else {
+            return Outcome::Failed(ErrorClass::Unknown, false);
+        };
+        confine::plan(&launcher, tool, &program)
+    } else {
+        let mut plain: Vec<std::ffi::OsString> = vec![program.into_os_string()];
+        plain.extend(tool.argv.iter().skip(1).map(std::ffi::OsString::from));
+        plain
+    };
+    let Some((launcher, bounds)) = line.split_first() else {
+        return Outcome::Failed(ErrorClass::Unknown, false);
+    };
+
     let started = Instant::now();
-    let mut command = Command::new(&program);
+    let mut command = Command::new(launcher);
     command
-        .args(rest)
         .current_dir(working)
+        .args(bounds)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -108,35 +124,6 @@ pub fn run(
         status: status.code().unwrap_or(-1),
         truncated,
     })
-}
-
-/// The program the manifest's `argv` names.
-///
-/// The child is given only the names its manifest declares, and a program named
-/// without a path is found through `PATH`, so the lookup has to happen here,
-/// against the daemon's environment, or a tool that declares no environment
-/// could not start at all. Which program runs is the manifest's statement about
-/// `argv`; what it sees is its statement about `permissions`, and one must not
-/// decide the other.
-fn resolve(program: &str) -> Option<PathBuf> {
-    if program.contains('/') {
-        return Some(PathBuf::from(program));
-    }
-    search(program, &std::env::var_os("PATH")?)
-}
-
-fn search(
-    program: &str,
-    path: &std::ffi::OsStr,
-) -> Option<PathBuf> {
-    std::env::split_paths(path)
-        .map(|directory| directory.join(program))
-        .find(|candidate| is_executable(candidate))
-}
-
-fn is_executable(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .is_ok_and(|meta| meta.is_file() && (meta.permissions().mode() & 0o111) != 0)
 }
 
 /// Waits for the process, or gives up.

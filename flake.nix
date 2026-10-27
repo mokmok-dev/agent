@@ -44,6 +44,9 @@
           commonArgs = {
             inherit src;
             strictDeps = true;
+            # The tests start real confined processes, and the memory bound needs a
+            # program that can ask for a lot of it.
+            nativeBuildInputs = [ pkgs.python3 ];
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
         in
@@ -87,9 +90,16 @@
                             argv = [
                               "/run/current-system/sw/bin/true"
                             ];
+                            env = [
+                              "PATH"
+                            ];
                             name = "shell";
+                            network = "none";
                             risk = "read";
                             schema = "{}";
+                            write = [
+                              "/tmp/out"
+                            ];
                           }
                         ];
                       };
@@ -167,6 +177,7 @@
               (with pkgs; [
                 cargo-mutants
                 cargo-nextest
+                python3
                 rustToolchain
                 sccache
               ])
@@ -195,17 +206,21 @@
                 inherit cargoArtifacts;
                 cargoBuildFlags = [
                   "-p"
+                  "agent-runtime"
+                  "-p"
                   "agentd"
                 ];
                 pname = "agentd";
                 version = "0.0.0";
 
-                # One binary. The dependency cache that comes in with
-                # cargoArtifacts leaves every workspace binary in target/release,
-                # so the default install hook would ship the repo's own task
-                # runner alongside the daemon.
+                # Two binaries, and only these. The dependency cache that comes in
+                # with cargoArtifacts leaves every workspace binary in
+                # target/release, so the default install hook would ship the repo's
+                # own task runner alongside the daemon. The launcher goes beside the
+                # daemon because that is where the daemon looks for it.
                 installPhase = ''
                   install -Dm755 target/release/agentd $out/bin/agentd
+                  install -Dm755 target/release/agent-confine $out/bin/agent-confine
                 '';
               }
             );

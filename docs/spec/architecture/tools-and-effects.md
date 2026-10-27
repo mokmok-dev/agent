@@ -56,6 +56,10 @@ A tool is a directory with a manifest and an executable. The manifest declares w
 | `max_output` | The byte bound on what one event may carry |
 | `argv` | The program and its arguments; the model's arguments arrive on standard input |
 | `permissions.env` | The environment variable names the process may see. It sees no others |
+| `permissions.write` | The only directories the process may write to. Every other path is read-only |
+| `permissions.network` | `none` or `any`. There is no third answer |
+| `permissions.memory_bytes` | The address space the process may use |
+| `permissions.file_bytes` | The largest file it may write |
 
 # The environment a tool gets
 
@@ -102,19 +106,31 @@ A tool that needs a variable its manifest does not declare does not get it, beca
 
 A result carries the exit status as data, not as an error. A failing command is a normal outcome the model reads.
 
-# What this build enforces
+# What holds the bounds
 
-Tools run as child processes of `agentd`, and four bounds are held by the program.
+A tool is started by a second binary this package ships, `agent-confine`, which puts the bounds on its own process and then becomes the tool. Nothing outside the package is involved: no namespace, no launcher from the distribution, no root.
 
-| Bound | How |
+| Bound | Held by |
 |---|---|
-| Environment | The process gets the names its manifest declares and nothing else |
-| Working directory | The store's directory, so a tool that writes files writes them where the operator already looks |
-| Time | The manifest's timeout; the process is killed and the log records that the effect may have happened |
+| Writing | Landlock refuses every write the manifest did not declare, and truncation with it. A declared directory gets a rule; a path with no rule is refused. The one exception is `/dev/null`, which every program redirects to and which holds nothing |
+| Network | seccomp refuses a socket in the address families that reach another machine, so a name lookup, a datagram and a packet socket go the same way |
+| Memory | `RLIMIT_AS` |
+| One file | `RLIMIT_FSIZE` |
+| Time | The manifest's timeout, enforced by the daemon; the process is killed and the log records that the effect may have happened |
 | Output | The manifest's byte bound; longer output keeps its ends and the count of what was dropped |
+| Environment | The names the manifest declares and nothing else |
+| Working directory | The store's directory |
 
-Not enforced, and not to be described as enforced: the paths and hosts a manifest may declare for the approval policy, resource limits on memory and file size, and any filesystem or network namespace.
+The bounds are syscalls made by the process that is about to become the tool, which is why they hold where a sandbox that needs namespaces does not: a container, a build sandbox, a host with unprivileged user namespaces turned off.
 
-A later PR moves tool execution into a transient systemd scope with its own cgroup, filesystem namespace, and network namespace, and the paths and hosts arrive as fields then. Enforcement comes with the move.
+The launcher is a separate binary because a bound has to be installed by the process that will hold it. Installing it in the daemon would bound the daemon, and installing it between fork and exec would mean deciding when it is safe to allocate in the daemon's own child.
 
-Do not claim this build is sandboxed against hostile code. It is not. It is bounded, and the tools are first-party code the operator installed.
+A configuration can say `[sandbox] none = true` and get a tool with no bounds at all. It is the only way to ask for that, nothing writes it on the operator's behalf, and the module never does; the table above is then a set of declarations and nothing holds them.
+
+A directory a manifest says a tool may write has to exist before the daemon starts, because Landlock needs the directory to attach the rule to. The daemon refuses a path that is not there, by name; the module creates the paths each tool declares, and nothing creates a directory the program was only given permission to use.
+
+The daemon runs the launcher once at startup, with nothing to become. A kernel that cannot hold a bound is refused there, while somebody is watching the start, rather than on the first tool call.
+
+Not held, and not to be described as held: an allowlist of hosts, because the socket is refused or it is not and a hostname list would be a promise this build cannot keep; CPU time other than the wall clock; and accounting of what a process actually touched. `RLIMIT_AS` bounds address space, not memory in use, so a tool that maps a large file without reading it stays inside the bound and a tool that forks keeps the same ceiling per process.
+
+Do not claim this is a sandbox against hostile code. It is a set of bounds the kernel enforces, and the tools are first-party code the operator installed. A program that is hostile in the sense of exploiting the kernel is out of scope.

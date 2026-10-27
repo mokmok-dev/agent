@@ -179,6 +179,10 @@ max_output_bytes = 4096
 
 [tools.permissions]
 env = []
+network = "any"
+memory_bytes = 268435456
+file_bytes = 8388608
+
 "#,
         state = dir.to_string_lossy(),
         base = base_url
@@ -227,9 +231,11 @@ fn a_configured_daemon_answers_a_turn() {
     let (base_url, server) = serve();
     let config = write_config(&dir, &base_url);
 
+    let first = run(&config);
     assert!(
-        run(&config).status.success(),
-        "the first pass starts the store"
+        first.status.success(),
+        "the first pass starts the store: {}",
+        String::from_utf8_lossy(&first.stderr)
     );
     append_command(&dir, "hello");
 
@@ -340,9 +346,11 @@ fn a_second_turn_sees_the_first_answer() {
     let (base_url, server) = serve_times(2);
     let config = write_config(&dir, &base_url);
 
+    let first = run(&config);
     assert!(
-        run(&config).status.success(),
-        "the first pass starts the store"
+        first.status.success(),
+        "the first pass starts the store: {}",
+        String::from_utf8_lossy(&first.stderr)
     );
     append_command(&dir, "first question");
     assert!(run(&config).status.success(), "the first turn is answered");
@@ -415,9 +423,11 @@ fn a_tool_call_becomes_an_intent_with_a_key() {
     let (base_url, server) = serve_tool_call();
     let config = write_config(&dir, &base_url);
 
+    let first = run(&config);
     assert!(
-        run(&config).status.success(),
-        "the first pass starts the store"
+        first.status.success(),
+        "the first pass starts the store: {}",
+        String::from_utf8_lossy(&first.stderr)
     );
     append_command(&dir, "what time is it");
     assert!(run(&config).status.success(), "the turn is answered");

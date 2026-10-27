@@ -34,7 +34,11 @@ let
         schema
         ;
       max_output_bytes = tool.maxOutputBytes;
-      permissions.env = tool.env;
+      permissions = {
+        inherit (tool) env network write;
+        file_bytes = tool.fileBytes;
+        memory_bytes = tool.memoryBytes;
+      };
       timeout_ms = tool.timeoutMs;
     }) cfg.tools;
   }
@@ -159,6 +163,17 @@ in
       description = "The deadline for one model call.";
     };
 
+    sandbox = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Whether a tool's process runs inside the bounds its manifest declares. The
+        bounds are syscalls the kernel holds, so this costs nothing but a fork. A
+        host whose kernel cannot hold them refuses to start, and this flag is for a
+        host that must run tools anyway: it is the only way to say so.
+      '';
+    };
+
     tools = mkOption {
       type = types.listOf (
         types.submodule {
@@ -189,6 +204,46 @@ in
                 no others, so a tool that needs PATH or HOME has to say so. There is
                 no default: an empty list is a real answer and means the process runs
                 with an empty environment, but it is still the operator's answer.
+              '';
+            };
+            fileBytes = mkOption {
+              type = types.ints.positive;
+              default = 8 * 1024 * 1024;
+              description = ''
+                The largest file the tool may write. The bound is the kernel's, and a
+                tool that passes it is stopped rather than allowed to fill the disk.
+              '';
+            };
+            memoryBytes = mkOption {
+              type = types.ints.positive;
+              default = 256 * 1024 * 1024;
+              description = ''
+                The address space the tool's process may use. A tool that asks for
+                more fails inside itself; it cannot borrow the daemon's headroom.
+              '';
+            };
+            network = mkOption {
+              type = types.enum [
+                "any"
+                "none"
+              ];
+              description = ''
+                Whether the process may reach the network. The kernel gives a
+                namespace with none or shares the host's; there is no allowlist,
+                because a hostname list would be a promise this build cannot keep.
+                There is no default: reaching the network is the operator's
+                statement, not this module's guess.
+              '';
+            };
+            write = mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              description = ''
+                The directories the tool may write to. Every other path is mounted
+                read-only, including its working directory, so a tool that produces
+                something has to say where. Absolute, because the launcher resolves
+                a relative path against its own working directory and not the
+                tool's.
               '';
             };
             maxOutputBytes = mkOption {
@@ -323,5 +378,12 @@ in
         EnvironmentFile = cfg.environmentFile;
       };
     };
+
+    # A directory a tool may write has to be there before the sandbox mounts it,
+    # and the daemon does not create directories it was only given permission to
+    # use. The deployment creates them.
+    systemd.tmpfiles.rules = lib.concatMap (
+      tool: map (path: "d ${path} 0750 ${cfg.user} ${cfg.group} - -") tool.write
+    ) cfg.tools;
   };
 }

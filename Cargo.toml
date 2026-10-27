@@ -28,8 +28,10 @@ clap = { version = "4", default-features = false, features = [
   "std",
   "usage",
 ] }
+landlock = "0.4.7"
 rusqlite = "0.37"
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process", "thread"] }
+seccompiler = "0.5"
 serde = { version = "1", default-features = false }
 serde_json = { version = "1", features = ["raw_value"] }
 serde_yaml_ng = "0.10"

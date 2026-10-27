@@ -41,3 +41,4 @@
 * **Update**: The daemon locks the store it writes, so a second agentd on the same state directory exits instead of doubling every turn.
 * **Update**: A failure records what it said about itself, bounded and without the request, so `transport` is no longer the end of the diagnosis.
 * **Update**: A tool's process sees the variable names its manifest declares and nothing else, and the intent records the names it was given.
+* **Update**: A tool's bounds are syscalls its own process makes, through a launcher this package ships, so they hold on a host that will not give up namespaces. `[sandbox] none = true` is the one way to say otherwise.
