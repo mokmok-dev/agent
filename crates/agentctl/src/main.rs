@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use agent_store::Store;
-use agentctl::{Failure, Intent, Invocation, Parsed, parse, report};
+use agentctl::{Failure, Intent, Invocation, Parsed, exit, parse, report};
 
 fn main() -> ExitCode {
     let json = std::env::args().any(|argument| argument == "--json");
@@ -42,7 +42,10 @@ fn dispatch(invocation: &Invocation) -> Result<String, Failure> {
         }),
         Intent::Verify { .. } => verify(invocation),
         Intent::Status => status(invocation),
-        Intent::Send { .. } | Intent::Approve { .. } | Intent::Deny { .. } => bus(invocation),
+        Intent::Fork { .. }
+        | Intent::Send { .. }
+        | Intent::Approve { .. }
+        | Intent::Deny { .. } => bus(invocation),
         other => Err(Failure::unsupported(other.name(), other.needs())),
     }
 }
@@ -95,31 +98,14 @@ fn report_failure(
     ExitCode::from(failure.exit.code())
 }
 
-/// The text a bus command carries: what was asked, or the call being answered.
-fn bus_text(invocation: &Invocation) -> Result<String, Failure> {
-    match &invocation.intent {
-        Intent::Send { message, .. } => Ok(message.clone()),
-        Intent::Approve { id } | Intent::Deny { id } => Ok(id.clone()),
-        other => Err(Failure::unsupported(other.name(), other.needs())),
-    }
-}
-
-/// The word the socket accepts for this intent.
-fn wire_word(intent: &Intent) -> Result<&'static str, Failure> {
-    match intent {
-        Intent::Send { .. } => Ok("send"),
-        Intent::Approve { .. } => Ok("approve"),
-        Intent::Deny { .. } => Ok("deny"),
-        other => Err(Failure::unsupported(other.name(), other.needs())),
-    }
-}
-
 /// One line to the daemon's socket, and its answer.
 fn bus(invocation: &Invocation) -> Result<String, Failure> {
     use std::io::{BufRead as _, BufReader, Write as _};
 
-    let text = bus_text(invocation)?;
-    let command = wire_word(&invocation.intent)?;
+    let intent = &invocation.intent;
+    let line = intent
+        .request_line()
+        .ok_or_else(|| Failure::unsupported(intent.name(), intent.needs()))?;
     let socket = store_path(invocation)?
         .parent()
         .map(|dir| dir.join("bus.sock"))
@@ -131,7 +117,6 @@ fn bus(invocation: &Invocation) -> Result<String, Failure> {
         ))
     })?;
     let mut writer = &stream;
-    let line = serde_json::json!({ "command": command, "text": text }).to_string();
     writer
         .write_all(line.as_bytes())
         .and_then(|()| writer.write_all(b"\n"))
@@ -143,17 +128,19 @@ fn bus(invocation: &Invocation) -> Result<String, Failure> {
     reader
         .read_line(&mut answer)
         .map_err(|error| Failure::runtime(format!("the socket said nothing: {error}")))?;
-    let value: serde_json::Value = serde_json::from_str(answer.trim_end())
-        .map_err(|_| Failure::runtime("the socket answered with something else".to_string()))?;
-    if value["ok"] == serde_json::json!(true) {
-        Ok(format!("{command}: taken"))
-    } else {
-        Err(Failure::policy(
-            value["message"]
-                .as_str()
-                .unwrap_or("the daemon refused it")
-                .to_string(),
-        ))
+    match intent {
+        Intent::Fork { .. } => {
+            let (branch, depth) = exit::forked_reply(&answer)?;
+            Ok(if invocation.json {
+                report::fork_json(branch, depth)
+            } else {
+                report::fork_text(branch, depth)
+            })
+        },
+        other => {
+            exit::taken_reply(&answer)?;
+            Ok(format!("{}: taken", other.name()))
+        },
     }
 }
 

@@ -11,6 +11,7 @@ use agent_store::Store;
 
 const BIN: &str = env!("CARGO_BIN_EXE_agentctl");
 const BRANCH: &str = "b-0123456789abcdef";
+const EVENT: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -258,7 +259,7 @@ fn a_message_the_operator_quoted_is_not_read_as_a_flag() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         daemon.join().expect("the daemon finished"),
-        r#"{"command":"send","text":"--wait"}"#,
+        r#"{"branch":"b-0123456789abcdef","command":"send","text":"--wait"}"#,
         "the message parsed as a message, not as a flag"
     );
 }
@@ -276,6 +277,134 @@ fn a_fork_that_names_two_points_is_refused_before_anything_runs() {
     ]);
     assert_eq!(output.status.code(), Some(2));
     assert_ne!(stderr(&output), "");
+}
+
+#[test]
+fn fork_defaults_to_the_tip_and_prints_the_new_branch() {
+    let scratch = Scratch::new();
+    let socket = scratch.dir.join("bus.sock");
+    let daemon = fake_daemon(
+        &socket,
+        r#"{"ok":true,"branch":"b-fedcba9876543210","depth":3}"#,
+    );
+
+    let output = ctl(&scratch.dir, &["fork", "--branch", BRANCH]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        stdout(&output).trim_end(),
+        "forked b-fedcba9876543210 at depth 3"
+    );
+
+    let line = daemon.join().expect("the daemon finished");
+    assert_eq!(
+        line, r#"{"command":"fork","parent":"b-0123456789abcdef"}"#,
+        "no selector means the tip, so no selector key is sent"
+    );
+}
+
+#[test]
+fn fork_in_json_mode_reports_the_new_branch_and_its_depth() {
+    let scratch = Scratch::new();
+    let socket = scratch.dir.join("bus.sock");
+    let daemon = fake_daemon(
+        &socket,
+        r#"{"ok":true,"branch":"b-fedcba9876543210","depth":3}"#,
+    );
+
+    let output = ctl(&scratch.dir, &["fork", "--branch", BRANCH, "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout(&output).trim_end()).expect("one json object");
+    assert_eq!(parsed["schema"], "agentctl.fork/1");
+    assert_eq!(parsed["branch"], "b-fedcba9876543210");
+    assert_eq!(parsed["depth"], 3);
+
+    let line = daemon.join().expect("the daemon finished");
+    assert_eq!(line, r#"{"command":"fork","parent":"b-0123456789abcdef"}"#);
+}
+
+#[test]
+fn fork_sends_the_point_and_the_flags_it_was_given() {
+    let scratch = Scratch::new();
+    let socket = scratch.dir.join("bus.sock");
+    let daemon = fake_daemon(
+        &socket,
+        r#"{"ok":true,"branch":"b-fedcba9876543210","depth":4}"#,
+    );
+
+    let output = ctl(
+        &scratch.dir,
+        &[
+            "fork",
+            "--branch",
+            BRANCH,
+            "--at",
+            EVENT,
+            "--label",
+            "experiment",
+            "--boundary",
+            "--force",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+
+    let line = daemon.join().expect("the daemon finished");
+    assert_eq!(
+        line,
+        format!(
+            "{{\"at\":\"{EVENT}\",\"boundary\":true,\"command\":\"fork\",\"force\":true,\
+             \"label\":\"experiment\",\"parent\":\"{BRANCH}\"}}"
+        )
+    );
+}
+
+#[test]
+fn a_fork_refused_by_policy_exits_65_with_the_message() {
+    let scratch = Scratch::new();
+    let socket = scratch.dir.join("bus.sock");
+    let daemon = fake_daemon(
+        &socket,
+        r#"{"ok":false,"class":"policy","message":"the fork point leaves a call unresolved; pass --force"}"#,
+    );
+
+    let output = ctl(&scratch.dir, &["fork", "--branch", BRANCH]);
+    assert_eq!(output.status.code(), Some(65), "{output:?}");
+    assert_eq!(stdout(&output), "");
+    assert!(
+        stderr(&output).contains("the fork point leaves a call unresolved"),
+        "{output:?}"
+    );
+    let _ = daemon.join();
+}
+
+#[test]
+fn a_corrupt_fork_reply_exits_74() {
+    let scratch = Scratch::new();
+    let socket = scratch.dir.join("bus.sock");
+    let daemon = fake_daemon(
+        &socket,
+        r#"{"ok":false,"class":"corrupt","message":"the store disagrees with the fold"}"#,
+    );
+
+    let output = ctl(&scratch.dir, &["fork", "--branch", BRANCH]);
+    assert_eq!(output.status.code(), Some(74), "{output:?}");
+    assert!(
+        stderr(&output).contains("the store disagrees with the fold"),
+        "{output:?}"
+    );
+    assert_eq!(stderr(&output).matches("error:").count(), 1, "{output:?}");
+    let _ = daemon.join();
+}
+
+#[test]
+fn a_fork_without_a_daemon_still_exits_78() {
+    let scratch = Scratch::new();
+    let output = ctl(&scratch.dir, &["fork", "--branch", BRANCH]);
+    assert_eq!(output.status.code(), Some(78), "{output:?}");
+    assert!(
+        stderr(&output).contains("no daemon is listening"),
+        "{output:?}"
+    );
 }
 
 #[test]
@@ -335,7 +464,7 @@ fn send_writes_one_line_the_daemon_can_read() {
 
     let line = daemon.join().expect("the daemon finished");
     assert_eq!(
-        line, r#"{"command":"send","text":"hello there"}"#,
+        line, r#"{"branch":"b-0123456789abcdef","command":"send","text":"hello there"}"#,
         "the line is the one the socket documents"
     );
 }
@@ -350,14 +479,36 @@ fn approve_carries_the_call_it_answers() {
     assert!(output.status.success(), "{output:?}");
 
     let line = daemon.join().expect("the daemon finished");
-    assert_eq!(line, r#"{"command":"approve","text":"0102030405060708:0"}"#);
+    assert_eq!(line, r#"{"command":"approve","id":"0102030405060708:0"}"#);
+}
+
+#[test]
+fn an_approval_on_a_fork_names_its_branch() {
+    let scratch = Scratch::new();
+    let socket = scratch.dir.join("bus.sock");
+    let daemon = fake_daemon(&socket, r#"{"ok":true}"#);
+
+    let output = ctl(
+        &scratch.dir,
+        &["approve", "--branch", BRANCH, "0102030405060708:0"],
+    );
+    assert!(output.status.success(), "{output:?}");
+
+    let line = daemon.join().expect("the daemon finished");
+    assert_eq!(
+        line,
+        format!(r#"{{"branch":"{BRANCH}","command":"approve","id":"0102030405060708:0"}}"#)
+    );
 }
 
 #[test]
 fn a_daemon_that_says_no_is_a_policy_failure() {
     let scratch = Scratch::new();
     let socket = scratch.dir.join("bus.sock");
-    let daemon = fake_daemon(&socket, r#"{"ok":false,"message":"deny needs text"}"#);
+    let daemon = fake_daemon(
+        &socket,
+        r#"{"ok":false,"class":"policy","message":"deny needs text"}"#,
+    );
 
     let output = ctl(&scratch.dir, &["deny", "0102030405060708:0"]);
     assert_eq!(output.status.code(), Some(65), "{output:?}");

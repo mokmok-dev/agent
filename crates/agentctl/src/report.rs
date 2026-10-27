@@ -4,6 +4,7 @@
 //! object with a `schema` field for a script. Nothing in this module prints, so
 //! its output is asserted as a string rather than captured from a terminal.
 
+use agent_core::ids::BranchId;
 use agent_store::{StoreError, VerifyReport};
 use serde_json::json;
 
@@ -47,6 +48,29 @@ pub fn verify_json(report: &VerifyReport) -> String {
     .to_string()
 }
 
+/// The branch a fork created, in a sentence.
+#[must_use]
+pub fn fork_text(
+    branch: BranchId,
+    depth: u64,
+) -> String {
+    format!("forked {branch} at depth {depth}")
+}
+
+/// The branch a fork created, as one object.
+#[must_use]
+pub fn fork_json(
+    branch: BranchId,
+    depth: u64,
+) -> String {
+    json!({
+        "schema": "agentctl.fork/1",
+        "branch": branch.to_string(),
+        "depth": depth,
+    })
+    .to_string()
+}
+
 /// The failure a store error becomes.
 ///
 /// Storage that could not be read is a storage failure an operator fixes by
@@ -54,15 +78,7 @@ pub fn verify_json(report: &VerifyReport) -> String {
 /// promised is a corrupt store, and the remedy is a restore, not a repair.
 #[must_use]
 pub fn store_failure(error: &StoreError) -> Failure {
-    let corrupt = matches!(
-        error,
-        StoreError::Identifier(_)
-            | StoreError::PrevMismatch { .. }
-            | StoreError::DepthGap { .. }
-            | StoreError::Chain { .. }
-            | StoreError::Decode(_)
-    );
-    if corrupt {
+    if error.is_corrupt() {
         Failure {
             exit: Exit::Corrupt,
             class: Class::Corrupt,
@@ -161,7 +177,11 @@ pub fn status_json(status: &status::Status) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{store_failure, verify_json, verify_text, version_json, version_text};
+    use super::{
+        fork_json, fork_text, store_failure, verify_json, verify_text, version_json, version_text,
+    };
+    use std::path::PathBuf;
+
     use agent_core::ids::{BranchId, EventId};
     use agent_store::{StoreError, VerifyReport};
     use serde_json::json;
@@ -213,6 +233,17 @@ mod tests {
 
     #[test]
     fn an_open_failure_is_a_storage_failure() {
+        let failure = store_failure(&StoreError::Open {
+            path: PathBuf::from("/nope/agent.db"),
+            source: rusqlite::Error::InvalidQuery,
+        });
+        assert_eq!(failure.exit.code(), 70);
+        assert_eq!(failure.class.name(), "storage");
+        assert!(failure.hint.is_some_and(|hint| hint.contains("disk")));
+    }
+
+    #[test]
+    fn an_identifier_failure_is_a_corrupt_store() {
         let failure = store_failure(&StoreError::Identifier("nope".to_string()));
         assert_eq!(failure.exit.code(), 74);
         assert_eq!(failure.class.name(), "corrupt");
@@ -246,6 +277,44 @@ mod tests {
         ] {
             assert_eq!(store_failure(&error).exit.code(), 74);
         }
+    }
+
+    #[test]
+    fn an_anchor_failure_is_a_corrupt_store() {
+        for error in [
+            StoreError::SecondGenesis(BranchId::from_bytes([2; 8])),
+            StoreError::UnknownPredecessor {
+                branch: BranchId::from_bytes([2; 8]),
+                prev: EventId::from_bytes([3; 32]),
+            },
+        ] {
+            assert_eq!(store_failure(&error).exit.code(), 74);
+        }
+    }
+
+    #[test]
+    fn a_fork_prints_the_branch_and_its_depth() {
+        assert_eq!(
+            fork_text(BranchId::from_bytes([1; 8]), 3),
+            "forked b-0101010101010101 at depth 3"
+        );
+    }
+
+    #[test]
+    fn a_fork_object_carries_the_schema_branch_and_depth_and_nothing_else() {
+        assert_eq!(
+            fork_json(BranchId::from_bytes([1; 8]), 3),
+            r#"{"branch":"b-0101010101010101","depth":3,"schema":"agentctl.fork/1"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fork_json(BranchId::from_bytes([1; 8]), 3))
+                .expect("valid json"),
+            json!({
+                "schema": "agentctl.fork/1",
+                "branch": "b-0101010101010101",
+                "depth": 3,
+            })
+        );
     }
 
     #[test]

@@ -9,9 +9,11 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use agent_core::fork::Selector;
 use agent_core::ids::{BranchId, EventId, TurnId};
 use agent_core::time::Timestamp;
 use clap::{ArgGroup, Args, Parser, Subcommand, error::ErrorKind};
+use serde_json::{Map, Value, json};
 
 use crate::exit::{Class, Exit, Failure};
 
@@ -51,11 +53,17 @@ enum Command {
     Send(Send),
     /// Decide a pending approval in the affirmative.
     Approve {
+        /// The branch the call is waiting on. Defaults to the root.
+        #[arg(long)]
+        branch: Option<String>,
         /// The pending approval.
         id: String,
     },
     /// Decide a pending approval in the negative.
     Deny {
+        /// The branch the call is waiting on. Defaults to the root.
+        #[arg(long)]
+        branch: Option<String>,
         /// The pending approval.
         id: String,
     },
@@ -165,12 +173,12 @@ enum SpecCommand {
 }
 
 #[derive(Debug, Args)]
-#[command(group(ArgGroup::new("point").required(true).multiple(false)))]
+#[command(group(ArgGroup::new("point").required(false).multiple(false)))]
 struct Fork {
     /// The branch the new one starts from.
     #[arg(long)]
     branch: String,
-    /// The event the new branch starts at.
+    /// The event the new branch starts at. Defaults to the tip.
     #[arg(long, group = "point")]
     at: Option<String>,
     /// How many events back from the tip to start at.
@@ -185,6 +193,9 @@ struct Fork {
     /// Snap the fork to the nearest prompt segment edge.
     #[arg(long)]
     boundary: bool,
+    /// Fork even when the point lies inside an unresolved tool call.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -197,14 +208,6 @@ struct Send {
     /// Wait for the turn to finish instead of returning when it is accepted.
     #[arg(long)]
     wait: bool,
-}
-
-/// Where a fork starts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ForkPoint {
-    At(EventId),
-    Rewind(u32),
-    Turn(TurnId),
 }
 
 /// Which supervisor to install.
@@ -224,9 +227,10 @@ pub enum Intent {
     },
     Fork {
         parent: BranchId,
-        point: ForkPoint,
+        selector: Selector,
         label: Option<String>,
         boundary: bool,
+        force: bool,
     },
     Send {
         branch: BranchId,
@@ -234,9 +238,11 @@ pub enum Intent {
         wait: bool,
     },
     Approve {
+        branch: Option<BranchId>,
         id: String,
     },
     Deny {
+        branch: Option<BranchId>,
         id: String,
     },
     Archive {
@@ -313,8 +319,7 @@ impl Intent {
             Self::Status => "nothing further",
             Self::BranchList => "the branch list over bus.sock",
             Self::BranchShow { .. } => "one branch, read over bus.sock",
-            Self::Fork { .. } => "the daemon's fork command over bus.sock",
-            Self::Send { .. } => "the command socket at bus.sock",
+            Self::Fork { .. } | Self::Send { .. } => "the command socket at bus.sock",
             Self::Approve { .. } | Self::Deny { .. } => "the approval queue over bus.sock",
             Self::Archive { .. } => "the daemon's archive command over bus.sock",
             Self::Warm { .. } => "the provider adapter's warm request path",
@@ -328,6 +333,68 @@ impl Intent {
             Self::Install { .. } => "the unit and plist templates",
             Self::SpecCheck => "the spec checker, which lives in xtask",
         }
+    }
+
+    /// The one line this intent sends to the daemon, when it is a command.
+    #[must_use]
+    pub fn request_line(&self) -> Option<String> {
+        let mut object = Map::new();
+        match self {
+            Self::Send {
+                branch, message, ..
+            } => {
+                object.insert("command".to_string(), json!("send"));
+                object.insert("branch".to_string(), json!(branch.to_string()));
+                object.insert("text".to_string(), json!(message));
+            },
+            Self::Approve { branch, id } => {
+                object.insert("command".to_string(), json!("approve"));
+                if let Some(branch) = branch {
+                    object.insert("branch".to_string(), json!(branch.to_string()));
+                }
+                object.insert("id".to_string(), json!(id));
+            },
+            Self::Deny { branch, id } => {
+                object.insert("command".to_string(), json!("deny"));
+                if let Some(branch) = branch {
+                    object.insert("branch".to_string(), json!(branch.to_string()));
+                }
+                object.insert("id".to_string(), json!(id));
+            },
+            Self::Fork {
+                parent,
+                selector,
+                label,
+                boundary,
+                force,
+            } => {
+                object.insert("command".to_string(), json!("fork"));
+                object.insert("parent".to_string(), json!(parent.to_string()));
+                match selector {
+                    Selector::Tip => {},
+                    Selector::At(event) => {
+                        object.insert("at".to_string(), json!(event.to_string()));
+                    },
+                    Selector::Rewind(count) => {
+                        object.insert("rewind".to_string(), json!(count));
+                    },
+                    Selector::Turn(turn) => {
+                        object.insert("turn".to_string(), json!(turn.to_string()));
+                    },
+                }
+                if let Some(label) = label {
+                    object.insert("label".to_string(), json!(label));
+                }
+                if *boundary {
+                    object.insert("boundary".to_string(), json!(true));
+                }
+                if *force {
+                    object.insert("force".to_string(), json!(true));
+                }
+            },
+            _ => return None,
+        }
+        Some(Value::Object(object).to_string())
     }
 }
 
@@ -386,17 +453,30 @@ impl Invocation {
             },
             Command::Fork(fork) => Intent::Fork {
                 parent: branch("--branch", &fork.branch)?,
-                point: fork_point(&fork)?,
+                selector: selector(&fork)?,
                 label: fork.label,
                 boundary: fork.boundary,
+                force: fork.force,
             },
             Command::Send(send) => Intent::Send {
                 branch: branch("--branch", &send.branch)?,
                 message: send.message,
                 wait: send.wait,
             },
-            Command::Approve { id } => Intent::Approve { id },
-            Command::Deny { id } => Intent::Deny { id },
+            Command::Approve { id, branch: text } => Intent::Approve {
+                branch: text
+                    .as_deref()
+                    .map(|text| branch("--branch", text))
+                    .transpose()?,
+                id,
+            },
+            Command::Deny { id, branch: text } => Intent::Deny {
+                branch: text
+                    .as_deref()
+                    .map(|text| branch("--branch", text))
+                    .transpose()?,
+                id,
+            },
             Command::Archive { branch: id } => Intent::Archive {
                 branch: branch("--branch", &id)?,
             },
@@ -454,18 +534,16 @@ impl Invocation {
     }
 }
 
-fn fork_point(fork: &Fork) -> Result<ForkPoint, Failure> {
+fn selector(fork: &Fork) -> Result<Selector, Failure> {
     match (&fork.at, fork.rewind, &fork.turn) {
-        (Some(at), _, _) => Ok(ForkPoint::At(event("--at", at)?)),
-        (_, Some(count), _) => Ok(ForkPoint::Rewind(count)),
-        (_, _, Some(turn)) => {
-            Ok(ForkPoint::Turn(TurnId::from_str(turn).map_err(|_| {
+        (Some(at), _, _) => Ok(Selector::At(event("--at", at)?)),
+        (None, Some(count), _) => Ok(Selector::Rewind(count)),
+        (None, None, Some(turn)) => {
+            Ok(Selector::Turn(TurnId::from_str(turn).map_err(|_| {
                 bad("--turn", turn, "a turn id, which is lowercase hex")
             })?))
         },
-        (None, None, None) => Err(Failure::usage(
-            "fork needs one of --at, --rewind, or --turn".to_string(),
-        )),
+        (None, None, None) => Ok(Selector::Tip),
     }
 }
 
@@ -508,7 +586,8 @@ fn bad(
 
 #[cfg(test)]
 mod tests {
-    use super::{ForkPoint, Intent, Invocation, Parsed, Supervisor, parse};
+    use super::{Intent, Invocation, Parsed, Supervisor, parse};
+    use agent_core::fork::Selector;
     use agent_core::ids::{BranchId, EventId, TurnId};
     use agent_core::time::Timestamp;
     use std::path::PathBuf;
@@ -554,9 +633,10 @@ mod tests {
                 vec!["fork", "--branch", B, "--at", E],
                 Intent::Fork {
                     parent: branch(B),
-                    point: ForkPoint::At(event(E)),
+                    selector: Selector::At(event(E)),
                     label: None,
                     boundary: false,
+                    force: false,
                 },
             ),
             (
@@ -570,12 +650,14 @@ mod tests {
             (
                 vec!["approve", "approval-1"],
                 Intent::Approve {
+                    branch: None,
                     id: "approval-1".to_string(),
                 },
             ),
             (
-                vec!["deny", "approval-1"],
+                vec!["deny", "--branch", B, "approval-1"],
                 Intent::Deny {
+                    branch: Some(branch(B)),
                     id: "approval-1".to_string(),
                 },
             ),
@@ -647,13 +729,15 @@ mod tests {
                 "3",
                 "--label",
                 "experiment",
-                "--boundary"
+                "--boundary",
+                "--force"
             ]),
             Intent::Fork {
                 parent: branch(B),
-                point: ForkPoint::Rewind(3),
+                selector: Selector::Rewind(3),
                 label: Some("experiment".to_string()),
                 boundary: true,
+                force: true,
             }
         );
         assert_eq!(
@@ -694,16 +778,115 @@ mod tests {
     }
 
     #[test]
-    fn a_fork_selector_of_each_kind_is_read() {
+    fn every_fork_selector_is_read_and_no_selector_is_the_tip() {
+        let table = [
+            (vec!["fork", "--branch", B], Selector::Tip),
+            (
+                vec!["fork", "--branch", B, "--at", E],
+                Selector::At(event(E)),
+            ),
+            (
+                vec!["fork", "--branch", B, "--rewind", "4"],
+                Selector::Rewind(4),
+            ),
+            (
+                vec!["fork", "--branch", B, "--turn", T],
+                Selector::Turn(TurnId::from_str(T).expect("a turn id")),
+            ),
+        ];
+        for (args, selector) in table {
+            assert_eq!(
+                intent(&args),
+                Intent::Fork {
+                    parent: branch(B),
+                    selector,
+                    label: None,
+                    boundary: false,
+                    force: false,
+                },
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fork_request_carries_its_parent_its_selector_and_the_flags_that_were_set() {
+        let request = |args: &[&str]| intent(args).request_line().expect("a bus command");
+
         assert_eq!(
-            intent(&["fork", "--branch", B, "--turn", T]),
-            Intent::Fork {
-                parent: branch(B),
-                point: ForkPoint::Turn(TurnId::from_str(T).expect("a turn id")),
-                label: None,
-                boundary: false,
-            }
+            request(&["fork", "--branch", B]),
+            format!("{{\"command\":\"fork\",\"parent\":\"{B}\"}}")
         );
+        assert_eq!(
+            request(&["fork", "--branch", B, "--at", E]),
+            format!("{{\"at\":\"{E}\",\"command\":\"fork\",\"parent\":\"{B}\"}}")
+        );
+        assert_eq!(
+            request(&["fork", "--branch", B, "--rewind", "4"]),
+            format!("{{\"command\":\"fork\",\"parent\":\"{B}\",\"rewind\":4}}")
+        );
+        assert_eq!(
+            request(&["fork", "--branch", B, "--turn", T]),
+            format!("{{\"command\":\"fork\",\"parent\":\"{B}\",\"turn\":\"{T}\"}}")
+        );
+        assert_eq!(
+            request(&["fork", "--branch", B, "--label", "experiment"]),
+            format!("{{\"command\":\"fork\",\"label\":\"experiment\",\"parent\":\"{B}\"}}")
+        );
+        assert_eq!(
+            request(&["fork", "--branch", B, "--boundary"]),
+            format!("{{\"boundary\":true,\"command\":\"fork\",\"parent\":\"{B}\"}}")
+        );
+        assert_eq!(
+            request(&["fork", "--branch", B, "--force"]),
+            format!("{{\"command\":\"fork\",\"force\":true,\"parent\":\"{B}\"}}")
+        );
+        assert_eq!(
+            request(&[
+                "fork",
+                "--branch",
+                B,
+                "--at",
+                E,
+                "--label",
+                "experiment",
+                "--boundary",
+                "--force",
+            ]),
+            format!(
+                "{{\"at\":\"{E}\",\"boundary\":true,\"command\":\"fork\",\"force\":true,\
+                 \"label\":\"experiment\",\"parent\":\"{B}\"}}"
+            )
+        );
+    }
+
+    #[test]
+    fn a_send_request_carries_its_branch_and_an_approval_carries_the_call() {
+        assert_eq!(
+            intent(&["send", "--branch", B, "hello"])
+                .request_line()
+                .expect("a bus command"),
+            format!("{{\"branch\":\"{B}\",\"command\":\"send\",\"text\":\"hello\"}}")
+        );
+        assert_eq!(
+            intent(&["approve", "0102030405060708:0"])
+                .request_line()
+                .expect("a bus command"),
+            r#"{"command":"approve","id":"0102030405060708:0"}"#
+        );
+        assert_eq!(
+            intent(&["deny", "0102030405060708:0"])
+                .request_line()
+                .expect("a bus command"),
+            r#"{"command":"deny","id":"0102030405060708:0"}"#
+        );
+        assert_eq!(
+            intent(&["deny", "--branch", B, "0102030405060708:0"])
+                .request_line()
+                .expect("a bus command"),
+            format!(r#"{{"branch":"{B}","command":"deny","id":"0102030405060708:0"}}"#)
+        );
+        assert_eq!(intent(&["status"]).request_line(), None);
     }
 
     #[test]
@@ -748,9 +931,10 @@ mod tests {
             intent(&["fork", "--branch", B, "--at", E, "--label=experiment"]),
             Intent::Fork {
                 parent: branch(B),
-                point: ForkPoint::At(event(E)),
+                selector: Selector::At(event(E)),
                 label: Some("experiment".to_string()),
                 boundary: false,
+                force: false,
             }
         );
     }
@@ -768,13 +952,14 @@ mod tests {
     }
 
     #[test]
-    fn a_fork_needs_exactly_one_selector() {
-        let missing = failure(&["fork", "--branch", B]);
-        assert_eq!(missing.exit.code(), 2);
-        assert!(missing.message.contains("--rewind") || missing.message.contains("required"));
-
+    fn a_fork_takes_at_most_one_selector() {
         let both = failure(&["fork", "--branch", B, "--at", E, "--rewind", "2"]);
         assert_eq!(both.exit.code(), 2);
+
+        let all = failure(&[
+            "fork", "--branch", B, "--at", E, "--rewind", "2", "--turn", T,
+        ]);
+        assert_eq!(all.exit.code(), 2);
     }
 
     #[test]
@@ -857,9 +1042,10 @@ mod tests {
             (
                 Intent::Fork {
                     parent: branch(B),
-                    point: ForkPoint::Rewind(1),
+                    selector: Selector::Rewind(1),
                     label: None,
                     boundary: false,
+                    force: false,
                 },
                 "fork",
                 true,
@@ -873,8 +1059,22 @@ mod tests {
                 "send",
                 true,
             ),
-            (Intent::Approve { id: String::new() }, "approve", true),
-            (Intent::Deny { id: String::new() }, "deny", true),
+            (
+                Intent::Approve {
+                    branch: None,
+                    id: String::new(),
+                },
+                "approve",
+                true,
+            ),
+            (
+                Intent::Deny {
+                    branch: None,
+                    id: String::new(),
+                },
+                "deny",
+                true,
+            ),
             (Intent::Archive { branch: branch(B) }, "archive", true),
             (
                 Intent::Warm {
