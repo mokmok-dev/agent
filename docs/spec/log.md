@@ -1,6 +1,7 @@
 # Directory Update Log
 
 ## 2026-10-27
+* **Update**: The mutation policy names the property tests that now exist: canonical encoding uniqueness, the fold's tip and depth, fold determinism, and the state a rejected event leaves behind.
 * **Update**: Recorded the delivered PRs in the PR plan, and the work each partial unit still owes. The page had not changed since unit 3 landed.
 * **Update**: Added the units that remain, each one saying which planned unit it continues, and corrected the plan's count from twelve to fourteen.
 

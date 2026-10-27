@@ -67,7 +67,7 @@ The gate is only reachable because of the architecture, so treat these as load-b
 | Layer | Kills mutants in |
 |---|---|
 | Unit tests per pure function, table driven per event type | fold, decisions, prompt rendering |
-| Property tests over generated event sequences | hash chain, depth monotonicity, fold determinism, idempotent fold |
+| Property tests over generated event sequences | canonical encoding uniqueness, the fold's tip and depth, fold determinism, the state a rejected event leaves behind |
 | Store integration tests on a temporary database | schema, triggers, commit, snapshots |
 | Fault injection, killing the process mid-transaction and corrupting the file | recovery, chain verification, refusal to start |
 | Golden replay fixture, a checked-in database plus its expected state hash | the whole fold pipeline |
