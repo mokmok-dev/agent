@@ -5,7 +5,6 @@ members = [
   "crates/core",
   "crates/model",
   "crates/prompt",
-  "crates/removeme",
   "crates/runtime",
   "crates/store",
   "crates/wire",
