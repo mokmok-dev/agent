@@ -103,6 +103,8 @@ pub struct Message {
     pub calls: Vec<AskedCall>,
     /// The call this message answers, when it is a tool's output.
     pub call: Option<CallId>,
+    /// The depth of the event that projected this message.
+    pub depth: u64,
     pub content: String,
     /// The token count the writer reported, when there was one to report.
     ///
@@ -174,6 +176,8 @@ pub struct Branch {
     pub fork: Option<EventId>,
     pub label: Option<String>,
     pub archived: bool,
+    /// The depth of this branch's `branch.created` event.
+    pub origin: u64,
     pub depth: u64,
     pub tip: Option<EventId>,
     pub messages: Vec<Message>,
@@ -238,6 +242,7 @@ impl Branch {
             fork,
             label,
             archived: false,
+            origin: event.depth,
             depth: event.depth,
             tip: Some(event.id()),
             messages: Vec::new(),
@@ -290,6 +295,44 @@ impl State {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.branches.is_empty()
+    }
+
+    /// The messages this branch inherited, followed by its own.
+    ///
+    /// A branch's transcript is what its ancestors wrote before its origin, and
+    /// then what it wrote itself. Inherited messages stay on the branch that
+    /// wrote them: a reader sees them without the log holding a second copy.
+    #[must_use]
+    pub fn transcript(
+        &self,
+        branch: BranchId,
+    ) -> Vec<&Message> {
+        let mut frames: Vec<(&Branch, Option<u64>)> = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut current = Some(branch);
+        let mut cut = None;
+        while let Some(id) = current {
+            // A branch names its parent without the fold proving the parent is
+            // not below it, so a cycle stops the walk instead of the process.
+            if !seen.insert(id) {
+                break;
+            }
+            let Some(facts) = self.branches.get(&id) else {
+                break;
+            };
+            frames.push((facts, cut));
+            cut = Some(facts.origin.saturating_sub(1));
+            current = facts.parent;
+        }
+        let mut messages = Vec::new();
+        for (facts, cut) in frames.iter().rev() {
+            let kept = facts
+                .messages
+                .iter()
+                .filter(|message| cut.is_none_or(|cut| message.depth <= cut));
+            messages.extend(kept);
+        }
+        messages
     }
 
     /// Applies one event.
@@ -361,6 +404,7 @@ impl State {
                 branch.messages.push(Message {
                     role: Role::User,
                     call: None,
+                    depth: event.depth,
                     calls: Vec::new(),
                     content: input.clone(),
                     tokens: None,
@@ -427,6 +471,7 @@ impl State {
                     branch.messages.push(Message {
                         role: Role::Assistant,
                         call: None,
+                        depth: event.depth,
                         calls: calls
                             .iter()
                             .enumerate()
@@ -488,6 +533,7 @@ impl State {
                 branch.messages.push(Message {
                     role: *role,
                     call: None,
+                    depth: event.depth,
                     calls: Vec::new(),
                     content: content.clone(),
                     tokens: Some(*tokens),
@@ -548,6 +594,7 @@ impl State {
                 branch.messages.push(Message {
                     role: Role::Tool,
                     call: Some(*call),
+                    depth: event.depth,
                     calls: Vec::new(),
                     content: output.clone(),
                     tokens: None,
@@ -579,10 +626,12 @@ mod tests {
     use crate::time::Timestamp;
     use alloc::collections::BTreeMap;
     use alloc::string::{String, ToString};
+    use alloc::vec::Vec;
 
     const BRANCH: [u8; 8] = [1; 8];
     const OTHER: [u8; 8] = [2; 8];
     const TURN: [u8; 8] = [3; 8];
+    const LEAF: [u8; 8] = [4; 8];
 
     struct Chain {
         branch: BranchId,
@@ -640,6 +689,14 @@ mod tests {
         }
     }
 
+    fn appended(content: &str) -> EventKind {
+        EventKind::MessageAppended {
+            content: content.to_string(),
+            role: Role::Assistant,
+            tokens: 1,
+        }
+    }
+
     fn created(chain: &mut Chain) -> Event {
         chain.push(EventKind::BranchCreated {
             parent: None,
@@ -653,6 +710,17 @@ mod tests {
         let mut state = State::default();
         state.apply(&created(&mut chain)).expect("creates");
         (chain, state)
+    }
+
+    fn transcript(
+        state: &State,
+        branch: BranchId,
+    ) -> Vec<String> {
+        state
+            .transcript(branch)
+            .into_iter()
+            .map(|message| message.content.clone())
+            .collect()
     }
 
     #[test]
@@ -669,6 +737,7 @@ mod tests {
             .expect("creates");
         let branch = state.branch(BranchId::from_bytes(BRANCH)).expect("exists");
         assert_eq!(branch.depth, 4);
+        assert_eq!(branch.origin, 4);
         assert_eq!(branch.parent, Some(BranchId::from_bytes(OTHER)));
         assert_eq!(branch.fork, Some(EventId::from_bytes([9; 32])));
         assert_eq!(branch.label.as_deref(), Some("retry"));
@@ -1562,6 +1631,205 @@ mod tests {
         assert!(
             branch.pending_model.is_some(),
             "the model has not answered the result yet"
+        );
+    }
+
+    #[test]
+    fn a_root_branch_transcript_is_its_own_messages() {
+        let (mut chain, mut state) = with_branch();
+        let requested = chain.push(EventKind::TurnRequested {
+            input: "hello".to_string(),
+            turn: turn(),
+        });
+        state.apply(&requested).expect("folds");
+        let written = chain.push(appended("hi"));
+        state.apply(&written).expect("folds");
+        assert_eq!(
+            transcript(&state, BranchId::from_bytes(BRANCH)),
+            ["hello", "hi"]
+        );
+    }
+
+    #[test]
+    fn a_one_level_fork_excludes_messages_at_or_after_its_origin() {
+        let parent_id = BranchId::from_bytes(BRANCH);
+        let child_id = BranchId::from_bytes(OTHER);
+        let mut parent = Chain::new(parent_id);
+        let mut state = State::default();
+        state.apply(&created(&mut parent)).expect("creates");
+        let requested = parent.push(EventKind::TurnRequested {
+            input: "first".to_string(),
+            turn: turn(),
+        });
+        state.apply(&requested).expect("folds");
+        let kept = parent.push(appended("kept"));
+        state.apply(&kept).expect("folds");
+        let excluded = parent.push(appended("excluded"));
+        state.apply(&excluded).expect("folds");
+
+        let mut child = Chain::new(child_id);
+        child.depth = 3;
+        child.prev = Some(kept.id());
+        let created_child = child.push(EventKind::BranchCreated {
+            parent: Some(parent_id),
+            fork: Some(kept.id()),
+            label: None,
+        });
+        state.apply(&created_child).expect("creates");
+        let own = child.push(appended("own"));
+        state.apply(&own).expect("folds");
+
+        assert_eq!(transcript(&state, child_id), ["first", "kept", "own"]);
+        assert_eq!(
+            transcript(&state, parent_id),
+            ["first", "kept", "excluded"],
+            "the parent's transcript does not change"
+        );
+    }
+
+    #[test]
+    fn a_two_level_fork_inherits_the_prefix_above_both_origins() {
+        let root_id = BranchId::from_bytes(BRANCH);
+        let middle_id = BranchId::from_bytes(OTHER);
+        let leaf_id = BranchId::from_bytes(LEAF);
+        let mut root = Chain::new(root_id);
+        let mut state = State::default();
+        state.apply(&created(&mut root)).expect("creates");
+        let root_a = root.push(appended("root-a"));
+        state.apply(&root_a).expect("folds");
+        let root_b = root.push(appended("root-b"));
+        state.apply(&root_b).expect("folds");
+
+        let mut middle = Chain::new(middle_id);
+        middle.depth = 3;
+        middle.prev = Some(root_b.id());
+        let created_middle = middle.push(EventKind::BranchCreated {
+            parent: Some(root_id),
+            fork: Some(root_b.id()),
+            label: None,
+        });
+        state.apply(&created_middle).expect("creates");
+        let middle_message = middle.push(appended("middle"));
+        state.apply(&middle_message).expect("folds");
+
+        let mut leaf = Chain::new(leaf_id);
+        leaf.depth = 5;
+        leaf.prev = Some(middle_message.id());
+        let created_leaf = leaf.push(EventKind::BranchCreated {
+            parent: Some(middle_id),
+            fork: Some(middle_message.id()),
+            label: None,
+        });
+        state.apply(&created_leaf).expect("creates");
+        let leaf_message = leaf.push(appended("leaf"));
+        state.apply(&leaf_message).expect("folds");
+
+        assert_eq!(
+            transcript(&state, middle_id),
+            ["root-a", "root-b", "middle"]
+        );
+        assert_eq!(
+            transcript(&state, leaf_id),
+            ["root-a", "root-b", "middle", "leaf"]
+        );
+    }
+
+    #[test]
+    fn an_unknown_branch_has_an_empty_transcript() {
+        let (_chain, state) = with_branch();
+        assert!(state.transcript(BranchId::from_bytes(OTHER)).is_empty());
+        assert!(
+            State::default()
+                .transcript(BranchId::from_bytes(OTHER))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_parent_cycle_stops_the_walk() {
+        let first_id = BranchId::from_bytes(BRANCH);
+        let second_id = BranchId::from_bytes(OTHER);
+        let mut state = State::default();
+        // Creation checks neither that the parent exists nor that it is above,
+        // so two branches can name each other.
+        let mut first = Chain::new(first_id);
+        first.depth = 2;
+        state
+            .apply(&first.push(EventKind::BranchCreated {
+                parent: Some(second_id),
+                fork: None,
+                label: None,
+            }))
+            .expect("creates");
+        let mut second = Chain::new(second_id);
+        state
+            .apply(&second.push(EventKind::BranchCreated {
+                parent: Some(first_id),
+                fork: None,
+                label: None,
+            }))
+            .expect("creates");
+        let ancestor = second.push(appended("ancestor"));
+        state.apply(&ancestor).expect("folds");
+
+        assert_eq!(transcript(&state, first_id), ["ancestor"]);
+    }
+
+    #[test]
+    fn each_message_records_the_depth_of_the_event_that_projected_it() {
+        let (mut chain, mut state) = with_branch();
+        let requested = chain.push(EventKind::TurnRequested {
+            input: "hello".to_string(),
+            turn: turn(),
+        });
+        state.apply(&requested).expect("folds");
+        let responded = chain.push(EventKind::ModelResponded {
+            calls: alloc::vec![ToolRequest {
+                args: "{}".to_string(),
+                tool: "clock".to_string(),
+            }],
+            finish: FinishReason::ToolCalls,
+            input_tokens: 1,
+            output: String::new(),
+            output_tokens: 0,
+            request: "r".to_string(),
+            turn: turn(),
+        });
+        state.apply(&responded).expect("folds");
+        let intent = chain.push(EventKind::ToolIntent {
+            args: "{}".to_string(),
+            call: call(),
+            key: "k".to_string(),
+            tool: "clock".to_string(),
+            env: alloc::vec::Vec::new(),
+        });
+        state.apply(&intent).expect("folds");
+        let result = chain.push(EventKind::ToolResult {
+            call: call(),
+            duration_ms: 1,
+            output: "noon".to_string(),
+            status: 0,
+            truncated: false,
+        });
+        state.apply(&result).expect("folds");
+        let written = chain.push(appended("done"));
+        state.apply(&written).expect("folds");
+
+        let depths = state
+            .branch(BranchId::from_bytes(BRANCH))
+            .expect("exists")
+            .messages
+            .iter()
+            .map(|message| (message.depth, message.role))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            depths,
+            [
+                (1, Role::User),
+                (2, Role::Assistant),
+                (4, Role::Tool),
+                (5, Role::Assistant),
+            ]
         );
     }
 }
