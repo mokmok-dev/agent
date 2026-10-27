@@ -175,13 +175,13 @@ enum SpecCommand {
 #[derive(Debug, Args)]
 #[command(group(ArgGroup::new("point").required(false).multiple(false)))]
 struct Fork {
-    /// The branch the new one starts from.
+    /// The branch whose path the new one starts from.
     #[arg(long)]
     branch: String,
     /// The event the new branch starts at. Defaults to the tip.
     #[arg(long, group = "point")]
     at: Option<String>,
-    /// How many events back from the tip to start at.
+    /// How many events back from the tip of the path to start at.
     #[arg(long, group = "point")]
     rewind: Option<u32>,
     /// The turn the new branch starts at.
@@ -190,7 +190,7 @@ struct Fork {
     /// A human label for the new branch.
     #[arg(long)]
     label: Option<String>,
-    /// Snap the fork to the nearest prompt segment edge.
+    /// Move the fork back to the last prompt segment edge at or before the point.
     #[arg(long)]
     boundary: bool,
     /// Fork even when the point lies inside an unresolved tool call.
@@ -1030,6 +1030,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one table keeps every command's name and waiting flag visible in one place"
+    )]
     fn every_command_names_itself_and_what_it_needs() {
         let table = [
             (Intent::Status, "status", true),
