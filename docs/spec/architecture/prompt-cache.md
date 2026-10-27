@@ -113,7 +113,7 @@ The fork point choice trades two things. Forking further back shares less but di
 
 A fork at a message boundary shares a prefix that ends exactly at a segment edge, which is what the chain records. A fork inside a message is still allowed, but the shared prefix ends mid-segment, so the chain entry is stale and the server has to prefill from the previous boundary.
 
-`--boundary` snaps a fork to the nearest segment edge and reports the adjustment. The default is on.
+`--boundary` moves a fork back to the last segment edge at or before the point. The default is off, so the point the operator names is the point the log records; `--boundary` is the request to trade that for a segment edge. The inherited transcript is the same either way, because every message arrives whole in one event.
 
 # What breaks a hit
 

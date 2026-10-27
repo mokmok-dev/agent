@@ -18,7 +18,7 @@ graph LR
   a2 -->|"fork"| b1["b1<br/>depth 3"] --> b2["b2"] --> b3["b3<br/>branch tip"]
 ```
 
-`b1` has `prev = a2`, `branch = b-7f3a2c`, and `depth = 3`. Branch `main` is unchanged by the fork. No event is copied, no file is rewritten, and the fork costs one append of a few hundred bytes.
+`b1` has `prev = a2`, `branch = b-7f3a2c4d5e6f7a8b`, and `depth = 3`. Branch `main` is unchanged by the fork. No event is copied, no file is rewritten, and the fork costs one append of a few hundred bytes.
 
 # Fork is append-only
 
@@ -28,9 +28,13 @@ The parent branch receives no event. That is deliberate. A fork that wrote to it
 
 The branch tree is therefore a global projection. Every `branch.created` event in the store contributes an edge, so the tree is rebuilt from a scan, and a single branch's reader sees only its own path.
 
+A branch's transcript is its path, not its own events. The messages a child inherited stay on the branches that wrote them: the fold gives every message the depth of the event that projected it, and a reader takes the ancestors' messages up to the child's `branch.created` depth, then the child's own. Nothing is copied into the child, so a fork's cost does not grow with the history behind it.
+
 # Branch ids
 
-A branch id is `b-` followed by 12 lowercase base32 characters produced by the `Entropy` port. The port makes ids deterministic in tests.
+A branch id is `b-` followed by 16 lowercase hex characters, derived from the process that forked, a counter, the fork event, and the instant the append was accepted. The derivation is a pure function, so tests pin it, and a collision is caught when the store sees a branch that already exists rather than silently merging two histories.
+
+Shortening the id to the 12 base32 characters a first draft named would rewrite the `branch` text column of every stored event, so it lands with a store migration, not with the fork command.
 
 The branch id is stable, short, and independent of the label. A rename appends `dev.mokmok.agent.branch.labeled` on the branch, so the history of names is visible and the id never changes, because events reference it.
 
@@ -44,13 +48,13 @@ The branch id is stable, short, and independent of the label. A rename appends `
 | `--rewind <n>` | Fork from the tip minus `n` events. |
 | `--turn <turn-id>` | Fork from the start of that turn, so the turn runs again. |
 
-Default is the tip, which produces a branch with no events of its own. Default fork point for a retry is the start of the last turn.
+With none of the three, the fork is at the tip, which produces a branch with no events of its own. A retry that re-runs a turn names `--turn`, which points at the event before that turn's request.
 
 Three guards apply.
 
 1. If the fork point is inside a turn, the new branch inherits messages only up to the last completed one. A partially streamed assistant message is not part of the prompt.
 2. If the fork point has an intent event with no matching result, the effect may or may not have happened. The command warns and requires `--force`. The warning names the intent so the operator can check the effect.
-3. If the fork point sits inside a prompt segment, the fork still works, but the cache advantage shrinks. See [prompt cache](prompt-cache.md) for why, and `--boundary` to snap to the nearest segment boundary.
+3. If the fork point sits inside a prompt segment, the fork still works, but the cache advantage shrinks. See [prompt cache](prompt-cache.md) for why, and `--boundary` to move the point back to the last segment boundary at or before it.
 
 # Why branches never merge
 

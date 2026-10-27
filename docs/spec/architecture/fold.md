@@ -14,14 +14,16 @@ The fold turns an ordered event slice into state. It keeps facts, not control fl
 
 | Fact | Shape | Written by |
 |---|---|---|
-| Transcript | Role, content, token count, and the turn that caused it, in order | `message.appended`, and the asking projected from `turn.requested` |
+| Transcript | Role, content, token count, the turn that caused it, and the depth of the event that projected it, in order | `message.appended`, and the asking projected from `turn.requested` |
 | Turns | Turn id and the input that requested it | `turn.requested` |
 | Unresolved calls | Call id and tool name, until a result or failure arrives | `tool.intent`, cleared by `tool.result` and `tool.failed` |
 | Cache totals | Cached and uncached tokens, and how many observations were reported | `model.cache.observed` |
 | Failures | A count of model failures on the branch | `model.failed` |
-| Branch facts | Parent, fork point, label, archived flag, depth, tip | The branch events |
+| Branch facts | Parent, fork point, label, archived flag, depth of the creation event, tip | The branch events |
 
 The branch tree is one map from branch id to these facts. A branch exists only after its `branch.created` event, so an event on a branch that was never created is a contradiction rather than an empty start.
+
+A branch's transcript is its path through the DAG, not only the messages its own events projected. Each message carries the depth of the event that projected it, and each branch carries the depth of its `branch.created`; a reader takes the ancestors' messages up to the child's creation depth, then the child's own. The fold does not copy inherited messages into the child, so two branches that fork from the same point each hold only what they wrote, and the transcript is assembled by the reader that wants it. Walking the path stops if two `branch.created` events name each other; the fold does not prove that a parent is an ancestor, and a reader must not hang on a corrupt log.
 
 # What the fold refuses
 
@@ -48,6 +50,6 @@ An event type this build does not understand is not a contradiction. It folds to
 
 # Why it is this small
 
-Every field here is either shown to a person or fed to a prompt. A field that is neither is a cache of a decision, and a cache of a decision is how state and history start to disagree.
+Every field here is either shown to a person, fed to a prompt, or needed to select the prefix that is fed to a prompt. The two depths are the third kind: they are not rendered, but without them a forked branch cannot tell where its path ends and its own messages begin. A field that is none of the three is a cache of a decision, and a cache of a decision is how state and history start to disagree.
 
 The cost is that a surface asking a question nobody anticipated pays a fold rather than a lookup. That is the trade recorded in [decisions](decisions.md), and snapshots are what keep the cost bounded as history grows.

@@ -46,3 +46,5 @@
 * **Update**: A failure records what it said about itself, bounded and without the request, so `transport` is no longer the end of the diagnosis.
 * **Update**: A tool's process sees the variable names its manifest declares and nothing else, and the intent records the names it was given.
 * **Update**: A tool's bounds are syscalls its own process makes, through a launcher this package ships, so they hold on a host that will not give up namespaces. `[sandbox] none = true` is the one way to say otherwise.
+* **Update**: A fork appends one `branch.created` whose predecessor is an event on the parent branch, and the child reads its inherited transcript from that path instead of copying it. The store learned to anchor a branch's first event, and verification checks the edge and the payload that names it.
+* **Update**: The command socket answers a fork after the append rather than when the line is read, because the new branch id and a policy refusal are results of the append. `send` now carries the branch it belongs to, so a turn on a forked branch lands on that branch.
