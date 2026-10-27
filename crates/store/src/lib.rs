@@ -75,6 +75,8 @@ pub enum StoreError {
     },
     /// The store already has a genesis, so a second root is refused.
     SecondGenesis(BranchId),
+    /// A creation landed on a branch that already exists.
+    BranchExists(BranchId),
     /// A branch's first event names an anchor that is not a stored event.
     UnknownPredecessor { branch: BranchId, prev: EventId },
     /// A stored event no longer matches its own identifier.
@@ -133,6 +135,9 @@ impl fmt::Display for StoreError {
                     formatter,
                     "branch {branch}: the store already has a genesis"
                 )
+            },
+            Self::BranchExists(branch) => {
+                write!(formatter, "branch {branch}: the branch already exists")
             },
             Self::UnknownPredecessor { branch, prev } => {
                 write!(
@@ -324,9 +329,10 @@ impl Store {
     /// # Errors
     ///
     /// Returns [`StoreError::Chain`] when a body no longer hashes to its id,
-    /// when a branch's predecessor or depth does not follow its own row, when
-    /// the store does not have exactly one genesis at depth zero, or when a
-    /// branch's fork anchor does not resolve one depth past its event.
+    /// when a branch's predecessor or depth does not follow its own row, when a
+    /// non-empty store does not have exactly one genesis at depth zero, or when
+    /// a branch's fork anchor does not resolve one depth past its event or its
+    /// payload names a different parent or fork event.
     pub fn verify(&self) -> Result<VerifyReport, StoreError> {
         let (report, anchors) = self.scan()?;
         verify_anchors(&self.connection, &anchors)?;
@@ -531,6 +537,12 @@ fn check_position(
     };
 
     let tip = EventId::from_str(&id_text).map_err(|_| StoreError::Identifier(id_text))?;
+    // A creation is the first row of a branch and only the first. Allowing one
+    // past a tip would let a colliding id graft a branch onto an existing one
+    // through an append that verifies as an ordinary chain link.
+    if matches!(event.kind, EventKind::BranchCreated { .. }) {
+        return Err(StoreError::BranchExists(event.branch));
+    }
     if event.prev != Some(tip) {
         return Err(StoreError::PrevMismatch {
             branch: event.branch,

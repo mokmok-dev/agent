@@ -192,6 +192,21 @@ fn a_second_genesis_is_refused() {
 }
 
 #[test]
+fn a_creation_on_an_existing_branch_is_refused() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    chain(&mut store, branch(1), 2);
+    let tip = store.bodies(branch(1)).expect("reads")[1].0;
+    let colliding = fork_event(branch(1), 2, tip, branch(1), "collision");
+    let error = store.append(&colliding).expect_err("refuses");
+    match error {
+        StoreError::BranchExists(at) => assert_eq!(at, branch(1)),
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(store.bodies(branch(1)).expect("reads").len(), 2);
+}
+
+#[test]
 fn a_first_event_with_an_unknown_predecessor_is_refused() {
     let scratch = Scratch::new();
     let mut store = Store::open(&scratch.path).expect("opens");
