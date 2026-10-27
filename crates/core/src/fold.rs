@@ -384,9 +384,6 @@ impl State {
                 found: event.depth,
             });
         }
-        branch.depth = event.depth;
-        branch.tip = Some(event.id());
-
         match &event.kind {
             EventKind::BranchLabeled { label } => branch.label = Some(label.clone()),
             EventKind::BranchArchived { .. } => branch.archived = true,
@@ -517,8 +514,10 @@ impl State {
                 uncached,
                 ..
             } => {
-                branch.cache.cached += cached;
-                branch.cache.uncached += uncached;
+                // Saturating, like the failure count: a pure fold must not panic
+                // on a number a log can carry.
+                branch.cache.cached = branch.cache.cached.saturating_add(*cached);
+                branch.cache.uncached = branch.cache.uncached.saturating_add(*uncached);
                 if *reported {
                     branch.cache.reported += 1;
                 } else {
@@ -578,9 +577,10 @@ impl State {
                 branch.pending_command = None;
             },
             EventKind::ToolIntent { call, tool, .. } => {
-                if branch.pending.insert(*call, tool.clone()).is_some() {
+                if branch.pending.contains_key(call) {
                     return Err(FoldError::RepeatedCall(*call));
                 }
+                branch.pending.insert(*call, tool.clone());
                 if let Some(asked) = branch.asked.get_mut(&call.turn) {
                     asked.filed = asked.filed.max(call.step + 1);
                 }
@@ -614,6 +614,9 @@ impl State {
             | EventKind::InstanceClockSkew { .. }
             | EventKind::Unknown { .. } => {},
         }
+        // Moving this above the match would let a rejected event advance the tip.
+        branch.depth = event.depth;
+        branch.tip = Some(event.id());
         Ok(())
     }
 }
@@ -626,7 +629,9 @@ mod tests {
     use crate::time::Timestamp;
     use alloc::collections::BTreeMap;
     use alloc::string::{String, ToString};
+    use alloc::vec;
     use alloc::vec::Vec;
+    use proptest::prelude::*;
 
     const BRANCH: [u8; 8] = [1; 8];
     const OTHER: [u8; 8] = [2; 8];
@@ -872,6 +877,26 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_event_leaves_the_state_it_started_with() {
+        let (mut chain, mut state) = with_branch();
+        let first = chain.push(EventKind::TurnRequested {
+            input: "hello".to_string(),
+            turn: turn(),
+        });
+        state.apply(&first).expect("folds");
+        let before = state.clone();
+        let duplicate = chain.push(EventKind::TurnRequested {
+            input: "again".to_string(),
+            turn: turn(),
+        });
+        assert_eq!(
+            state.apply(&duplicate),
+            Err(FoldError::DuplicateTurn(turn()))
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
     fn a_model_event_for_an_unknown_turn_is_an_error() {
         let (mut chain, mut state) = with_branch();
         let unknown = chain.push(EventKind::ModelRequested {
@@ -1058,6 +1083,28 @@ mod tests {
         assert_eq!(cache.uncached, 7);
         assert_eq!(cache.reported, 1);
         assert_eq!(cache.unreported, 1);
+    }
+
+    #[test]
+    fn cache_totals_stop_at_the_largest_count() {
+        let (mut chain, mut state) = with_branch();
+        for (cached, uncached) in [(u64::MAX, u64::MAX), (1, 1)] {
+            let observed = chain.push(EventKind::ModelCacheObserved {
+                cached,
+                prefix: PrefixHash::from_bytes([0; 32]),
+                reported: true,
+                turn: turn(),
+                uncached,
+            });
+            state.apply(&observed).expect("folds");
+        }
+        let cache = state
+            .branch(BranchId::from_bytes(BRANCH))
+            .expect("exists")
+            .cache;
+        assert_eq!(cache.cached, u64::MAX);
+        assert_eq!(cache.uncached, u64::MAX);
+        assert_eq!(cache.reported, 2);
     }
 
     #[test]
@@ -1835,5 +1882,452 @@ mod tests {
                 (5, Role::Assistant),
             ]
         );
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Append {
+            content: String,
+            role: Role,
+            tokens: u64,
+        },
+        Turn {
+            input: String,
+        },
+        Respond {
+            output: String,
+            input_tokens: u64,
+            output_tokens: u64,
+        },
+        Ask {
+            calls: Vec<ToolRequest>,
+        },
+        Intent {
+            args: String,
+            key: String,
+            tool: String,
+        },
+        Result {
+            duration_ms: u64,
+            output: String,
+            status: i32,
+            truncated: bool,
+        },
+        Fail {
+            class: ErrorClass,
+            may_have_happened: bool,
+        },
+        Cache {
+            cached: u64,
+            uncached: u64,
+            reported: bool,
+        },
+        ModelFailed {
+            class: ErrorClass,
+            retryable: bool,
+        },
+        Clock {
+            delta_secs: i64,
+        },
+        Label {
+            label: String,
+        },
+        Archive {
+            reason: Option<String>,
+        },
+        Command {
+            command: String,
+            text: Option<String>,
+        },
+    }
+
+    fn role() -> impl Strategy<Value = Role> {
+        prop_oneof![
+            Just(Role::System),
+            Just(Role::User),
+            Just(Role::Assistant),
+            Just(Role::Tool),
+        ]
+    }
+
+    fn class() -> impl Strategy<Value = ErrorClass> {
+        prop_oneof![
+            Just(ErrorClass::Transport),
+            Just(ErrorClass::Timeout),
+            Just(ErrorClass::RateLimited),
+            Just(ErrorClass::ServerError),
+            Just(ErrorClass::InvalidRequest),
+            Just(ErrorClass::ContextLength),
+            Just(ErrorClass::ContentFilter),
+            Just(ErrorClass::Cancelled),
+            Just(ErrorClass::Unknown),
+        ]
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            (any::<String>(), role(), any::<u64>()).prop_map(|(content, role, tokens)| {
+                Op::Append {
+                    content,
+                    role,
+                    tokens,
+                }
+            }),
+            any::<String>().prop_map(|input| Op::Turn { input }),
+            (any::<String>(), any::<u64>(), any::<u64>()).prop_map(
+                |(output, input_tokens, output_tokens)| {
+                    Op::Respond {
+                        output,
+                        input_tokens,
+                        output_tokens,
+                    }
+                }
+            ),
+            prop::collection::vec((any::<String>(), any::<String>()), 1..4).prop_map(|parts| {
+                Op::Ask {
+                    calls: parts
+                        .into_iter()
+                        .map(|(args, tool)| ToolRequest { args, tool })
+                        .collect(),
+                }
+            }),
+            (any::<String>(), any::<String>(), any::<String>())
+                .prop_map(|(args, key, tool)| { Op::Intent { args, key, tool } }),
+            (any::<u64>(), any::<String>(), any::<i32>(), any::<bool>(),).prop_map(
+                |(duration_ms, output, status, truncated)| {
+                    Op::Result {
+                        duration_ms,
+                        output,
+                        status,
+                        truncated,
+                    }
+                }
+            ),
+            (class(), any::<bool>()).prop_map(|(class, may_have_happened)| Op::Fail {
+                class,
+                may_have_happened,
+            }),
+            (any::<u64>(), any::<u64>(), any::<bool>()).prop_map(|(cached, uncached, reported)| {
+                Op::Cache {
+                    cached,
+                    uncached,
+                    reported,
+                }
+            }),
+            (class(), any::<bool>())
+                .prop_map(|(class, retryable)| Op::ModelFailed { class, retryable }),
+            any::<i64>().prop_map(|delta_secs| Op::Clock { delta_secs }),
+            any::<String>().prop_map(|label| Op::Label { label }),
+            prop::option::of(any::<String>()).prop_map(|reason| Op::Archive { reason }),
+            (any::<String>(), prop::option::of(any::<String>()))
+                .prop_map(|(command, text)| Op::Command { command, text }),
+        ]
+    }
+
+    const GENERATED_TURN: [u8; 8] = [0x5a; 8];
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one flat match over the operations keeps each event's guard next to its construction"
+    )]
+    fn sequence(operations: Vec<Op>) -> Vec<Event> {
+        let mut chain = Chain::new(BranchId::from_bytes(BRANCH));
+        let first = TurnId::from_bytes(GENERATED_TURN);
+        let mut events = alloc::vec![
+            created(&mut chain),
+            chain.push(EventKind::TurnRequested {
+                input: String::from("first"),
+                turn: first,
+            }),
+        ];
+        let mut turns = alloc::vec![first];
+        let mut asked: Vec<CallId> = Vec::new();
+        let mut pending: Vec<CallId> = Vec::new();
+        let mut next_turn = 0_u64;
+        let mut next_step = 0_u32;
+        for operation in operations {
+            let turn = turns
+                .last()
+                .copied()
+                .expect("the sequence always requests its first turn");
+            match operation {
+                Op::Append {
+                    content,
+                    role,
+                    tokens,
+                } => {
+                    events.push(chain.push(EventKind::MessageAppended {
+                        content,
+                        role,
+                        tokens,
+                    }));
+                },
+                Op::Turn { input } => {
+                    next_turn += 1;
+                    let turn = TurnId::from_bytes(next_turn.to_le_bytes());
+                    turns.push(turn);
+                    events.push(chain.push(EventKind::TurnRequested { input, turn }));
+                },
+                Op::Respond {
+                    output,
+                    input_tokens,
+                    output_tokens,
+                } => {
+                    events.push(chain.push(EventKind::ModelResponded {
+                        calls: Vec::new(),
+                        finish: FinishReason::Stop,
+                        input_tokens,
+                        output,
+                        output_tokens,
+                        request: String::from("request"),
+                        turn,
+                    }));
+                },
+                Op::Ask { calls } => {
+                    for _ in &calls {
+                        next_step += 1;
+                        asked.push(CallId {
+                            turn,
+                            step: next_step,
+                        });
+                    }
+                    events.push(chain.push(EventKind::ModelResponded {
+                        calls,
+                        finish: FinishReason::ToolCalls,
+                        input_tokens: 1,
+                        output: String::from("calling"),
+                        output_tokens: 1,
+                        request: String::from("request"),
+                        turn,
+                    }));
+                },
+                Op::Intent { args, key, tool } => {
+                    let open = asked.iter().position(|call| !pending.contains(call));
+                    if let Some(index) = open {
+                        let call = asked.remove(index);
+                        pending.push(call);
+                        events.push(chain.push(EventKind::ToolIntent {
+                            args,
+                            call,
+                            env: Vec::new(),
+                            key,
+                            tool,
+                        }));
+                    } else {
+                        events.push(chain.push(appended("fallback")));
+                    }
+                },
+                Op::Result {
+                    duration_ms,
+                    output,
+                    status,
+                    truncated,
+                } => {
+                    if let Some(call) = pending.pop() {
+                        events.push(chain.push(EventKind::ToolResult {
+                            call,
+                            duration_ms,
+                            output,
+                            status,
+                            truncated,
+                        }));
+                    } else {
+                        events.push(chain.push(appended("fallback")));
+                    }
+                },
+                Op::Fail {
+                    class,
+                    may_have_happened,
+                } => {
+                    if let Some(call) = pending.pop() {
+                        events.push(chain.push(EventKind::ToolFailed {
+                            call,
+                            class,
+                            may_have_happened,
+                        }));
+                    } else {
+                        events.push(chain.push(appended("fallback")));
+                    }
+                },
+                Op::Cache {
+                    cached,
+                    uncached,
+                    reported,
+                } => {
+                    events.push(chain.push(EventKind::ModelCacheObserved {
+                        cached,
+                        prefix: PrefixHash::from_bytes([0x11; 32]),
+                        reported,
+                        turn,
+                        uncached,
+                    }));
+                },
+                Op::ModelFailed { class, retryable } => {
+                    events.push(chain.push(EventKind::ModelFailed {
+                        attempt: 1,
+                        class,
+                        detail: None,
+                        retryable,
+                        turn,
+                    }));
+                },
+                Op::Clock { delta_secs } => {
+                    events.push(chain.push(EventKind::InstanceClockSkew { delta_secs }));
+                },
+                Op::Label { label } => {
+                    events.push(chain.push(EventKind::BranchLabeled { label }));
+                },
+                Op::Archive { reason } => {
+                    events.push(chain.push(EventKind::BranchArchived { reason }));
+                },
+                Op::Command { command, text } => {
+                    events.push(chain.push(EventKind::CommandReceived {
+                        command,
+                        command_id: String::from("generated"),
+                        surface: String::from("test"),
+                        text,
+                    }));
+                },
+            }
+        }
+        events
+    }
+
+    proptest! {
+        #[test]
+        fn a_generated_sequence_folds_to_the_same_state_twice(
+            operations in prop::collection::vec(op(), 0..12),
+        ) {
+            let events = sequence(operations);
+            let mut first = State::default();
+            let mut second = State::default();
+            for event in &events {
+                first.apply(event).expect("a generated sequence folds");
+                second.apply(event).expect("a generated sequence folds");
+            }
+            prop_assert_eq!(first, second);
+        }
+
+        #[test]
+        fn a_generated_sequence_ends_at_the_event_it_folded_last(
+            operations in prop::collection::vec(op(), 0..12),
+        ) {
+            let events = sequence(operations);
+            let mut state = State::default();
+            for event in &events {
+                state.apply(event).expect("a generated sequence folds");
+            }
+            let branch = state
+                .branch(BranchId::from_bytes(BRANCH))
+                .expect("the created branch is in the state");
+            let last = events.last().expect("the sequence starts with a creation");
+            prop_assert_eq!(branch.depth, last.depth);
+            prop_assert_eq!(branch.tip, Some(last.id()));
+            let depths: Vec<u64> = state
+                .transcript(BranchId::from_bytes(BRANCH))
+                .into_iter()
+                .map(|message| message.depth)
+                .collect();
+            prop_assert!(depths.windows(2).all(|pair| pair[0] <= pair[1]));
+        }
+
+        #[test]
+        fn a_rejected_event_leaves_the_state_untouched(
+            operations in prop::collection::vec(op(), 0..12),
+            contradiction in 0..5_u8,
+        ) {
+            let events = sequence(operations);
+            let mut state = State::default();
+            for event in &events {
+                state.apply(event).expect("a generated sequence folds");
+            }
+            let last = events.last().expect("the sequence starts with a creation");
+            let after = |kind: EventKind, depth: u64, prev: EventId| Event {
+                depth,
+                prev: Some(prev),
+                kind,
+                ..last.clone()
+            };
+            let (rejected, before) = match contradiction {
+                0 => (
+                    after(
+                        EventKind::TurnRequested {
+                            input: String::from("again"),
+                            turn: TurnId::from_bytes(GENERATED_TURN),
+                        },
+                        last.depth + 1,
+                        last.id(),
+                    ),
+                    state.clone(),
+                ),
+                1 => (
+                    after(
+                        EventKind::ToolResult {
+                            call: CallId {
+                                turn: TurnId::from_bytes([0xee; 8]),
+                                step: u32::MAX,
+                            },
+                            duration_ms: 0,
+                            output: String::new(),
+                            status: 0,
+                            truncated: false,
+                        },
+                        last.depth + 1,
+                        last.id(),
+                    ),
+                    state.clone(),
+                ),
+                2 => {
+                    let mut wrong = *last.id().as_bytes();
+                    wrong[0] ^= 0xff;
+                    (
+                        Event {
+                            depth: last.depth + 1,
+                            prev: Some(EventId::from_bytes(wrong)),
+                            kind: appended("wrong predecessor"),
+                            ..last.clone()
+                        },
+                        state.clone(),
+                    )
+                },
+                3 => (
+                    after(appended("skipped a depth"), last.depth + 2, last.id()),
+                    state.clone(),
+                ),
+                _ => {
+                    let call = CallId {
+                        turn: TurnId::from_bytes(GENERATED_TURN),
+                        step: 1_000_000,
+                    };
+                    let filed = after(
+                        EventKind::ToolIntent {
+                            args: String::new(),
+                            call,
+                            env: Vec::new(),
+                            key: String::new(),
+                            tool: String::from("first"),
+                        },
+                        last.depth + 1,
+                        last.id(),
+                    );
+                    state.apply(&filed).expect("the first intent folds");
+                    let before = state.clone();
+                    let repeated = after(
+                        EventKind::ToolIntent {
+                            args: String::new(),
+                            call,
+                            env: Vec::new(),
+                            key: String::new(),
+                            tool: String::from("second"),
+                        },
+                        filed.depth + 1,
+                        filed.id(),
+                    );
+                    (repeated, before)
+                },
+            };
+            prop_assert!(state.apply(&rejected).is_err());
+            prop_assert_eq!(state, before);
+        }
     }
 }

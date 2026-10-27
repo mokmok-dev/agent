@@ -421,10 +421,12 @@ fn write_int(
 #[cfg(test)]
 mod tests {
     use super::{canonical, event_id};
-    use crate::event::{ErrorClass, Event, EventKind, FinishReason, Role, ToolRequest};
+    use crate::event::{ErrorClass, Event, EventKind, FinishReason, Risk, Role, ToolRequest};
     use crate::ids::{Actor, BranchId, CallId, EventId, PrefixHash, TurnId};
     use crate::time::Timestamp;
     use alloc::string::{String, ToString};
+    use alloc::vec;
+    use proptest::prelude::*;
 
     const BRANCH: [u8; 8] = [0x01; 8];
     const TURN: [u8; 8] = [0x02; 8];
@@ -746,5 +748,308 @@ mod tests {
                 turn: turn()
             }))
         );
+    }
+
+    fn any_branch() -> impl Strategy<Value = BranchId> {
+        any::<u64>().prop_map(|value| BranchId::from_bytes(value.to_le_bytes()))
+    }
+
+    fn any_turn() -> impl Strategy<Value = TurnId> {
+        any::<u64>().prop_map(|value| TurnId::from_bytes(value.to_le_bytes()))
+    }
+
+    fn any_bytes32() -> impl Strategy<Value = [u8; 32]> {
+        (any::<u64>(), any::<u64>(), any::<u64>(), any::<u64>()).prop_map(
+            |(first, second, third, fourth)| {
+                let mut bytes = [0_u8; 32];
+                bytes[0..8].copy_from_slice(&first.to_le_bytes());
+                bytes[8..16].copy_from_slice(&second.to_le_bytes());
+                bytes[16..24].copy_from_slice(&third.to_le_bytes());
+                bytes[24..32].copy_from_slice(&fourth.to_le_bytes());
+                bytes
+            },
+        )
+    }
+
+    fn any_event_id() -> impl Strategy<Value = EventId> {
+        any_bytes32().prop_map(EventId::from_bytes)
+    }
+
+    fn any_prefix() -> impl Strategy<Value = PrefixHash> {
+        any_bytes32().prop_map(PrefixHash::from_bytes)
+    }
+
+    fn any_time() -> impl Strategy<Value = Timestamp> {
+        (0_i64..4_000_000_000, 0_u32..1_000_000_000)
+            .prop_map(|(secs, nanos)| Timestamp::new(secs, nanos).expect("in range"))
+    }
+
+    fn any_actor() -> impl Strategy<Value = Actor> {
+        prop_oneof![
+            any::<String>().prop_map(Actor::Human),
+            any::<String>().prop_map(Actor::Process),
+            any::<String>().prop_map(Actor::Agent),
+        ]
+    }
+
+    fn any_role() -> impl Strategy<Value = Role> {
+        prop_oneof![
+            Just(Role::System),
+            Just(Role::User),
+            Just(Role::Assistant),
+            Just(Role::Tool),
+        ]
+    }
+
+    fn any_finish() -> impl Strategy<Value = FinishReason> {
+        prop_oneof![
+            Just(FinishReason::Stop),
+            Just(FinishReason::Length),
+            Just(FinishReason::ToolCalls),
+            Just(FinishReason::ContentFilter),
+            Just(FinishReason::Unknown),
+        ]
+    }
+
+    fn any_class() -> impl Strategy<Value = ErrorClass> {
+        prop_oneof![
+            Just(ErrorClass::Transport),
+            Just(ErrorClass::Timeout),
+            Just(ErrorClass::RateLimited),
+            Just(ErrorClass::ServerError),
+            Just(ErrorClass::InvalidRequest),
+            Just(ErrorClass::ContextLength),
+            Just(ErrorClass::ContentFilter),
+            Just(ErrorClass::Cancelled),
+            Just(ErrorClass::Unknown),
+        ]
+    }
+
+    fn any_risk() -> impl Strategy<Value = Risk> {
+        prop_oneof![
+            Just(Risk::Read),
+            Just(Risk::Write),
+            Just(Risk::Network),
+            Just(Risk::Destructive),
+        ]
+    }
+
+    fn any_call() -> impl Strategy<Value = CallId> {
+        (any_turn(), any::<u32>()).prop_map(|(turn, step)| CallId { turn, step })
+    }
+
+    fn any_request() -> impl Strategy<Value = ToolRequest> {
+        (any::<String>(), any::<String>()).prop_map(|(args, tool)| ToolRequest { args, tool })
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the point of this function is to generate every kind in one place"
+    )]
+    fn any_kind() -> impl Strategy<Value = EventKind> {
+        prop_oneof![
+            (any::<u32>(), any::<String>())
+                .prop_map(|(schema, version)| { EventKind::InstanceStarted { schema, version } }),
+            any::<String>().prop_map(|reason| EventKind::InstanceStopping { reason }),
+            any::<bool>().prop_map(|rolled_back| EventKind::InstanceRecovered { rolled_back }),
+            any::<i64>().prop_map(|delta_secs| EventKind::InstanceClockSkew { delta_secs }),
+            (
+                prop::option::of(any_branch()),
+                prop::option::of(any_event_id()),
+                prop::option::of(any::<String>()),
+            )
+                .prop_map(|(parent, fork, label)| EventKind::BranchCreated {
+                    parent,
+                    fork,
+                    label,
+                }),
+            any::<String>().prop_map(|label| EventKind::BranchLabeled { label }),
+            prop::option::of(any::<String>())
+                .prop_map(|reason| EventKind::BranchArchived { reason }),
+            (
+                any::<String>(),
+                any::<String>(),
+                any::<String>(),
+                prop::option::of(any::<String>()),
+            )
+                .prop_map(|(command, command_id, surface, text)| {
+                    EventKind::CommandReceived {
+                        command,
+                        command_id,
+                        surface,
+                        text,
+                    }
+                }),
+            (any::<String>(), any_turn())
+                .prop_map(|(input, turn)| EventKind::TurnRequested { input, turn }),
+            (
+                any_prefix(),
+                any::<u32>(),
+                any::<u64>(),
+                any_turn(),
+                any::<bool>(),
+            )
+                .prop_map(|(prefix, segments, tokens, turn, warm)| {
+                    EventKind::ModelRequested {
+                        prefix,
+                        segments,
+                        tokens,
+                        turn,
+                        warm,
+                    }
+                }),
+            (
+                prop::collection::vec(any_request(), 0..4),
+                any_finish(),
+                any::<u64>(),
+                any::<String>(),
+                any::<u64>(),
+                any::<String>(),
+                any_turn(),
+            )
+                .prop_map(
+                    |(calls, finish, input_tokens, output, output_tokens, request, turn)| {
+                        EventKind::ModelResponded {
+                            calls,
+                            finish,
+                            input_tokens,
+                            output,
+                            output_tokens,
+                            request,
+                            turn,
+                        }
+                    },
+                ),
+            (
+                any::<u64>(),
+                any_prefix(),
+                any::<bool>(),
+                any_turn(),
+                any::<u64>(),
+            )
+                .prop_map(|(cached, prefix, reported, turn, uncached)| {
+                    EventKind::ModelCacheObserved {
+                        cached,
+                        prefix,
+                        reported,
+                        turn,
+                        uncached,
+                    }
+                }),
+            (
+                any::<u32>(),
+                any_class(),
+                prop::option::of(any::<String>()),
+                any::<bool>(),
+                any_turn(),
+            )
+                .prop_map(|(attempt, class, detail, retryable, turn)| {
+                    EventKind::ModelFailed {
+                        attempt,
+                        class,
+                        detail,
+                        retryable,
+                        turn,
+                    }
+                }),
+            (any::<u32>(), any_time(), any_turn()).prop_map(|(attempt, due, turn)| {
+                EventKind::ScheduleArmed { attempt, due, turn }
+            }),
+            (any::<String>(), any_role(), any::<u64>()).prop_map(|(content, role, tokens)| {
+                EventKind::MessageAppended {
+                    content,
+                    role,
+                    tokens,
+                }
+            }),
+            (any_call(), any_time(), any_risk(), any::<String>()).prop_map(
+                |(call, expires, risk, tool)| EventKind::ApprovalRequested {
+                    call,
+                    expires,
+                    risk,
+                    tool,
+                },
+            ),
+            (any::<bool>(), any_call(), prop::option::of(any::<String>()),)
+                .prop_map(|(allow, call, note)| EventKind::ApprovalDecided { allow, call, note }),
+            (
+                any::<String>(),
+                any_call(),
+                prop::collection::vec(any::<String>(), 0..4),
+                any::<String>(),
+                any::<String>(),
+            )
+                .prop_map(|(args, call, env, key, tool)| EventKind::ToolIntent {
+                    args,
+                    call,
+                    env,
+                    key,
+                    tool,
+                }),
+            (
+                any_call(),
+                any::<u64>(),
+                any::<String>(),
+                any::<i32>(),
+                any::<bool>(),
+            )
+                .prop_map(|(call, duration_ms, output, status, truncated)| {
+                    EventKind::ToolResult {
+                        call,
+                        duration_ms,
+                        output,
+                        status,
+                        truncated,
+                    }
+                }),
+            (any_call(), any_class(), any::<bool>()).prop_map(
+                |(call, class, may_have_happened)| EventKind::ToolFailed {
+                    call,
+                    class,
+                    may_have_happened,
+                },
+            ),
+            (any::<u32>(), any::<String>())
+                .prop_map(|(schema, data)| EventKind::Unknown { schema, data }),
+        ]
+    }
+
+    fn any_event() -> impl Strategy<Value = Event> {
+        (
+            any_branch(),
+            any::<u64>(),
+            prop::option::of(any_event_id()),
+            any_time(),
+            any_actor(),
+            prop::option::of(any_event_id()),
+            prop::option::of(any_turn()),
+            prop::option::of(any::<String>()),
+            any_kind(),
+        )
+            .prop_map(
+                |(branch, depth, prev, time, actor, causation, correlation, model, kind)| Event {
+                    branch,
+                    depth,
+                    prev,
+                    time,
+                    actor,
+                    causation,
+                    correlation,
+                    model,
+                    kind,
+                },
+            )
+    }
+
+    proptest! {
+        #[test]
+        fn distinct_events_encode_to_distinct_bytes(
+            first in any_event(),
+            second in any_event(),
+        ) {
+            prop_assume!(first != second);
+            prop_assert_ne!(canonical(&first), canonical(&second));
+            prop_assert_ne!(event_id(&first), event_id(&second));
+        }
     }
 }

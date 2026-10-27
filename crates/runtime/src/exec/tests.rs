@@ -133,16 +133,16 @@ fn a_tool_with_no_program_is_a_failure() {
 }
 
 #[test]
-fn a_process_that_kills_itself_is_not_a_success() {
-    // Inside the sandbox's process namespace a program may be the namespace's
-    // first process, which the kernel will not let it kill, so this asks the only
-    // question the log depends on: a tool that tried to die did not succeed.
+fn a_process_that_kills_itself_reports_the_signal_as_minus_one() {
+    // A process the kernel stopped has no exit code, and -1 is how the event
+    // records that absence instead of inventing a status a reader would take
+    // for one the program chose.
     match run(
         &tool(&["sh", "-c", "kill -9 $$"], 4096, 5000),
         "",
         Path::new("."),
     ) {
-        Outcome::Ran(ran) => assert_ne!(ran.status, 0, "a killed process is not a success"),
+        Outcome::Ran(ran) => assert_eq!(ran.status, -1),
         Outcome::Failed(class, happened) => panic!("unexpected {class:?} {happened}"),
     }
 }

@@ -5,7 +5,6 @@ members = [
   "crates/core",
   "crates/model",
   "crates/prompt",
-  "crates/removeme",
   "crates/runtime",
   "crates/store",
   "crates/wire",
@@ -29,6 +28,7 @@ clap = { version = "4", default-features = false, features = [
   "usage",
 ] }
 landlock = "0.4.7"
+proptest = "1.12.0"
 rusqlite = "0.37"
 rustix = { version = "1", features = ["fs", "process", "thread"] }
 seccompiler = "0.5"
