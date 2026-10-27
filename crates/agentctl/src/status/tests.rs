@@ -307,3 +307,38 @@ fn a_model_failure_shows_what_the_failure_said() {
         "the class names the kind, the detail names the occasion"
     );
 }
+
+#[test]
+fn a_log_that_contradicts_itself_is_refused() {
+    let path = scratch();
+    let mut store = Store::open(&path).expect("opens");
+    let mut push = |kind: EventKind| {
+        let events = store.load(branch()).unwrap_or_default();
+        let event = Event {
+            branch: branch(),
+            depth: u64::try_from(events.len()).expect("small"),
+            prev: events.last().map(Event::id),
+            time: at(i64::try_from(events.len()).unwrap_or(0)),
+            actor: Actor::Process("test".to_string()),
+            causation: None,
+            correlation: None,
+            model: None,
+            kind,
+        };
+        store.append(&event).expect("appends");
+    };
+    push(EventKind::BranchCreated {
+        fork: None,
+        label: None,
+        parent: None,
+    });
+    for _ in 0..2 {
+        push(EventKind::TurnRequested {
+            input: "hello".to_string(),
+            turn: turn(),
+        });
+    }
+    let error = read(&path).expect_err("refuses the contradiction");
+    assert!(error.is_corrupt());
+    assert!(error.to_string().contains("contradicts"));
+}

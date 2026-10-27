@@ -61,10 +61,9 @@ pub fn read(path: &Path) -> Result<Status, StoreError> {
     for id in branches {
         let events = store.load(id)?;
         for event in &events {
-            // A fold that contradicts itself is a corrupt store, and `verify` has
-            // already refused that case, so an event this build cannot fold is the
-            // only thing left: it is skipped rather than failing the status.
-            let _ = state.apply(event);
+            // An unknown kind folds to nothing, so an error means the stored
+            // events contradict each other.
+            state.apply(event).map_err(StoreError::Fold)?;
         }
         loaded.push((id, events));
     }

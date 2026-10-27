@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use agent_core::event::{Event, EventKind};
+use agent_core::fold::FoldError;
 use agent_core::ids::{BranchId, EventId};
 use rusqlite::{Connection, Transaction, params};
 
@@ -83,6 +84,8 @@ pub enum StoreError {
     Chain { id: EventId, detail: &'static str },
     /// A stored body could not be decoded into an event.
     Decode(DecodeError),
+    /// Stored events contradict each other when folded.
+    Fold(FoldError),
 }
 
 impl StoreError {
@@ -99,6 +102,7 @@ impl StoreError {
                 | Self::UnknownPredecessor { .. }
                 | Self::Chain { .. }
                 | Self::Decode(_)
+                | Self::Fold(_)
         )
     }
 }
@@ -147,6 +151,7 @@ impl fmt::Display for StoreError {
             },
             Self::Chain { id, detail } => write!(formatter, "event {id} failed {detail}"),
             Self::Decode(error) => write!(formatter, "cannot decode a stored event: {error}"),
+            Self::Fold(error) => write!(formatter, "the log contradicts itself: {error}"),
         }
     }
 }
