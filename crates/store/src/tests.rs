@@ -79,6 +79,31 @@ fn chain(
     }
 }
 
+fn fork_event(
+    branch: BranchId,
+    depth: u64,
+    anchor: EventId,
+    parent: BranchId,
+    label: &str,
+) -> Event {
+    Event {
+        branch,
+        depth,
+        prev: Some(anchor),
+        time: Timestamp::new(1_790_000_000 + i64::try_from(depth).expect("small"), 0)
+            .expect("valid"),
+        actor: Actor::Process("test".to_string()),
+        causation: None,
+        correlation: None,
+        model: None,
+        kind: EventKind::BranchCreated {
+            parent: Some(parent),
+            fork: Some(anchor),
+            label: Some(label.to_string()),
+        },
+    }
+}
+
 #[test]
 fn an_open_creates_the_schema_and_a_second_open_reuses_it() {
     let scratch = Scratch::new();
@@ -210,7 +235,7 @@ fn a_first_event_of_a_branch_anchors_to_a_stored_event() {
     let mut store = Store::open(&scratch.path).expect("opens");
     chain(&mut store, branch(1), 3);
     let anchor = store.bodies(branch(1)).expect("reads")[1].0;
-    let first = event(branch(2), 2, Some(anchor), "side");
+    let first = fork_event(branch(2), 2, anchor, branch(1), "side");
     let first_id = store.append(&first).expect("appends");
     let second = event(branch(2), 3, Some(first_id), "side");
     store.append(&second).expect("appends");
@@ -247,7 +272,7 @@ fn two_branches_do_not_share_a_tip() {
     chain(&mut store, branch(1), 2);
     let parent_tip = store.bodies(branch(1)).expect("reads")[1].0;
     let parent_root = store.bodies(branch(1)).expect("reads")[0].0;
-    let side = event(branch(2), 1, Some(parent_root), "side");
+    let side = fork_event(branch(2), 1, parent_root, branch(1), "side");
     let side_id = store.append(&side).expect("appends");
     let wrong = event(branch(1), 2, Some(side_id), "main");
     let error = store.append(&wrong).expect_err("refuses");
@@ -361,7 +386,7 @@ fn verification_catches_a_missing_fork_anchor() {
     let mut store = Store::open(&scratch.path).expect("opens");
     chain(&mut store, branch(1), 2);
     let anchor = store.bodies(branch(1)).expect("reads")[1].0;
-    let fork = event(branch(2), 2, Some(anchor), "side");
+    let fork = fork_event(branch(2), 2, anchor, branch(1), "side");
     store.append(&fork).expect("appends");
     let connection = Connection::open(&scratch.path).expect("opens raw");
     connection
@@ -389,7 +414,7 @@ fn verification_catches_a_wrong_fork_depth() {
     let mut store = Store::open(&scratch.path).expect("opens");
     chain(&mut store, branch(1), 2);
     let anchor = store.bodies(branch(1)).expect("reads")[1].0;
-    let fork = event(branch(2), 2, Some(anchor), "side");
+    let fork = fork_event(branch(2), 2, anchor, branch(1), "side");
     store.append(&fork).expect("appends");
     let connection = Connection::open(&scratch.path).expect("opens raw");
     connection
@@ -404,6 +429,92 @@ fn verification_catches_a_wrong_fork_depth() {
     let error = store.verify().expect_err("detects");
     match error {
         StoreError::Chain { detail, .. } => assert_eq!(detail, "the fork depth"),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn verification_catches_a_fork_that_names_another_parent() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    chain(&mut store, branch(1), 2);
+    let anchor = store.bodies(branch(1)).expect("reads")[1].0;
+    store
+        .append(&fork_event(branch(2), 2, anchor, branch(3), "side"))
+        .expect("appends");
+    let error = store.verify().expect_err("detects");
+    match error {
+        StoreError::Chain { detail, .. } => assert_eq!(detail, "the fork parent"),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn verification_catches_a_fork_that_names_another_event() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    chain(&mut store, branch(1), 2);
+    let anchor = store.bodies(branch(1)).expect("reads")[1].0;
+    let mut fork = fork_event(branch(2), 2, anchor, branch(1), "side");
+    fork.kind = EventKind::BranchCreated {
+        parent: Some(branch(1)),
+        fork: Some(EventId::from_bytes([9; 32])),
+        label: Some("side".to_string()),
+    };
+    store.append(&fork).expect("appends");
+    let error = store.verify().expect_err("detects");
+    match error {
+        StoreError::Chain { detail, .. } => assert_eq!(detail, "the fork event"),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn verification_catches_a_first_event_that_is_not_a_creation() {
+    let scratch = Scratch::new();
+    let mut store = Store::open(&scratch.path).expect("opens");
+    chain(&mut store, branch(1), 2);
+    let anchor = store.bodies(branch(1)).expect("reads")[1].0;
+    store
+        .append(&event(branch(2), 2, Some(anchor), "side"))
+        .expect("appends");
+    let error = store.verify().expect_err("detects");
+    match error {
+        StoreError::Chain { detail, .. } => assert_eq!(detail, "the fork creation"),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn verification_catches_a_genesis_that_names_a_parent() {
+    let scratch = Scratch::new();
+    let store = Store::open(&scratch.path).expect("opens");
+    let mut genesis = event(branch(1), 0, None, "main");
+    genesis.kind = EventKind::BranchCreated {
+        parent: Some(branch(2)),
+        fork: None,
+        label: Some("main".to_string()),
+    };
+    let connection = Connection::open(&scratch.path).expect("opens raw");
+    connection
+        .execute(
+            "INSERT INTO events (id, branch, depth, prev, type, time, actor, body)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                genesis.id().to_string(),
+                genesis.branch.to_string(),
+                genesis.depth,
+                None::<String>,
+                genesis.type_name(),
+                genesis.time.rfc3339(),
+                genesis.actor.to_string(),
+                agent_core::canonical::canonical(&genesis),
+            ],
+        )
+        .expect("inserts");
+    let error = store.verify().expect_err("detects");
+    match error {
+        StoreError::Chain { detail, .. } => assert_eq!(detail, "the genesis payload"),
         other => panic!("unexpected {other:?}"),
     }
 }

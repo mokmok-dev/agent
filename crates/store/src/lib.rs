@@ -9,7 +9,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use agent_core::event::Event;
+use agent_core::event::{Event, EventKind};
 use agent_core::ids::{BranchId, EventId};
 use rusqlite::{Connection, Transaction, params};
 
@@ -389,7 +389,12 @@ impl Store {
                                 .map_err(|_| StoreError::Identifier(text.to_string()))
                         })
                         .transpose()?;
-                    anchors.push(Anchor { id, depth, prev });
+                    anchors.push(Anchor {
+                        id,
+                        depth,
+                        prev,
+                        body,
+                    });
                 },
             }
 
@@ -406,6 +411,7 @@ struct Anchor {
     id: EventId,
     depth: u64,
     prev: Option<EventId>,
+    body: String,
 }
 
 fn verify_anchors(
@@ -425,19 +431,33 @@ fn verify_anchors(
         }
         genesis = Some(anchor);
     }
-    if let Some(anchor) = genesis
-        && anchor.depth != 0
-    {
-        return Err(StoreError::Chain {
-            id: anchor.id,
-            detail: "the genesis depth",
-        });
+    if let Some(anchor) = genesis {
+        if anchor.depth != 0 {
+            return Err(StoreError::Chain {
+                id: anchor.id,
+                detail: "the genesis depth",
+            });
+        }
+        let kind = decode(&anchor.body).map_err(StoreError::Decode)?.kind;
+        if !matches!(
+            kind,
+            EventKind::BranchCreated {
+                parent: None,
+                fork: None,
+                ..
+            }
+        ) {
+            return Err(StoreError::Chain {
+                id: anchor.id,
+                detail: "the genesis payload",
+            });
+        }
     }
 
     // A non-empty store with no genesis cannot pass the checks below: every
     // anchor must sit one depth past its target, so anchors cannot form a
     // cycle and some branch must end at a prev-less row.
-    let mut statement = connection.prepare("SELECT depth FROM events WHERE id = ?1")?;
+    let mut statement = connection.prepare("SELECT branch, depth FROM events WHERE id = ?1")?;
     for anchor in anchors {
         let Some(prev) = anchor.prev else {
             continue;
@@ -449,11 +469,38 @@ fn verify_anchors(
                 detail: "the fork anchor",
             });
         };
-        let depth: u64 = row.get(0)?;
+        let branch_text: String = row.get(0)?;
+        let depth: u64 = row.get(1)?;
         if Some(anchor.depth) != depth.checked_add(1) {
             return Err(StoreError::Chain {
                 id: anchor.id,
                 detail: "the fork depth",
+            });
+        }
+        let prev_branch =
+            BranchId::from_str(&branch_text).map_err(|_| StoreError::Identifier(branch_text))?;
+        let kind = decode(&anchor.body).map_err(StoreError::Decode)?.kind;
+        let EventKind::BranchCreated {
+            parent: Some(parent),
+            fork: Some(fork),
+            ..
+        } = kind
+        else {
+            return Err(StoreError::Chain {
+                id: anchor.id,
+                detail: "the fork creation",
+            });
+        };
+        if parent != prev_branch {
+            return Err(StoreError::Chain {
+                id: anchor.id,
+                detail: "the fork parent",
+            });
+        }
+        if fork != prev {
+            return Err(StoreError::Chain {
+                id: anchor.id,
+                detail: "the fork event",
             });
         }
     }
