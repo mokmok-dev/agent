@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use agent_core::event::Risk;
 
-use super::{Settings, Tool};
+use super::{Network, Settings, Tool};
 
 /// The default deadline for one model call.
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
@@ -53,6 +53,16 @@ pub enum ConfigError {
     BadEnvName(String),
     /// A tool declared a variable and the process has no such variable.
     EnvMissing(String),
+    /// A path a tool may write is not absolute, so it would be resolved against
+    /// the launcher's working directory rather than the tool's.
+    BadPath(String),
+    /// A tool declared network access this build does not know how to give it.
+    BadNetwork(String),
+    /// A directory a tool may write is not there, so the launcher has nothing to
+    /// mount and the tool would fail on its first call.
+    MissingDirectory(String),
+    /// The sandbox setting is neither a pair of paths nor the word none.
+    BadSandbox(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -90,6 +100,22 @@ impl std::fmt::Display for ConfigError {
             Self::EnvMissing(name) => {
                 write!(formatter, "{name} is declared by a tool but is not set")
             },
+            Self::BadPath(path) => write!(formatter, "{path} is not an absolute path"),
+            Self::BadNetwork(value) => {
+                write!(formatter, "network is none or any, not {value}")
+            },
+            Self::BadSandbox(value) => {
+                write!(
+                    formatter,
+                    "sandbox names a launcher without both paths: {value}"
+                )
+            },
+            Self::MissingDirectory(path) => {
+                write!(
+                    formatter,
+                    "{path} is writable by a tool but is not a directory"
+                )
+            },
         }
     }
 }
@@ -112,6 +138,8 @@ struct Raw {
     directive: Option<String>,
     #[serde(default)]
     tools: Vec<RawTool>,
+    #[serde(default)]
+    sandbox: Option<RawSandbox>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,6 +166,21 @@ struct RawPermissions {
     /// environment at all, and a missing list means the operator said nothing.
     #[serde(default)]
     env: Option<Vec<String>>,
+    #[serde(default)]
+    write: Option<Vec<String>>,
+    #[serde(default)]
+    network: Option<String>,
+    #[serde(default)]
+    memory_bytes: Option<u64>,
+    #[serde(default)]
+    file_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSandbox {
+    /// An operator may say, in as many words, that this host wants no bounds.
+    #[serde(default)]
+    none: Option<bool>,
 }
 
 /// A configuration that has been checked.
@@ -176,6 +219,10 @@ pub fn load(
 /// # Errors
 ///
 /// As [`load`].
+#[allow(
+    clippy::too_many_lines,
+    reason = "one pass over the file, so a setting cannot be read after it is used"
+)]
 pub fn parse(
     text: &str,
     env: &dyn Fn(&str) -> Option<String>,
@@ -201,6 +248,16 @@ pub fn parse(
     if max_output_tokens == 0 {
         return Err(ConfigError::Zero("max_output_tokens"));
     }
+
+    // A tool is bounded unless the configuration says, in as many words, that it
+    // wants none. Nothing writes that for the operator, and the module never does.
+    let confined = !matches!(
+        raw.sandbox,
+        Some(RawSandbox {
+            none: Some(true),
+            ..
+        })
+    );
 
     let mut seen = BTreeSet::new();
     let mut tools = Vec::with_capacity(raw.tools.len());
@@ -252,15 +309,47 @@ pub fn parse(
             }
             names.insert(name);
         }
+        let mut write = Vec::new();
+        for path in permissions.write.unwrap_or_default() {
+            let path = PathBuf::from(path);
+            if !path.is_absolute() {
+                return Err(ConfigError::BadPath(path.display().to_string()));
+            }
+            // The launcher mounts this directory into the tool's namespace, and a
+            // mount of something that is not there fails on the first call rather
+            // than here. The operator or the module creates it; this program does
+            // not create directories it was only given permission to use.
+            if !path.is_dir() {
+                return Err(ConfigError::MissingDirectory(path.display().to_string()));
+            }
+            write.push(path);
+        }
+        let network = match permissions.network.as_deref() {
+            Some("none") => Network::None,
+            Some("any") => Network::Any,
+            Some(other) => return Err(ConfigError::BadNetwork(other.to_string())),
+            None => return Err(ConfigError::Missing("tools[].permissions.network")),
+        };
+        let Some(memory_bytes) = permissions.memory_bytes.filter(|bytes| *bytes > 0) else {
+            return Err(ConfigError::Zero("tools[].permissions.memory_bytes"));
+        };
+        let Some(file_bytes) = permissions.file_bytes.filter(|bytes| *bytes > 0) else {
+            return Err(ConfigError::Zero("tools[].permissions.file_bytes"));
+        };
         tools.push(Tool {
             argv: tool.argv,
+            env: names.into_iter().collect(),
+            file_bytes,
             idempotent,
             max_output,
+            memory_bytes,
             name: tool.name,
+            network,
             risk,
+            confined,
             schema: tool.schema,
             timeout: Duration::from_millis(timeout_ms),
-            env: names.into_iter().collect(),
+            write,
         });
     }
 
@@ -339,6 +428,12 @@ schema = '{"argv":"string"}'
 
 [tools.permissions]
 env = []
+network = "none"
+memory_bytes = 268435456
+file_bytes = 8388608
+
+[sandbox]
+none = false
 "#;
 
     fn no_env(_: &str) -> Option<String> {
@@ -352,6 +447,9 @@ env = []
             &format!("max_output_tokens = 512\n{line}"),
         )
     }
+
+    /// The permissions every extra tool in these tests would otherwise repeat.
+    const BOUNDS: &str = "network = \"none\"\nmemory_bytes = 268435456\nfile_bytes = 8388608\n";
 
     fn key_env(name: &str) -> Option<String> {
         match name {
@@ -514,7 +612,7 @@ env = []
     #[test]
     fn a_risk_is_read_into_the_tool() {
         let text = format!(
-            "{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"other\"\nrisk = \"destructive\"\nschema = '{{}}'\n[tools.permissions]\nenv = []\n"
+            "{MINIMAL}\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"other\"\nrisk = \"destructive\"\nschema = '{{}}'\n[tools.permissions]\nenv = []\n{BOUNDS}"
         );
         let config = parse(&text, &no_env).expect("parses");
         let other = config
@@ -634,7 +732,8 @@ env = []
     #[test]
     fn two_tools_that_declare_the_same_names_in_any_order_are_the_same() {
         let text = MINIMAL.replace("env = []", "env = [\"B\", \"A\"]")
-            + "\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"other\"\nrisk = \"read\"\nschema = '{}'\n[tools.permissions]\nenv = [\"A\", \"B\", \"A\"]\n";
+            + "\n[[tools]]\nargv = [\"/bin/cat\"]\nname = \"other\"\nrisk = \"read\"\nschema = '{}'\n[tools.permissions]\nenv = [\"A\", \"B\", \"A\"]\n"
+            + BOUNDS;
         let env = |name: &str| match name {
             "A" | "B" => Some("x".to_string()),
             _ => None,
@@ -666,5 +765,93 @@ env = []
         ] {
             assert_ne!(error.to_string(), "");
         }
+    }
+
+    #[test]
+    fn a_tool_is_bounded_unless_the_file_says_in_as_many_words_that_it_is_not() {
+        let bounded = parse(MINIMAL, &no_env).expect("parses");
+        assert!(bounded.settings.tools[0].confined, "the default is bounded");
+
+        let without = MINIMAL
+            .split("[sandbox]")
+            .next()
+            .expect("a sandbox section")
+            .to_string();
+        let default = parse(&without, &no_env).expect("a file that says nothing is bounded");
+        assert!(default.settings.tools[0].confined);
+
+        let unbounded = MINIMAL.replace("none = false", "none = true");
+        let read = parse(&unbounded, &no_env).expect("parses");
+        assert!(
+            !read.settings.tools[0].confined,
+            "the file said none, in as many words"
+        );
+    }
+
+    #[test]
+    fn a_path_a_tool_may_write_has_to_be_absolute() {
+        let text = MINIMAL.replace(
+            "network = \"none\"",
+            "write = [\"relative/dir\"]\nnetwork = \"none\"",
+        );
+        assert_eq!(
+            parse(&text, &no_env),
+            Err(ConfigError::BadPath("relative/dir".to_string()))
+        );
+    }
+
+    #[test]
+    fn the_network_is_one_of_two_answers() {
+        let text = MINIMAL.replace("network = \"none\"", "network = \"allowlist\"");
+        assert_eq!(
+            parse(&text, &no_env),
+            Err(ConfigError::BadNetwork("allowlist".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_bound_of_zero_would_mean_no_process_at_all() {
+        let text = MINIMAL.replace("memory_bytes = 268435456", "memory_bytes = 0");
+        assert_eq!(
+            parse(&text, &no_env),
+            Err(ConfigError::Zero("tools[].permissions.memory_bytes"))
+        );
+
+        let text = MINIMAL.replace("file_bytes = 8388608", "file_bytes = 0");
+        assert_eq!(
+            parse(&text, &no_env),
+            Err(ConfigError::Zero("tools[].permissions.file_bytes"))
+        );
+    }
+
+    #[test]
+    fn every_tool_carries_the_launcher_that_bounds_it() {
+        let config = parse(MINIMAL, &no_env).expect("parses");
+        let tool = &config.settings.tools[0];
+        assert!(tool.confined, "a tool is bounded unless the file says none");
+        assert_eq!(tool.network, super::Network::None);
+        assert_eq!(tool.memory_bytes, 268_435_456);
+        assert_eq!(tool.file_bytes, 8_388_608);
+        assert!(
+            tool.write.is_empty(),
+            "a tool writes nowhere it did not say"
+        );
+    }
+
+    #[test]
+    fn a_directory_a_tool_may_write_has_to_exist_before_the_daemon_starts() {
+        let missing = std::env::temp_dir().join("agent-config-not-created");
+        let _ = std::fs::remove_dir_all(&missing);
+        let text = MINIMAL.replace(
+            "network = \"none\"",
+            &format!(
+                "write = [{:?}]\nnetwork = \"none\"",
+                missing.display().to_string()
+            ),
+        );
+        assert_eq!(
+            parse(&text, &no_env),
+            Err(ConfigError::MissingDirectory(missing.display().to_string()))
+        );
     }
 }

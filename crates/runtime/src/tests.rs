@@ -7,7 +7,7 @@ use agent_core::time::Timestamp;
 use agent_model::{Completion, Delta, Profile, Provider, ProviderError, Usage};
 use agent_store::Store;
 
-use super::{Gate, ROOT_BRANCH, Reactor, Settings, Step, Tool, Work, draw_of, gate};
+use super::{Gate, Network, ROOT_BRANCH, Reactor, Settings, Step, Tool, Work, draw_of, gate};
 use agent_core::event::Risk;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -107,6 +107,11 @@ fn settings() -> Settings {
             schema: r#"{"argv":"string"}"#.to_string(),
             timeout: std::time::Duration::from_secs(5),
             env: Vec::new(),
+            write: Vec::new(),
+            network: Network::Any,
+            memory_bytes: 256 * 1024 * 1024,
+            file_bytes: 8 * 1024 * 1024,
+            confined: false,
         }],
         max_output_tokens: 64,
     }
@@ -503,6 +508,11 @@ fn reactor_with_tools(
         schema: r#"{"argv":"string"}"#.to_string(),
         timeout: std::time::Duration::from_secs(5),
         env: Vec::new(),
+        write: Vec::new(),
+        network: Network::Any,
+        memory_bytes: 256 * 1024 * 1024,
+        file_bytes: 8 * 1024 * 1024,
+        confined: false,
     }];
     Reactor::with_model(path, Box::new(provider), with_tools).expect("opens")
 }
@@ -708,6 +718,13 @@ fn marker_tool_of(
         schema: r#"{"argv":"string"}"#.to_string(),
         timeout: std::time::Duration::from_secs(5),
         env: Vec::new(),
+        // The marker is the whole point of this tool, and a tool writes where its
+        // manifest says it may and nowhere else.
+        write: vec![scratch.dir.clone()],
+        network: Network::Any,
+        memory_bytes: 256 * 1024 * 1024,
+        file_bytes: 8 * 1024 * 1024,
+        confined: false,
     }
 }
 

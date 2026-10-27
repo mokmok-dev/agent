@@ -20,6 +20,10 @@ const IDLE_WAIT: Duration = Duration::from_millis(250);
 fn reactor_from_config(path: &Path) -> Result<Reactor, String> {
     let config =
         config::load(path, &|name| std::env::var(name).ok()).map_err(|error| error.to_string())?;
+    // Before the store is opened, and before the first tool call: a host that
+    // will not give the launcher its namespaces should say so while somebody is
+    // still watching the start, not in a failed call at three in the morning.
+    agent_runtime::confine::probe(&config.settings)?;
     let profile = Profile {
         id: config.settings.model.clone(),
         context_window: 0,

@@ -8,6 +8,7 @@ pub mod bus;
 pub mod cli;
 pub mod clock;
 pub mod config;
+pub mod confine;
 pub mod exec;
 pub mod lock;
 pub mod notify;
@@ -68,6 +69,13 @@ pub enum Work {
     Nothing,
 }
 
+/// Whether a tool's process may reach the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Network {
+    None,
+    Any,
+}
+
 /// One tool the agent may run.
 ///
 /// The arguments the model writes arrive on the tool's standard input as the
@@ -88,6 +96,17 @@ pub struct Tool {
     /// The environment variable names its process may see; nothing else is
     /// passed to it.
     pub env: Vec<String>,
+    /// The only directories its process may write to. Every other path is
+    /// mounted read-only, including its own working directory.
+    pub write: Vec<std::path::PathBuf>,
+    /// Whether its process may use the network.
+    pub network: Network,
+    /// The ceiling on its address space, in bytes.
+    pub memory_bytes: u64,
+    /// The ceiling on one file it writes, in bytes.
+    pub file_bytes: u64,
+    /// Whether its process is started inside those bounds.
+    pub confined: bool,
 }
 
 /// The environment names a tool's manifest declares.

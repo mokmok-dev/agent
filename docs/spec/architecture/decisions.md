@@ -63,6 +63,7 @@ Each entry names a decision that is expensive to reverse, the alternative that l
 | 35 | The store is locked by the process that writes it | Trusting the deployment to run one daemon |
 | 36 | A failure records what it said, not what was asked | A class alone, or the provider's body |
 | 37 | A tool's environment is what its manifest declares | Inheritance from the daemon's environment |
+| 38 | The bounds are syscalls the tool's own process makes | A launcher from outside the package, or a systemd scope |
 
 # 1. The log is the only truth
 
@@ -448,3 +449,15 @@ The cost is that a tool now declares what it needs, and a tool configured before
 `env = []` stays legal and is a real answer. A tool that reads nothing from the environment is the shape most tools should have.
 
 This is an allowlist, not a sandbox. The values are still readable by a tool that declares their names, and the log keeps what it prints. Bounding the process itself belongs to the scope move, not to this field.
+
+# 38. The bounds are syscalls the tool's own process makes
+
+A tool starts through `agent-confine`, a second binary this package ships. It sets `RLIMIT_AS` and `RLIMIT_FSIZE`, takes `no_new_privs`, builds a Landlock ruleset that handles the whole write half of the filesystem with a rule for each declared directory, installs a seccomp filter that refuses sockets in the families that reach another machine when the manifest says `none`, and then execs the tool.
+
+The plan before this was a transient systemd scope, and it does not survive being tried. A scope wraps a process that has already been exec'd, so mount and network namespaces have nothing left to apply; a transient service can confine, but it needs a user manager the deployed unit does not have and the build sandbox will never have.
+
+Then it was bubblewrap with `prlimit`, which worked here and did not work on the build machine: `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`. A network namespace needs the kernel to let a process configure its own interface, and a host that runs builds inside a restricted sandbox does not always allow it. Landlock and seccomp are syscalls on the calling process, and they worked in that same sandbox on the first try.
+
+The cost is a second binary to ship, and the fact that the bounds are attached to the process rather than to a container around it. Landlock needs the kernel to have it (5.13 for the first ABI, 6.2 for truncation, which is the one this build asks for), and a kernel without it is refused at startup rather than silently unbounded. The network bound is all or nothing: a filter can refuse an address family, not a list of hosts. And the two limits bound address space and one file's size, not the memory a process actually touches.
+
+The alternative to all of this was to keep `permissions` a document. That is what it was, and a reader of the configuration believed a boundary existed.
