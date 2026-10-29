@@ -1,5 +1,9 @@
 # Directory Update Log
 
+## 2026-10-29
+* **Update**: Added the complexity policy. cccc measures every function, the ceilings are 15 cognitive and 25 cyclomatic, and the baseline of existing offenders may only shrink.
+* **Update**: Split `Timestamp::parse` into date, fraction, and offset helpers and removed its baseline entry.
+
 ## 2026-10-27
 * **Update**: The mutation policy names the property tests that now exist: canonical encoding uniqueness, the fold's tip and depth, fold determinism, and the state a rejected event leaves behind.
 * **Update**: Recorded the delivered PRs in the PR plan, and the work each partial unit still owes. The page had not changed since unit 3 landed.

@@ -12,7 +12,7 @@ verified: { by: human:pranc1ngpegasus, at: 2026-10-25T14:07:44Z }
 
 Every PR targets `main`, is independently green, and leaves the tree working. Nothing lands that a later PR has to fix before the tree builds. The order follows one rule. A unit is built only after the unit it depends on can be verified on its own.
 
-Each PR's gate is the same five checks. Format, clippy with warnings denied, the workspace test suite, mutation limited to the changed lines with zero missed and zero timeouts, and the spec check when the bundle changed.
+Each PR's gate is the same six checks. Format, clippy with warnings denied, the workspace test suite, the complexity gate, mutation limited to the changed lines with zero missed and zero timeouts, and the spec check when the bundle changed.
 
 This page holds the plan and its state. A unit names the PR that delivered it, or the work it still owes.
 
@@ -62,7 +62,7 @@ Four things the definition of done names are not yet true. Nothing accepts a tur
 | 19 | `feat(model): the anthropic adapter` | new | The second adapter that the [model gateway](../architecture/model-gateway.md) specifies for the first release. |
 | 20 | `feat(nix): the launchd plist` | 6 | Unit 6 still owes macOS. |
 
-# Gates beyond the five checks
+# Gates beyond the six checks
 
 - A unit that changes supervision runs a boot test on both supervisors. On Linux, `systemd-run --user` is not available in CI, so the test asserts the generated unit against a checked-in expected file, and a manual boot check is recorded in the PR body.
 - A surface unit changes an interaction. It carries a screenshot and a short video of the surface driving a real store, and the operator reviews before merge.

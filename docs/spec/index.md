@@ -29,6 +29,7 @@ okf_version: "0.2"
 # Delivery
 
 * [Mutation policy](delivery/mutation-policy.md) - The 100 percent killed rule, its scope, its exceptions, and the CI gate.
+* [Complexity policy](delivery/complexity-policy.md) - The cognitive and cyclomatic ceilings, a baseline that only shrinks, and the cccc check.
 * [PR plan](delivery/pr-plan.md) - The stacked PR sequence on `main`, one verifiable unit per PR.
 
 # History
