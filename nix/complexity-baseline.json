@@ -1,0 +1,62 @@
+{
+  "thresholds": {
+    "cognitive": 15,
+    "cyclomatic": 25
+  },
+  "allowed": [
+    {
+      "path": "crates/core/src/canonical.rs",
+      "name": "write_data",
+      "cognitive": 18,
+      "cyclomatic": 31
+    },
+    {
+      "path": "crates/core/src/fold.rs",
+      "name": "apply",
+      "cognitive": 50,
+      "cyclomatic": 43
+    },
+    {
+      "path": "crates/core/src/fold.rs",
+      "name": "sequence",
+      "cognitive": 18,
+      "cyclomatic": 19
+    },
+    {
+      "path": "crates/agentd/src/main.rs",
+      "name": "drive",
+      "cognitive": 17,
+      "cyclomatic": 11
+    },
+    {
+      "path": "crates/model/src/http.rs",
+      "name": "call",
+      "cognitive": 22,
+      "cyclomatic": 11
+    },
+    {
+      "path": "crates/runtime/src/config.rs",
+      "name": "parse",
+      "cognitive": 38,
+      "cyclomatic": 29
+    },
+    {
+      "path": "crates/store/src/lib.rs",
+      "name": "verify_anchors",
+      "cognitive": 17,
+      "cyclomatic": 11
+    },
+    {
+      "path": "crates/xtask/src/spec.rs",
+      "name": "is_timestamp",
+      "cognitive": 17,
+      "cyclomatic": 32
+    },
+    {
+      "path": "crates/core/src/time.rs",
+      "name": "parse",
+      "cognitive": 20,
+      "cyclomatic": 23
+    }
+  ]
+}

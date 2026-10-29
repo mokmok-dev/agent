@@ -68,6 +68,21 @@
                 cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
               }
             );
+            complexity =
+              pkgs.runCommand "complexity-gate"
+                {
+                  nativeBuildInputs = [
+                    cccc
+                    pkgs.jq
+                  ];
+                }
+                ''
+                  cp -r ${src} source
+                  chmod -R u+w source
+                  cd source
+                  bash ${./nix/complexity-gate.sh}
+                  touch $out
+                '';
             # The module is checked by evaluating a configuration and reading the
             # unit systemd would be given. A virtual machine test would be stronger
             # and cannot run in this sandbox, so this is the part that can be kept
@@ -178,6 +193,7 @@
               (with pkgs; [
                 cargo-mutants
                 cargo-nextest
+                jq
                 python3
                 rustToolchain
                 sccache
