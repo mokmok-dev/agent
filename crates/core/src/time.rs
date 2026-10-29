@@ -159,68 +159,85 @@ impl Timestamp {
     /// [`TimeError::BeforeEpoch`] for an instant before 1970.
     pub fn parse(text: &str) -> Result<Self, TimeError> {
         let bytes = text.as_bytes();
-        if bytes.len() < 19 {
-            return Err(TimeError::BadShape);
-        }
-        if bytes[4] != b'-'
-            || bytes[7] != b'-'
-            || bytes[10] != b'T'
-            || bytes[13] != b':'
-            || bytes[16] != b':'
-        {
-            return Err(TimeError::BadShape);
-        }
-        let year = i64::from(read_number(bytes, 0, 4)?);
-        let month = read_number(bytes, 5, 2)?;
-        let day = read_number(bytes, 8, 2)?;
-        let hour = read_number(bytes, 11, 2)?;
-        let minute = read_number(bytes, 14, 2)?;
-        let second = read_number(bytes, 17, 2)?;
+        let (days, second_of_day) = read_date_time(bytes)?;
+        let (nanos, cursor) = read_fraction(bytes, PREFIX_LEN)?;
+        let offset = read_offset(bytes, cursor)?;
+        Self::new(days * 86_400 + second_of_day - offset, nanos)
+    }
+}
 
-        if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
-            return Err(TimeError::OutOfRange);
-        }
-        if hour > 23 || minute > 59 || second > 59 {
-            return Err(TimeError::OutOfRange);
-        }
+const PREFIX_LEN: usize = 19;
 
-        let mut cursor = 19;
-        let mut nanos = 0_u32;
-        if bytes.get(cursor) == Some(&b'.') {
-            cursor += 1;
-            let digits = bytes[cursor..]
-                .iter()
-                .take_while(|byte| byte.is_ascii_digit())
-                .count();
-            if digits == 0 || digits > 9 {
-                return Err(TimeError::BadShape);
+fn read_date_time(bytes: &[u8]) -> Result<(i64, i64), TimeError> {
+    if bytes.len() < PREFIX_LEN {
+        return Err(TimeError::BadShape);
+    }
+    if bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return Err(TimeError::BadShape);
+    }
+    let year = i64::from(read_number(bytes, 0, 4)?);
+    let month = read_number(bytes, 5, 2)?;
+    let day = read_number(bytes, 8, 2)?;
+    let hour = read_number(bytes, 11, 2)?;
+    let minute = read_number(bytes, 14, 2)?;
+    let second = read_number(bytes, 17, 2)?;
+
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        return Err(TimeError::OutOfRange);
+    }
+    if hour > 23 || minute > 59 || second > 59 {
+        return Err(TimeError::OutOfRange);
+    }
+    Ok((
+        days_from_civil(year, month, day),
+        i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second),
+    ))
+}
+
+fn read_fraction(
+    bytes: &[u8],
+    cursor: usize,
+) -> Result<(u32, usize), TimeError> {
+    if bytes.get(cursor) != Some(&b'.') {
+        return Ok((0, cursor));
+    }
+    let start = cursor + 1;
+    let digits = bytes[start..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if digits == 0 || digits > 9 {
+        return Err(TimeError::BadShape);
+    }
+    let value = read_number(bytes, start, digits)?;
+    let nanos = value * 10_u32.pow(9 - u32::try_from(digits).map_err(|_| TimeError::BadShape)?);
+    Ok((nanos, start + digits))
+}
+
+fn read_offset(
+    bytes: &[u8],
+    cursor: usize,
+) -> Result<i64, TimeError> {
+    if cursor >= bytes.len() {
+        return Err(TimeError::BadOffset);
+    }
+    match bytes[cursor] {
+        b'Z' if cursor + 1 == bytes.len() => Ok(0),
+        sign @ (b'+' | b'-') if cursor + 6 == bytes.len() && bytes[cursor + 3] == b':' => {
+            let hours = i64::from(read_number(bytes, cursor + 1, 2)?);
+            let minutes = i64::from(read_number(bytes, cursor + 4, 2)?);
+            if hours > 23 || minutes > 59 {
+                return Err(TimeError::BadOffset);
             }
-            let value = read_number(bytes, cursor, digits)?;
-            nanos = value * 10_u32.pow(9 - u32::try_from(digits).map_err(|_| TimeError::BadShape)?);
-            cursor += digits;
-        }
-        if cursor >= bytes.len() {
-            return Err(TimeError::BadOffset);
-        }
-        let offset = match bytes[cursor] {
-            b'Z' if cursor + 1 == bytes.len() => 0,
-            sign @ (b'+' | b'-') if cursor + 6 == bytes.len() && bytes[cursor + 3] == b':' => {
-                let hours = i64::from(read_number(bytes, cursor + 1, 2)?);
-                let minutes = i64::from(read_number(bytes, cursor + 4, 2)?);
-                if hours > 23 || minutes > 59 {
-                    return Err(TimeError::BadOffset);
-                }
-                let magnitude = hours * 3_600 + minutes * 60;
-                if sign == b'-' { -magnitude } else { magnitude }
-            },
-            _ => return Err(TimeError::BadOffset),
-        };
-
-        let days = days_from_civil(year, month, day);
-        let secs =
-            days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second)
-                - offset;
-        Self::new(secs, nanos)
+            let magnitude = hours * 3_600 + minutes * 60;
+            Ok(if sign == b'-' { -magnitude } else { magnitude })
+        },
+        _ => Err(TimeError::BadOffset),
     }
 }
 

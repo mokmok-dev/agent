@@ -51,12 +51,6 @@
       "name": "is_timestamp",
       "cognitive": 17,
       "cyclomatic": 32
-    },
-    {
-      "path": "crates/core/src/time.rs",
-      "name": "parse",
-      "cognitive": 20,
-      "cyclomatic": 23
     }
   ]
 }
