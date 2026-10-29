@@ -127,7 +127,7 @@ fn request() -> Request {
     Request {
         model: "deepseek".to_string(),
         directive: "be careful".to_string(),
-        tools: String::new(),
+        tools: None,
         messages: vec![Message {
             call: None,
             calls: Vec::new(),

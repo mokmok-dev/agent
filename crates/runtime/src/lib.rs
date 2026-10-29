@@ -87,6 +87,8 @@ pub enum Network {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tool {
     pub name: String,
+    /// What the model is told the tool does.
+    pub description: String,
     pub schema: String,
     pub argv: Vec<String>,
     /// Whether running it twice is the same as running it once.
@@ -133,6 +135,8 @@ pub struct Settings {
     pub approval_grace: core::time::Duration,
     pub directive_version: String,
     pub directive: String,
+    /// Where every tool starts and the only tree it may write by default.
+    pub workspace: PathBuf,
     /// Tools in any order; the renderer sorts them by name.
     pub tools: Vec<Tool>,
     pub max_output_tokens: u64,
@@ -176,6 +180,8 @@ pub enum ReactorError {
     /// The call the log asks to run is not in the folded state, which means the
     /// state and the log disagree.
     NoSuchCall(CallId),
+    /// A rendered tool block is not the JSON array the provider's field needs.
+    Prompt(String),
 }
 
 impl fmt::Display for ReactorError {
@@ -197,6 +203,7 @@ impl fmt::Display for ReactorError {
             Self::NoModel => write!(formatter, "a turn is ready but no model is configured"),
             Self::Time(error) => write!(formatter, "time: {error}"),
             Self::NoSuchCall(call) => write!(formatter, "no call {call} is waiting"),
+            Self::Prompt(error) => write!(formatter, "prompt: {error}"),
         }
     }
 }
@@ -251,6 +258,8 @@ pub struct Reactor {
     /// Where a tool's process starts. The store's own directory, so a tool that
     /// writes files writes them somewhere the operator already knows.
     working_dir: PathBuf,
+    /// What the reactor does while a tool runs, so a long call feeds the watchdog.
+    heartbeat: Box<dyn FnMut()>,
     /// The calls this process has started. A call that is not here and has no
     /// result belongs to a run that ended before it could record one, and the
     /// log cannot tell the difference: only the process knows what it started.
@@ -279,6 +288,7 @@ impl Reactor {
             working_dir: path
                 .parent()
                 .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
+            heartbeat: Box::new(|| {}),
             started: std::collections::BTreeSet::new(),
             answered: std::collections::BTreeSet::new(),
             forks: 0,
@@ -335,9 +345,18 @@ impl Reactor {
         settings: Settings,
     ) -> Result<Self, ReactorError> {
         let mut reactor = Self::open(path)?;
+        reactor.working_dir.clone_from(&settings.workspace);
         reactor.provider = Some(provider);
         reactor.settings = Some(settings);
         Ok(reactor)
+    }
+
+    /// Sets what the reactor does while a tool runs.
+    pub fn set_heartbeat(
+        &mut self,
+        heartbeat: Box<dyn FnMut()>,
+    ) {
+        self.heartbeat = heartbeat;
     }
 
     /// Folds every branch into one state.
@@ -631,7 +650,8 @@ impl Reactor {
                 .map(|_| ());
         }
 
-        match exec::run(&tool, &args, &self.working_dir) {
+        let outcome = exec::run(&tool, &args, &self.working_dir, self.heartbeat.as_mut());
+        match outcome {
             Outcome::Ran(ran) => self
                 .append(
                     branch,
@@ -684,7 +704,7 @@ impl Reactor {
         let args = facts
             .asked
             .get(&call.turn)
-            .and_then(|asked| asked.requests.get(call.step as usize))
+            .and_then(|asked| asked.request(call))
             .map(|request| request.args.clone())
             .ok_or(ReactorError::NoSuchCall(call))?;
         Ok((name, args))
@@ -807,7 +827,8 @@ impl Reactor {
             },
         )?;
 
-        let request = Request::of(&prompt, &settings.model, settings.max_output_tokens);
+        let request = Request::of(&prompt, &settings.model, settings.max_output_tokens)
+            .map_err(|error| ReactorError::Prompt(error.to_string()))?;
         let mut output = String::new();
         let result = provider.call(&request, &mut |delta| match delta {
             agent_model::Delta::Text(piece) => output.push_str(piece),
@@ -817,6 +838,10 @@ impl Reactor {
         match result {
             Ok(completion) => {
                 let state_after = self.state()?;
+                let base = state_after
+                    .branch(branch)
+                    .and_then(|facts| facts.asked.get(&turn))
+                    .map_or(0, agent_core::fold::Asked::total_calls);
                 self.append(
                     branch,
                     &state_after,
@@ -825,6 +850,7 @@ impl Reactor {
                     Some(requested),
                     Some(turn),
                     EventKind::ModelResponded {
+                        base: Some(base),
                         calls: completion
                             .calls
                             .iter()
@@ -1031,6 +1057,7 @@ fn build_prompt(
         .iter()
         .map(|tool| ToolSchema {
             name: tool.name.as_str(),
+            description: tool.description.as_str(),
             schema: tool.schema.as_str(),
         })
         .collect();

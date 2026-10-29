@@ -13,8 +13,8 @@
     {
       "path": "crates/core/src/fold.rs",
       "name": "apply",
-      "cognitive": 50,
-      "cyclomatic": 43
+      "cognitive": 40,
+      "cyclomatic": 39
     },
     {
       "path": "crates/core/src/fold.rs",
@@ -33,12 +33,6 @@
       "name": "call",
       "cognitive": 22,
       "cyclomatic": 11
-    },
-    {
-      "path": "crates/runtime/src/config.rs",
-      "name": "parse",
-      "cognitive": 38,
-      "cyclomatic": 29
     },
     {
       "path": "crates/store/src/lib.rs",

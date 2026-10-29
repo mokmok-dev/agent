@@ -207,6 +207,11 @@ pub enum EventKind {
         warm: bool,
     },
     ModelResponded {
+        /// The step this response's first call carries.
+        ///
+        /// Absent on events written before a turn could ask for tools more than
+        /// once, so a re-fold gives those rounds the ids they were written with.
+        base: Option<u32>,
         /// The tools the model asked to run, in the order it asked.
         calls: Vec<ToolRequest>,
         finish: FinishReason,
@@ -478,6 +483,7 @@ pub(crate) mod tests {
                 warm: false,
             },
             EventKind::ModelResponded {
+                base: None,
                 calls: alloc::vec::Vec::new(),
                 finish: FinishReason::Stop,
                 input_tokens: 10,

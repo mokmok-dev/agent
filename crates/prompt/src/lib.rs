@@ -106,6 +106,7 @@ pub struct Directive<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolSchema<'a> {
     pub name: &'a str,
+    pub description: &'a str,
     pub schema: &'a str,
 }
 
@@ -231,25 +232,61 @@ impl Prompt {
     }
 }
 
-/// The tool block: every schema, in name order, length prefixed.
+/// The tool block: the exact JSON array the provider's `tools` field carries.
 ///
 /// Sorting makes two runs of the same code produce the same bytes whatever
-/// order the registry handed the tools over. The lengths make the concatenation
-/// injective, so no pair of schemas can be read as a different pair.
+/// order the registry handed the tools over. The schema is already JSON and is
+/// spliced in as it is; the name and description are escaped here, because they
+/// are text.
 fn tool_block(tools: &[ToolSchema<'_>]) -> String {
+    if tools.is_empty() {
+        return String::new();
+    }
     let mut sorted: Vec<&ToolSchema<'_>> = tools.iter().collect();
     sorted.sort_by(|left, right| left.name.cmp(right.name));
-    let mut out = String::new();
-    for tool in sorted {
-        out.push_str(&tool.name.len().to_string());
-        out.push(':');
-        out.push_str(tool.name);
-        out.push_str(&tool.schema.len().to_string());
-        out.push(':');
+    let mut out = String::from("[");
+    for (index, tool) in sorted.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"type\":\"function\",\"function\":{\"name\":");
+        push_json_string(&mut out, tool.name);
+        out.push_str(",\"description\":");
+        push_json_string(&mut out, tool.description);
+        out.push_str(",\"parameters\":");
         out.push_str(tool.schema);
+        out.push_str("}}");
     }
+    out.push(']');
     out
 }
+
+/// Writes one JSON string, including the quotes around it.
+fn push_json_string(
+    out: &mut String,
+    text: &str,
+) {
+    out.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if (control as u32) < 0x20 => {
+                out.push_str("\\u00");
+                let byte = control as u8;
+                out.push(char::from(HEX[(byte >> 4) as usize]));
+                out.push(char::from(HEX[(byte & 0xf) as usize]));
+            },
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+}
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// The next chain entry: the hash of the previous entry followed by this segment.
 ///

@@ -168,9 +168,11 @@ directive_version = "2026-10-26"
 directive = "You are a careful agent."
 max_output_tokens = 64
 timeout_seconds = 5
+workspace = {state:?}
 
 [[tools]]
 argv = ["cat"]
+class = "idempotent"
 name = "shell"
 risk = "read"
 schema = '{{"argv":"string"}}'
@@ -523,4 +525,151 @@ fn a_tool_call_becomes_an_intent_with_a_key() {
         },
         other => panic!("unexpected {other:?}"),
     }
+}
+
+/// Asks for one named tool, then answers with words.
+fn serve_named_call(
+    name: &str,
+    args: &str,
+) -> (String, std::thread::JoinHandle<Vec<Vec<u8>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binds a port");
+    let address = listener.local_addr().expect("an address");
+    let name = name.to_string();
+    let quoted = format!("\"{}\"", args.replace('\\', "\\\\").replace('"', "\\\""));
+    let handle = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        let (mut socket, _) = listener.accept().expect("accepts a connection");
+        seen.push(read_request(&mut socket));
+        let frames = [
+            format!(
+                r#"{{"choices":[{{"delta":{{"tool_calls":[{{"index":0,"id":"c1","function":{{"name":"{name}","arguments":{quoted}}}}}]}}}}]}}"#
+            ),
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#.to_string(),
+            r#"{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2}}"#.to_string(),
+            "[DONE]".to_string(),
+        ];
+        write_stream(&mut socket, &frames);
+        let (mut socket, _) = listener.accept().expect("accepts the second connection");
+        seen.push(read_request(&mut socket));
+        let frames = [
+            r#"{"choices":[{"delta":{"content":"read it"}}]}"#.to_string(),
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#.to_string(),
+            r#"{"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":4}}"#.to_string(),
+            "[DONE]".to_string(),
+        ];
+        write_stream(&mut socket, &frames);
+        seen
+    });
+    (format!("http://{address}"), handle)
+}
+
+fn run_with(
+    config: &Path,
+    env: &[(&str, &Path)],
+) -> Output {
+    let mut command = Command::new(BIN);
+    command.arg("--config").arg(config).arg("--once");
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command.output().expect("runs the daemon")
+}
+
+fn first_party_tool() -> PathBuf {
+    let exe = std::env::current_exe().expect("the test binary");
+    let debug = exe
+        .parent()
+        .and_then(Path::parent)
+        .expect("the target directory");
+    let tool = debug.join("agent-tool");
+    assert!(
+        tool.is_file(),
+        "build agent-tools first: {} is missing",
+        tool.display()
+    );
+    tool
+}
+
+fn write_preset_config(
+    dir: &Path,
+    base_url: &str,
+) -> PathBuf {
+    let workspace = dir.join("workspace");
+    std::fs::create_dir_all(&workspace).expect("creates the workspace");
+    let path = dir.join("agent.toml");
+    let text = format!(
+        r#"
+state_dir = {state:?}
+model = "test-model"
+base_url = {base:?}
+directive_version = "2026-10-26"
+directive = "You are a careful agent."
+max_output_tokens = 64
+timeout_seconds = 5
+workspace = {workspace:?}
+
+[[tools]]
+preset = "read_file"
+"#,
+        state = dir.to_string_lossy(),
+        base = base_url,
+        workspace = workspace.to_string_lossy()
+    );
+    std::fs::write(&path, text).expect("writes the configuration");
+    path
+}
+
+#[test]
+fn a_first_party_tool_runs_in_the_workspace() {
+    let dir = scratch("first-party");
+    let workspace = dir.join("workspace");
+    std::fs::create_dir_all(&workspace).expect("creates the workspace");
+    std::fs::write(workspace.join("hello.txt"), "hello from the workspace")
+        .expect("writes the file");
+    let copy = workspace.join("agent-tool");
+    std::fs::copy(first_party_tool(), &copy).expect("copies the tool");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = std::fs::metadata(&copy).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&copy, permissions).expect("sets the mode");
+    }
+    let (base_url, server) = serve_named_call("read_file", r#"{"path":"hello.txt"}"#);
+    let config = write_preset_config(&dir, &base_url);
+    let first = run_with(&config, &[("MOKMOK_TOOL", &copy)]);
+    assert!(
+        first.status.success(),
+        "the first pass starts the store: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    append_command(&dir, "read the file");
+    let second = run_with(&config, &[("MOKMOK_TOOL", &copy)]);
+    assert!(
+        second.status.success(),
+        "the turn is answered: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let requests = server.join().expect("the server finished");
+    assert_eq!(requests.len(), 2, "the result goes back");
+    let store = Store::open(&dir.join("agent.db")).expect("opens");
+    let events = store.load(ROOT).expect("loads");
+    let result = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ToolResult { output, status, .. } => Some((output, *status)),
+            _ => None,
+        })
+        .expect("a tool result");
+    assert_eq!(result.1, 0, "the tool ran: {}", result.0);
+    assert!(
+        result.0.contains("hello from the workspace"),
+        "the tool did not read the workspace: {}",
+        result.0
+    );
+    let second_request = String::from_utf8_lossy(&requests[1]).to_string();
+    assert!(
+        second_request.contains("hello from the workspace"),
+        "the result never reached the provider: {second_request}"
+    );
 }

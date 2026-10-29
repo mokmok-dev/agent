@@ -25,22 +25,31 @@ let
     inherit (cfg) model;
     state_dir = "/var/lib/${cfg.stateDirectory}";
     timeout_seconds = cfg.timeoutSeconds;
-    tools = map (tool: {
-      inherit (tool)
-        argv
-        class
-        name
-        risk
-        schema
-        ;
-      max_output_bytes = tool.maxOutputBytes;
-      permissions = {
-        inherit (tool) env network write;
-        file_bytes = tool.fileBytes;
-        memory_bytes = tool.memoryBytes;
-      };
-      timeout_ms = tool.timeoutMs;
-    }) cfg.tools;
+    inherit (cfg) workspace;
+    tools =
+      map (
+        name: { preset = name; } // lib.optionalAttrs (name == "run") { programs = cfg.runPrograms; }
+      ) cfg.toolPresets
+      ++ map (tool: {
+        inherit (tool)
+          argv
+          class
+          description
+          name
+          risk
+          schema
+          ;
+        max_output_bytes = tool.maxOutputBytes;
+        permissions = {
+          inherit (tool) env network write;
+          file_bytes = tool.fileBytes;
+          memory_bytes = tool.memoryBytes;
+        };
+        timeout_ms = tool.timeoutMs;
+      }) cfg.tools;
+    sandbox = {
+      none = !cfg.sandbox;
+    };
   }
   // lib.optionalAttrs (cfg.apiKeyFile != null) {
     api_key_file = "/run/credentials/mokmok-agent.service/api_key";
@@ -163,6 +172,64 @@ in
       description = "The deadline for one model call.";
     };
 
+    workspace = mkOption {
+      type = types.str;
+      default = "/var/lib/${cfg.stateDirectory}/workspace";
+      description = ''
+        The tree every tool starts in. The module creates it and makes it
+        writable. It must not be under /home or /root, which the unit masks.
+      '';
+    };
+
+    toolPresets = mkOption {
+      type = types.listOf (
+        types.enum [
+          "edit_file"
+          "list_dir"
+          "read_file"
+          "run"
+          "search"
+          "write_file"
+        ]
+      );
+      default = [
+        "edit_file"
+        "list_dir"
+        "read_file"
+        "run"
+        "search"
+        "write_file"
+      ];
+      description = "The first-party tools the agent may use.";
+    };
+
+    runPrograms = mkOption {
+      type = types.listOf types.str;
+      default = [
+        "cargo"
+        "git"
+        "nix"
+      ];
+      description = ''
+        The programs the run tool may start. An empty list refuses every
+        program, and a name with a path in it must be absolute.
+      '';
+    };
+
+    runtimePackages = mkOption {
+      type = types.listOf types.package;
+      default = with pkgs; [
+        bash
+        cargo
+        coreutils
+        git
+        nix
+        rustc
+      ];
+      defaultText = lib.literalExpression "with pkgs; [ bash cargo coreutils git nix rustc ]";
+      description = "The programs on the service PATH, so the run tool can find them.";
+    };
+
     sandbox = mkOption {
       type = types.bool;
       default = true;
@@ -190,12 +257,16 @@ in
                 "idempotent"
                 "non-idempotent"
               ];
-              default = "idempotent";
               description = ''
                 Whether running it twice is the same as running it once. A tool that
                 is not idempotent is never re-run after a crash; the log records
                 that the effect may have happened instead.
               '';
+            };
+            description = mkOption {
+              type = types.str;
+              default = "";
+              description = "The sentence the model reads about the tool.";
             };
             env = mkOption {
               type = types.listOf types.str;
@@ -282,7 +353,10 @@ in
         }
       );
       default = [ ];
-      description = "The tools in force. They are sent in name order.";
+      description = ''
+        Additional tools the operator writes. The first-party set is toolPresets,
+        and these are sent after it.
+      '';
     };
 
     user = mkOption {
@@ -307,6 +381,13 @@ in
       {
         assertion = !(cfg.apiKeyFile != null && cfg.apiKeyEnv != null);
         message = "services.mokmok-agent: set apiKeyFile or apiKeyEnv, not both.";
+      }
+      {
+        assertion =
+          cfg.workspace != "/"
+          && !(lib.hasPrefix "/home/" cfg.workspace)
+          && !(lib.hasPrefix "/root/" cfg.workspace);
+        message = "services.mokmok-agent: workspace must be outside /home, /root, and /.";
       }
     ];
 
@@ -348,6 +429,18 @@ in
         StateDirectory = cfg.stateDirectory;
         StateDirectoryMode = "0700";
 
+        Environment = [
+          "HOME=/var/lib/${cfg.stateDirectory}"
+          "TMPDIR=/tmp"
+          "LANG=C.UTF-8"
+        ]
+        ++ lib.optional (cfg.runtimePackages != [ ]) "PATH=${lib.makeBinPath cfg.runtimePackages}";
+        ReadWritePaths = [
+          cfg.workspace
+          "/var/lib/${cfg.stateDirectory}/tool-home"
+        ]
+        ++ lib.concatMap (tool: tool.write) cfg.tools;
+
         MemoryMax = cfg.memoryMax;
         TasksMax = 512;
 
@@ -382,7 +475,11 @@ in
     # A directory a tool may write has to be there before the sandbox mounts it,
     # and the daemon does not create directories it was only given permission to
     # use. The deployment creates them.
-    systemd.tmpfiles.rules = lib.concatMap (
+    systemd.tmpfiles.rules = [
+      "d ${cfg.workspace} 0750 ${cfg.user} ${cfg.group} - -"
+      "d /var/lib/${cfg.stateDirectory}/tool-home 0700 ${cfg.user} ${cfg.group} - -"
+    ]
+    ++ lib.concatMap (
       tool: map (path: "d ${path} 0750 ${cfg.user} ${cfg.group} - -") tool.write
     ) cfg.tools;
   };

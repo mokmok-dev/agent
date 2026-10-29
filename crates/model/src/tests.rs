@@ -197,7 +197,7 @@ fn request() -> Request {
     Request {
         model: "test".to_string(),
         directive: "be careful".to_string(),
-        tools: "4:read17:{\"path\":\"string\"}".to_string(),
+        tools: None,
         messages: vec![Message {
             call: None,
             calls: Vec::new(),

@@ -82,6 +82,29 @@ fn a_tool_writes_where_its_manifest_says_and_nowhere_else() {
 }
 
 #[test]
+fn a_tool_reads_inside_the_roots_and_nowhere_else() {
+    let visible = Scratch::new("read-visible");
+    let file = visible.0.join("visible");
+    std::fs::write(&file, b"seen").expect("writes the visible file");
+    let hidden = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let script = format!(
+        "for path in (r'{}', r'{}'):\n    try:\n        print(path, open(path).read()[:4])\n    except OSError:\n        print(path, 'refused')",
+        file.display(),
+        hidden.display()
+    );
+    let output = run(
+        &[MEMORY, FILE, "--network=none"],
+        &["python3", "-c", &script],
+    );
+    let said = said(&output);
+    assert!(said.contains(&format!("{} seen", file.display())), "{said}");
+    assert!(
+        said.contains(&format!("{} refused", hidden.display())),
+        "a file outside the read roots was readable: {said}"
+    );
+}
+
+#[test]
 fn a_write_is_refused_even_where_the_daemon_could_write() {
     // The daemon's own state directory is the case that matters: a tool that can
     // edit the log is a tool that can rewrite history.

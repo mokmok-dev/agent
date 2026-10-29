@@ -311,3 +311,9 @@ Unit 22 is a prerequisite for `run`. The executor currently waits for the child 
 # What this does not do
 
 It does not add network tools, a browser, MCP, or a second tool protocol. It does not make `run` safe against a kernel exploit, and it does not bound reads by anything beyond the fixed roots and the workspace. The allowlist is a tool-level check, so an allowed program can start children of its own. It does not merge branches, and it does not change the approval semantics for a future network or destructive tool.
+
+# What landed
+
+The first implementation covers units 21 to 26 and 28. The registry, the six tools, the workspace, the structured tools field, distinct call ids, the executor drain and heartbeat, the read roots, the dumpable daemon, the preset config, and the Nix module are in the tree. An end-to-end test runs `read_file` under `agent-confine` in a workspace.
+
+Still open. Unit 27 does not write the cache ledger, so a tool-set change is visible in the prefix hash but not in a cached-token report. Unit 29 has not rewritten the stable policy pages. `tool.intent` does not yet record the program list, and `fetch` waits for per-host approval.

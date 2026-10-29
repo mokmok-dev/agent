@@ -11,11 +11,12 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use super::{arch_of, bounds_from, plan, probe, search};
+use super::{READ_ROOTS, arch_of, bounds_from, hide_from_tools, plan, probe, search};
 use crate::{Network, Settings, Tool};
 
 fn tool() -> Tool {
     Tool {
+        description: String::new(),
         argv: vec!["/nix/store/coreutils/bin/cat".to_string()],
         confined: true,
         env: vec!["PATH".to_string()],
@@ -43,6 +44,7 @@ fn planned(tool: &Tool) -> Vec<String> {
         Path::new("/nix/store/agent/bin/agent-confine"),
         tool,
         Path::new("/nix/store/coreutils/bin/cat"),
+        Path::new("/tmp"),
     ))
 }
 
@@ -55,6 +57,7 @@ fn the_launcher_is_told_every_bound_the_manifest_states() {
             "--memory-bytes=268435456",
             "--file-bytes=8388608",
             "--network=none",
+            "--read=/tmp",
             "--",
             "/nix/store/coreutils/bin/cat",
         ]
@@ -93,16 +96,59 @@ fn the_command_line_reads_back_as_the_same_bounds() {
         Path::new("/bin/agent-confine"),
         &declared,
         Path::new("/nix/store/coreutils/bin/cat"),
+        Path::new("/tmp"),
     );
     let (bounds, program) = bounds_from(&argv[1..]).expect("the launcher's own line");
     assert_eq!(bounds.memory_bytes, declared.memory_bytes);
     assert_eq!(bounds.file_bytes, declared.file_bytes);
     assert_eq!(bounds.network, Network::Any);
     assert_eq!(bounds.write, declared.write);
+    assert!(
+        bounds
+            .read
+            .iter()
+            .any(|path| path == Path::new("/nix/store")),
+        "the fixed roots are the default"
+    );
     assert_eq!(
         words(&program),
         vec!["/nix/store/coreutils/bin/cat"],
         "the program and its arguments come after the separator"
+    );
+}
+
+#[test]
+fn a_read_root_the_command_line_adds_is_kept() {
+    let argv = vec![
+        OsString::from("--memory-bytes=1"),
+        OsString::from("--file-bytes=1"),
+        OsString::from("--network=none"),
+        OsString::from("--read=/srv/agent"),
+        OsString::from("--"),
+        OsString::from("/bin/true"),
+    ];
+    let (bounds, _) = bounds_from(&argv).expect("the launcher's own line");
+    assert!(
+        bounds
+            .read
+            .iter()
+            .any(|path| path == Path::new("/srv/agent")),
+        "the added root is missing from {:?}",
+        bounds.read
+    );
+    assert_eq!(
+        bounds.read.len(),
+        READ_ROOTS.len() + 1,
+        "the default roots were dropped"
+    );
+}
+
+#[test]
+fn the_daemon_can_hide_itself_from_tools() {
+    hide_from_tools().expect("sets the attribute");
+    assert_eq!(
+        rustix::process::dumpable_behavior().expect("reads the attribute"),
+        rustix::process::DumpableBehavior::NotDumpable
     );
 }
 
@@ -214,6 +260,7 @@ fn a_confined_tool_whose_launcher_is_not_there_is_refused_by_name() {
         directive_version: "test".to_string(),
         max_output_tokens: 64,
         model: "test-model".to_string(),
+        workspace: std::env::temp_dir(),
         tools: vec![tool()],
     };
     let said = probe(&settings).expect_err("there is no launcher here");

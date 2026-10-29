@@ -7,6 +7,7 @@ members = [
   "crates/prompt",
   "crates/runtime",
   "crates/store",
+  "crates/tools",
   "crates/wire",
   "crates/xtask",
 ]
@@ -18,6 +19,7 @@ agent-model = { path = "crates/model" }
 agent-prompt = { path = "crates/prompt" }
 agent-runtime = { path = "crates/runtime" }
 agent-store = { path = "crates/store" }
+agent-tools = { path = "crates/tools" }
 agent-wire = { path = "crates/wire" }
 blake3 = { version = "1", default-features = false }
 clap = { version = "4", default-features = false, features = [
@@ -27,10 +29,13 @@ clap = { version = "4", default-features = false, features = [
   "std",
   "usage",
 ] }
+globset = "0.4"
 landlock = "0.4.7"
 proptest = "1.12.0"
+regex = "1"
 rusqlite = "0.37"
 rustix = { version = "1", features = ["fs", "process", "thread"] }
+schemars = { version = "1", features = ["derive"] }
 seccompiler = "0.5"
 serde = { version = "1", default-features = false }
 serde_json = { version = "1", features = ["raw_value"] }

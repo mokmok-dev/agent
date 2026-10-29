@@ -183,6 +183,9 @@ struct ModelRequested {
 
 #[derive(Deserialize)]
 struct ModelResponded {
+    /// Absent from events written before a turn could ask for tools more than once.
+    #[serde(default)]
+    base: Option<u32>,
     /// Absent from events written before the response could ask for a tool.
     #[serde(default)]
     calls: Vec<WireRequest>,
@@ -360,6 +363,7 @@ fn decode_kind(
         taxonomy::MODEL_RESPONDED => {
             let payload: ModelResponded = payload(raw)?;
             EventKind::ModelResponded {
+                base: payload.base,
                 calls: payload
                     .calls
                     .into_iter()

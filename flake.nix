@@ -106,6 +106,7 @@
                             argv = [
                               "/run/current-system/sw/bin/true"
                             ];
+                            class = "idempotent";
                             env = [
                               "PATH"
                             ];
@@ -227,6 +228,8 @@
                   "-p"
                   "agent-runtime"
                   "-p"
+                  "agent-tools"
+                  "-p"
                   "agentd"
                 ];
                 pname = "agentd";
@@ -240,6 +243,7 @@
                 installPhase = ''
                   install -Dm755 target/release/agentd $out/bin/agentd
                   install -Dm755 target/release/agent-confine $out/bin/agent-confine
+                  install -Dm755 target/release/agent-tool $out/bin/agent-tool
                 '';
               }
             );

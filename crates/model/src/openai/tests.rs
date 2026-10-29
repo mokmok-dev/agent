@@ -8,7 +8,10 @@ fn request() -> Request {
     Request {
         model: "deepseek".to_string(),
         directive: "You are a careful agent.".to_string(),
-        tools: "4:read17:{\"path\":\"string\"}".to_string(),
+        tools: Some(
+            r#"[{"type":"function","function":{"name":"read","description":"read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}}]"#
+                .to_string(),
+        ),
         messages: vec![
             Message {
                 call: None,
@@ -38,13 +41,16 @@ fn the_body_carries_the_model_the_cap_and_streaming() {
 }
 
 #[test]
-fn the_directive_comes_first_as_a_system_message_and_the_tools_second() {
+fn the_directive_is_the_only_system_message_and_the_tools_are_a_field() {
     let body = encode(&request());
-    let first = body.find(r#""role":"system""#).expect("a system message");
-    let tools = body.find("4:read").expect("the tool block");
-    let user = body.find(r#""role":"user""#).expect("a user message");
-    assert!(first < tools, "{body}");
-    assert!(tools < user, "{body}");
+    assert_eq!(
+        body.matches(r#""role":"system""#).count(),
+        1,
+        "the tool block is not a second system message: {body}"
+    );
+    assert!(body.contains(r#""tools":["#), "{body}");
+    assert!(body.contains(r#""tool_choice":"auto""#), "{body}");
+    assert!(body.contains(r#""name":"read""#), "{body}");
 }
 
 #[test]
@@ -59,9 +65,10 @@ fn the_messages_keep_their_order_and_their_roles() {
 #[test]
 fn an_empty_tool_block_is_omitted_rather_than_sent_blank() {
     let mut bare = request();
-    bare.tools = String::new();
+    bare.tools = None;
     let body = encode(&bare);
     assert_eq!(body.matches(r#""role":"system""#).count(), 1, "{body}");
+    assert!(!body.contains(r#""tools":"#), "{body}");
 }
 
 #[test]
@@ -72,7 +79,7 @@ fn a_quote_in_a_message_is_escaped_rather_than_breaking_the_body() {
     assert!(body.contains(r#"he said \"hi\"\n"#), "{body}");
     let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid json");
     assert_eq!(
-        parsed["messages"][2]["content"].as_str(),
+        parsed["messages"][1]["content"].as_str(),
         Some("he said \"hi\"\n")
     );
 }
@@ -240,7 +247,7 @@ fn a_message_that_asked_for_tools_carries_them_on_the_wire() {
         role: agent_core::event::Role::Assistant,
         text: "",
     }]);
-    let request = crate::Request::of(&prompt, "m", 8);
+    let request = crate::Request::of(&prompt, "m", 8).expect("a request");
     let body = encode(&request);
     assert!(
         body.contains(r#"{"role":"assistant","content":"","tool_calls":[{"id":"t:0","type":"function","function":{"name":"shell","arguments":"{\"cmd\":\"date\"}"}}]}"#),
@@ -256,7 +263,7 @@ fn a_tool_message_carries_the_id_it_answers() {
         role: agent_core::event::Role::Tool,
         text: "noon",
     }]);
-    let request = crate::Request::of(&prompt, "m", 8);
+    let request = crate::Request::of(&prompt, "m", 8).expect("a request");
     let body = encode(&request);
     assert!(
         body.contains(r#"{"role":"tool","content":"noon","tool_call_id":"t:0"}"#),

@@ -298,6 +298,7 @@ mod tests {
             FinishReason::ToolCalls
         };
         EventKind::ModelResponded {
+            base: None,
             calls,
             finish,
             input_tokens: 1,

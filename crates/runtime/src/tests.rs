@@ -105,7 +105,9 @@ fn settings() -> Settings {
         model: "test-model".to_string(),
         directive_version: "v1".to_string(),
         directive: "be careful".to_string(),
+        workspace: std::env::temp_dir(),
         tools: vec![Tool {
+            description: String::new(),
             risk: agent_core::event::Risk::Read,
             argv: vec!["cat".to_string()],
             idempotent: true,
@@ -636,6 +638,7 @@ fn reactor_with_tools(
 ) -> Reactor {
     let mut with_tools = settings();
     with_tools.tools = vec![Tool {
+        description: String::new(),
         risk: agent_core::event::Risk::Read,
         argv: vec!["cat".to_string()],
         idempotent: true,
@@ -842,6 +845,7 @@ fn marker_tool_of(
 ) -> Tool {
     let marker = scratch.path.with_extension("ran");
     Tool {
+        description: String::new(),
         risk,
         argv: vec![
             "sh".to_string(),

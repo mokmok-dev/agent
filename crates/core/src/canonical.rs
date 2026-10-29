@@ -169,6 +169,33 @@ impl<'a> Object<'a> {
 }
 
 #[allow(
+    clippy::too_many_arguments,
+    reason = "the helper writes one payload's fields; a struct would restate the event variant at the call site"
+)]
+fn write_model_responded(
+    object: &mut Object<'_>,
+    base: Option<u32>,
+    calls: &[crate::event::ToolRequest],
+    finish: crate::event::FinishReason,
+    input_tokens: u64,
+    output: &str,
+    output_tokens: u64,
+    request: &str,
+    turn: crate::ids::TurnId,
+) {
+    if let Some(base) = base {
+        object.uint("base", u64::from(base));
+    }
+    object.requests("calls", calls);
+    object.string("finish", finish.as_str());
+    object.uint("input_tokens", input_tokens);
+    object.string("output", output);
+    object.uint("output_tokens", output_tokens);
+    object.string("request", request);
+    object.string("turn", &alloc::format!("{turn}"));
+}
+
+#[allow(
     clippy::too_many_lines,
     reason = "one flat table keeps the key order of every payload visible in one place; six helpers would each hold a fragment of one format"
 )]
@@ -241,6 +268,7 @@ fn write_data(
             object.boolean("warm", *warm);
         },
         EventKind::ModelResponded {
+            base,
             calls,
             finish,
             input_tokens,
@@ -249,13 +277,17 @@ fn write_data(
             request,
             turn,
         } => {
-            object.requests("calls", calls);
-            object.string("finish", finish.as_str());
-            object.uint("input_tokens", *input_tokens);
-            object.string("output", output);
-            object.uint("output_tokens", *output_tokens);
-            object.string("request", request);
-            object.string("turn", &alloc::format!("{turn}"));
+            write_model_responded(
+                &mut object,
+                *base,
+                calls,
+                *finish,
+                *input_tokens,
+                output,
+                *output_tokens,
+                request,
+                *turn,
+            );
         },
         EventKind::ModelCacheObserved {
             cached,
@@ -634,6 +666,7 @@ mod tests {
     #[test]
     fn a_response_carries_its_finish_reason() {
         let encoded = canonical(&event(EventKind::ModelResponded {
+            base: None,
             calls: alloc::vec::Vec::new(),
             finish: FinishReason::ToolCalls,
             input_tokens: 1,
@@ -648,6 +681,7 @@ mod tests {
     #[test]
     fn a_response_that_asked_for_tools_names_them() {
         let encoded = canonical(&event(EventKind::ModelResponded {
+            base: None,
             calls: alloc::vec![
                 ToolRequest {
                     args: r#"{"cmd":"ls"}"#.to_string(),
@@ -910,6 +944,7 @@ mod tests {
                 .prop_map(
                     |(calls, finish, input_tokens, output, output_tokens, request, turn)| {
                         EventKind::ModelResponded {
+                            base: None,
                             calls,
                             finish,
                             input_tokens,

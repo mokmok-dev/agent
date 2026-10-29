@@ -68,6 +68,7 @@ fn kinds() -> Vec<EventKind> {
             warm: false,
         },
         EventKind::ModelResponded {
+            base: None,
             calls: vec![agent_core::event::ToolRequest {
                 args: r#"{"cmd":"ls"}"#.to_string(),
                 tool: "shell".to_string(),
@@ -295,6 +296,7 @@ fn an_unknown_role_is_refused() {
 #[test]
 fn the_unknown_finish_reason_round_trips() {
     let original = event(EventKind::ModelResponded {
+        base: None,
         output: String::new(),
         calls: Vec::new(),
         finish: FinishReason::Unknown,
@@ -310,6 +312,7 @@ fn the_unknown_finish_reason_round_trips() {
 #[test]
 fn an_unknown_finish_reason_is_refused() {
     let body = agent_core::canonical::canonical(&event(EventKind::ModelResponded {
+        base: None,
         output: String::new(),
         calls: Vec::new(),
         finish: FinishReason::Stop,

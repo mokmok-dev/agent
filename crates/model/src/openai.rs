@@ -20,6 +20,10 @@ struct Body<'a> {
     stream: bool,
     stream_options: StreamOptions,
     max_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a serde_json::value::RawValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -53,28 +57,23 @@ struct StreamOptions {
 
 /// Encodes one request.
 ///
-/// The tool block goes in as a second system message rather than in a `tools`
-/// field, because the renderer hashed it as one segment and the chain must keep
-/// describing the bytes the provider actually reads. An adapter that sends
-/// schemas as structured tools would change those bytes, and would have to say
-/// so in the renderer rather than here.
+/// The tool block goes in the provider's `tools` field, spliced as the bytes the
+/// renderer hashed. The renderer no longer writes it as a system message, so the
+/// chain and the wire describe the same array.
 #[must_use]
 pub fn encode(request: &Request) -> String {
-    let mut messages = Vec::with_capacity(request.messages.len().saturating_add(2));
+    let tools: Option<&serde_json::value::RawValue> = request
+        .tools
+        .as_deref()
+        .and_then(|block| serde_json::from_str(block).ok());
+    let tool_choice = tools.is_some().then_some("auto");
+    let mut messages = Vec::with_capacity(request.messages.len().saturating_add(1));
     messages.push(WireMessage {
         role: Role::System.as_str(),
         content: &request.directive,
         tool_call_id: None,
         tool_calls: None,
     });
-    if !request.tools.is_empty() {
-        messages.push(WireMessage {
-            role: Role::System.as_str(),
-            content: &request.tools,
-            tool_call_id: None,
-            tool_calls: None,
-        });
-    }
     for message in &request.messages {
         // A message that asked for tools carries them, and a message that answers
         // one carries its id: the provider joins the pair by that id alone.
@@ -111,6 +110,8 @@ pub fn encode(request: &Request) -> String {
             include_usage: true,
         },
         max_tokens: request.max_output_tokens,
+        tools,
+        tool_choice,
     };
     serde_json::to_string(&body).unwrap_or_default()
 }

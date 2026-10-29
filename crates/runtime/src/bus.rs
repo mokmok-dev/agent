@@ -272,7 +272,8 @@ pub fn refusal(error: &ReactorError) -> Refusal {
         ReactorError::Store(agent_store::StoreError::BranchExists(_))
         | ReactorError::NoModel
         | ReactorError::Time(_)
-        | ReactorError::NoSuchCall(_) => Refusal::Failed(error.to_string()),
+        | ReactorError::NoSuchCall(_)
+        | ReactorError::Prompt(_) => Refusal::Failed(error.to_string()),
         ReactorError::Store(store) if store.is_corrupt() => Refusal::Corrupt(error.to_string()),
         ReactorError::Store(_) => Refusal::Storage(error.to_string()),
         ReactorError::Fold(_) => Refusal::Corrupt(error.to_string()),

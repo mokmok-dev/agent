@@ -146,12 +146,8 @@ fn next_intent(state: &State) -> Option<Step> {
             continue;
         }
         for (turn, asked) in &facts.asked {
-            let Some(request) = asked.requests.get(asked.filed as usize) else {
+            let Some((call, request)) = asked.next_unfiled(*turn) else {
                 continue;
-            };
-            let call = CallId {
-                turn: *turn,
-                step: asked.filed,
             };
             return Some(Step::Append(Intent {
                 branch: *branch,
@@ -379,6 +375,7 @@ mod tests {
             turn: TurnId,
         ) -> Event {
             self.push(EventKind::ModelResponded {
+                base: None,
                 calls: alloc::vec::Vec::new(),
                 finish: FinishReason::Stop,
                 input_tokens: 1,
@@ -511,6 +508,7 @@ mod tests {
         let turn = chain.turn();
         chain.requested(turn);
         chain.push(EventKind::ModelResponded {
+            base: None,
             calls: alloc::vec![
                 ToolRequest {
                     args: "{}".to_string(),

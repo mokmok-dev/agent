@@ -10,7 +10,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::event::{Event, EventKind, Risk, Role, ToolRequest};
+use crate::event::{ErrorClass, Event, EventKind, Risk, Role, ToolRequest};
 use crate::ids::{BranchId, CallId, EventId, TurnId};
 use crate::time::Timestamp;
 
@@ -139,11 +139,99 @@ pub struct PendingModel {
 /// that stops between that event and the transcript entry would otherwise leave
 /// an answer no later turn can see. Keeping it here makes the entry a decision
 /// the loop can repeat after a restart.
-/// The tools one turn asked for, and how many of them have been written out.
+/// One response's calls, with the step its first call carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Asked {
+pub struct AskedRound {
+    pub base: u32,
     pub requests: Vec<ToolRequest>,
     pub filed: u32,
+}
+
+/// What one turn asked the tools for, one round per response.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Asked {
+    pub rounds: Vec<AskedRound>,
+}
+
+impl Asked {
+    /// Adds a response's calls. Old events carry no base, and zero is the id
+    /// scheme they were written with.
+    pub fn push(
+        &mut self,
+        base: u32,
+        requests: Vec<ToolRequest>,
+    ) {
+        self.rounds.push(AskedRound {
+            base,
+            requests,
+            filed: 0,
+        });
+    }
+
+    /// The first call whose intent is not written yet, with the id it will carry.
+    #[must_use]
+    pub fn next_unfiled(
+        &self,
+        turn: TurnId,
+    ) -> Option<(CallId, &ToolRequest)> {
+        for round in &self.rounds {
+            if let Some(request) = round.requests.get(round.filed as usize) {
+                return Some((
+                    CallId {
+                        turn,
+                        step: round.base.saturating_add(round.filed),
+                    },
+                    request,
+                ));
+            }
+        }
+        None
+    }
+
+    /// The request a call names. The latest round wins where old rounds overlap.
+    #[must_use]
+    pub fn request(
+        &self,
+        call: CallId,
+    ) -> Option<&ToolRequest> {
+        for round in self.rounds.iter().rev() {
+            let length = u32::try_from(round.requests.len()).ok()?;
+            let end = round.base.saturating_add(length);
+            if call.step >= round.base && call.step < end {
+                return round.requests.get((call.step - round.base) as usize);
+            }
+        }
+        None
+    }
+
+    /// Records that a call's intent is written.
+    pub fn mark_filed(
+        &mut self,
+        call: CallId,
+    ) {
+        for round in self.rounds.iter_mut().rev() {
+            let length = u32::try_from(round.requests.len()).unwrap_or(u32::MAX);
+            let end = round.base.saturating_add(length);
+            if call.step >= round.base && call.step < end {
+                round.filed = round.filed.max(call.step - round.base + 1);
+                return;
+            }
+        }
+    }
+
+    /// How many responses this turn has seen.
+    #[must_use]
+    pub const fn rounds(&self) -> usize {
+        self.rounds.len()
+    }
+
+    /// How many calls every round before this one asked for.
+    #[must_use]
+    pub fn total_calls(&self) -> u32 {
+        self.rounds.iter().fold(0_u32, |total, round| {
+            total.saturating_add(u32::try_from(round.requests.len()).unwrap_or(u32::MAX))
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,10 +301,7 @@ fn reopen(
     if !branch.pending.is_empty() || branch.archived {
         return;
     }
-    let rounds = branch
-        .asked
-        .get(&call.turn)
-        .map_or(0, |asked| asked.requests.len());
+    let rounds = branch.asked.get(&call.turn).map_or(0, Asked::rounds);
     if rounds >= MAX_TOOL_ROUNDS {
         return;
     }
@@ -228,6 +313,92 @@ fn reopen(
         attempts: 0,
         due: None,
     });
+}
+
+/// Files one response, its calls, and the step each call starts at.
+fn respond(
+    branch: &mut Branch,
+    event: &Event,
+    base: Option<u32>,
+    calls: &[ToolRequest],
+    turn: TurnId,
+    output: &str,
+    output_tokens: u64,
+) -> Result<(), FoldError> {
+    if !branch.has_turn(turn) {
+        return Err(FoldError::UnknownTurn(turn));
+    }
+    branch.pending_model = None;
+    if calls.is_empty() {
+        // An answer with no words in it is not an answer, and an answer with
+        // words is filed by a decision so a restart can repeat it.
+        if !output.is_empty() {
+            branch.unfiled = Some(UnfiledReply {
+                turn,
+                content: String::from(output),
+                tokens: output_tokens,
+            });
+        }
+        return Ok(());
+    }
+    // A response that asked for tools is part of the conversation as it stands:
+    // the provider needs it in front of the results, with the ids those results
+    // will answer. Nothing else records it, so the fold puts it here.
+    let base = base.unwrap_or(0);
+    branch
+        .asked
+        .entry(turn)
+        .or_default()
+        .push(base, calls.to_vec());
+    branch.messages.push(Message {
+        role: Role::Assistant,
+        call: None,
+        depth: event.depth,
+        calls: calls
+            .iter()
+            .enumerate()
+            .map(|(step, request)| AskedCall {
+                call: CallId {
+                    turn,
+                    step: base.saturating_add(u32::try_from(step).unwrap_or(u32::MAX)),
+                },
+                args: request.args.clone(),
+                tool: request.tool.clone(),
+            })
+            .collect(),
+        content: String::from(output),
+        tokens: Some(output_tokens),
+        turn: Some(turn),
+    });
+    Ok(())
+}
+
+/// Records a call the process could not finish, and tells the model.
+fn fail(
+    branch: &mut Branch,
+    event: &Event,
+    call: &CallId,
+    class: ErrorClass,
+    may_have_happened: bool,
+) -> Result<(), FoldError> {
+    if branch.pending.remove(call).is_none() {
+        return Err(FoldError::UnknownCall(*call));
+    }
+    let mut content = alloc::format!("tool call {call} failed: {}", class.as_str());
+    if may_have_happened {
+        content.push_str(" (the effect may have happened)");
+    }
+    branch.messages.push(Message {
+        role: Role::Tool,
+        call: Some(*call),
+        depth: event.depth,
+        calls: Vec::new(),
+        content,
+        tokens: None,
+        turn: Some(call.turn),
+    });
+    reopen(branch, *call);
+    Ok(())
 }
 
 impl Branch {
@@ -433,60 +604,13 @@ impl State {
                 }
             },
             EventKind::ModelResponded {
+                base,
                 calls,
                 turn,
                 output,
                 output_tokens,
                 ..
-            } => {
-                if !branch.has_turn(*turn) {
-                    return Err(FoldError::UnknownTurn(*turn));
-                }
-                branch.pending_model = None;
-                if calls.is_empty() {
-                    // An answer with no words in it is not an answer, and an answer
-                    // with words is filed by a decision so a restart can repeat it.
-                    if !output.is_empty() {
-                        branch.unfiled = Some(UnfiledReply {
-                            turn: *turn,
-                            content: output.clone(),
-                            tokens: *output_tokens,
-                        });
-                    }
-                } else {
-                    // A response that asked for tools is part of the conversation as
-                    // it stands: the provider needs it in front of the results, with
-                    // the ids those results will answer. Nothing else records it, so
-                    // the fold puts it here, output and all.
-                    branch.asked.insert(
-                        *turn,
-                        Asked {
-                            requests: calls.clone(),
-                            filed: 0,
-                        },
-                    );
-                    branch.messages.push(Message {
-                        role: Role::Assistant,
-                        call: None,
-                        depth: event.depth,
-                        calls: calls
-                            .iter()
-                            .enumerate()
-                            .map(|(step, request)| AskedCall {
-                                call: CallId {
-                                    turn: *turn,
-                                    step: u32::try_from(step).unwrap_or(u32::MAX),
-                                },
-                                args: request.args.clone(),
-                                tool: request.tool.clone(),
-                            })
-                            .collect(),
-                        content: output.clone(),
-                        tokens: Some(*output_tokens),
-                        turn: Some(*turn),
-                    });
-                }
-            },
+            } => respond(branch, event, *base, calls, *turn, output, *output_tokens)?,
             EventKind::ModelFailed {
                 turn, retryable, ..
             } => {
@@ -582,7 +706,7 @@ impl State {
                 }
                 branch.pending.insert(*call, tool.clone());
                 if let Some(asked) = branch.asked.get_mut(&call.turn) {
-                    asked.filed = asked.filed.max(call.step + 1);
+                    asked.mark_filed(*call);
                 }
             },
             EventKind::ToolResult { call, output, .. } => {
@@ -602,11 +726,11 @@ impl State {
                 });
                 reopen(branch, *call);
             },
-            EventKind::ToolFailed { call, .. } => {
-                if branch.pending.remove(call).is_none() {
-                    return Err(FoldError::UnknownCall(*call));
-                }
-            },
+            EventKind::ToolFailed {
+                call,
+                class,
+                may_have_happened,
+            } => fail(branch, event, call, *class, *may_have_happened)?,
             EventKind::BranchCreated { .. }
             | EventKind::InstanceStarted { .. }
             | EventKind::InstanceStopping { .. }
@@ -926,6 +1050,7 @@ mod tests {
         });
         state.apply(&model).expect("folds");
         let responded = chain.push(EventKind::ModelResponded {
+            base: None,
             calls: alloc::vec::Vec::new(),
             finish: FinishReason::Stop,
             input_tokens: 1,
@@ -949,7 +1074,9 @@ mod tests {
         let Some(asked) = branch.asked.get(&turn()) else {
             return (0, 0);
         };
-        (asked.requests.len(), asked.filed)
+        let requests = asked.rounds.iter().map(|round| round.requests.len()).sum();
+        let filed = asked.rounds.iter().map(|round| round.filed).sum();
+        (requests, filed)
     }
 
     #[test]
@@ -961,6 +1088,7 @@ mod tests {
         });
         state.apply(&requested).expect("folds");
         let responded = chain.push(EventKind::ModelResponded {
+            base: None,
             calls: alloc::vec![ToolRequest {
                 args: "{}".to_string(),
                 tool: "clock".to_string(),
@@ -1335,6 +1463,7 @@ mod tests {
         });
         state.apply(&requested).expect("folds");
         let responded = chain.push(EventKind::ModelResponded {
+            base: None,
             calls: alloc::vec![
                 ToolRequest {
                     args: "{}".to_string(),
@@ -1390,6 +1519,7 @@ mod tests {
         });
         state.apply(&requested).expect("folds");
         let responded = chain.push(EventKind::ModelResponded {
+            base: None,
             calls: alloc::vec![ToolRequest {
                 args: "{}".to_string(),
                 tool: "clock".to_string(),
@@ -1445,6 +1575,7 @@ mod tests {
         });
         state.apply(&requested).expect("folds");
         let responded = chain.push(EventKind::ModelResponded {
+            base: None,
             calls: alloc::vec![ToolRequest {
                 args: "{}".to_string(),
                 tool: "clock".to_string(),
@@ -1613,6 +1744,7 @@ mod tests {
         });
         state.apply(&requested).expect("folds");
         let responded = chain.push(EventKind::ModelResponded {
+            base: None,
             calls: alloc::vec![ToolRequest {
                 args: "{}".to_string(),
                 tool: "clock".to_string(),
@@ -1835,6 +1967,7 @@ mod tests {
         });
         state.apply(&requested).expect("folds");
         let responded = chain.push(EventKind::ModelResponded {
+            base: None,
             calls: alloc::vec![ToolRequest {
                 args: "{}".to_string(),
                 tool: "clock".to_string(),
@@ -2074,6 +2207,7 @@ mod tests {
                     output_tokens,
                 } => {
                     events.push(chain.push(EventKind::ModelResponded {
+                        base: None,
                         calls: Vec::new(),
                         finish: FinishReason::Stop,
                         input_tokens,
@@ -2092,6 +2226,7 @@ mod tests {
                         });
                     }
                     events.push(chain.push(EventKind::ModelResponded {
+                        base: None,
                         calls,
                         finish: FinishReason::ToolCalls,
                         input_tokens: 1,

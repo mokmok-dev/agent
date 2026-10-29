@@ -7,7 +7,7 @@
 
 use std::path::Path;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent_model::{HttpProvider, Profile};
 use agent_runtime::bus::Refusal;
@@ -58,6 +58,16 @@ fn drive(
         .map_err(|error| error.to_string())?;
     let supervisor = std::env::var_os("NOTIFY_SOCKET");
     ping(supervisor.as_deref(), agent_runtime::notify::READY);
+    // A tool call is one loop iteration, so a long one would outlive the watchdog
+    // and systemd would restart the daemon in the middle of the effect.
+    let heartbeat_socket = supervisor.clone();
+    let mut last = Instant::now();
+    reactor.set_heartbeat(Box::new(move || {
+        if last.elapsed() >= Duration::from_secs(5) {
+            ping(heartbeat_socket.as_deref(), agent_runtime::notify::WATCHDOG);
+            last = Instant::now();
+        }
+    }));
     loop {
         let now = clock::now().map_err(|error| error.to_string())?;
         // The socket is read before the step: a command that arrived while the
@@ -113,6 +123,9 @@ fn ping(
 }
 
 fn run(args: &Args) -> Result<(), String> {
+    // A tool runs as the same user, and a dumpable daemon lets it read the key
+    // from /proc. Hide the process before anything opens the store.
+    agent_runtime::confine::hide_from_tools()?;
     let state_dir = match (&args.config, &args.state_dir) {
         (Some(path), _) => config_state_dir(path)?,
         (None, Some(dir)) => dir.clone(),

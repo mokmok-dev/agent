@@ -33,8 +33,30 @@ pub struct Bounds {
     pub file_bytes: u64,
     pub memory_bytes: u64,
     pub network: Network,
+    /// The roots the tool may read and execute.
+    pub read: Vec<PathBuf>,
     pub write: Vec<PathBuf>,
 }
+
+/// The roots every tool may read.
+///
+/// The store and the credential directory are absent on purpose. A tool that can
+/// read the log can rewrite history once it is copied, and a tool that can read
+/// the key can print it into the log.
+pub const READ_ROOTS: &[&str] = &[
+    "/nix/store",
+    "/nix/var/nix",
+    "/run/current-system",
+    "/etc",
+    "/proc",
+    "/dev",
+    "/tmp",
+    "/usr",
+    "/lib",
+    "/lib64",
+    "/bin",
+    "/sbin",
+];
 
 /// The whole command that starts a tool inside its bounds.
 ///
@@ -45,6 +67,7 @@ pub fn plan(
     launcher: &Path,
     tool: &Tool,
     program: &Path,
+    workspace: &Path,
 ) -> Vec<OsString> {
     let mut argv: Vec<OsString> = vec![
         launcher.to_path_buf().into_os_string(),
@@ -58,6 +81,7 @@ pub fn plan(
             }
         )
         .into(),
+        format!("--read={}", workspace.display()).into(),
     ];
     for directory in &tool.write {
         argv.push(format!("--write={}", directory.display()).into());
@@ -81,6 +105,7 @@ pub fn bounds_from(arguments: &[OsString]) -> Result<(Bounds, Vec<OsString>), St
     let mut file_bytes = None;
     let mut memory_bytes = None;
     let mut network = None;
+    let mut read: Vec<PathBuf> = READ_ROOTS.iter().map(PathBuf::from).collect();
     let mut write = Vec::new();
     let mut rest = arguments.iter();
 
@@ -93,6 +118,7 @@ pub fn bounds_from(arguments: &[OsString]) -> Result<(Bounds, Vec<OsString>), St
                 file_bytes: file_bytes.ok_or("--file-bytes is missing")?,
                 memory_bytes: memory_bytes.ok_or("--memory-bytes is missing")?,
                 network: network.ok_or("--network is missing")?,
+                read,
                 write,
             };
             return Ok((bounds, rest.map(OsString::from).collect()));
@@ -110,6 +136,7 @@ pub fn bounds_from(arguments: &[OsString]) -> Result<(Bounds, Vec<OsString>), St
                     other => return Err(format!("network is none or any, not {other}")),
                 });
             },
+            "--read" => read.push(PathBuf::from(value)),
             "--write" => write.push(PathBuf::from(value)),
             other => return Err(format!("{other} is not an option the launcher takes")),
         }
@@ -155,26 +182,39 @@ fn limit(
     rustix::process::setrlimit(resource, limit).map_err(|error| format!("{what} limit: {error}"))
 }
 
-/// Takes every write that the manifest did not declare.
+/// Takes every read and write that the manifest did not declare.
 ///
-/// The ruleset handles the whole write half of the filesystem, so a path with no
-/// rule is refused rather than unnoticed: the declared directories are the only
-/// places a rule exists for.
+/// The ruleset handles both halves of the filesystem, so a path with no rule is
+/// refused rather than unnoticed: the declared roots are the only places a rule
+/// exists for. A write root is readable too, because a tool has to read what it
+/// writes.
 fn filesystem(bounds: &Bounds) -> Result<(), String> {
     // The third ABI is the first that covers truncation, and truncation is a
     // write: without it a tool could empty a file it may not otherwise touch. A
     // kernel older than that is refused rather than bounded by halves.
-    let handled = AccessFs::from_write(ABI::V3);
+    let read = AccessFs::from_read(ABI::V3);
+    let write = AccessFs::from_write(ABI::V3);
+    let handled = read | write;
     let mut ruleset = Ruleset::default()
         .handle_access(handled)
         .map_err(|error| format!("landlock ruleset: {error}"))?
         .create()
         .map_err(|error| format!("landlock: {error}"))?;
+    for directory in &bounds.read {
+        // A root this host does not have is not a bound it can grant. The other
+        // roots still apply, and a missing root grants nothing.
+        let Ok(path) = PathFd::new(directory) else {
+            continue;
+        };
+        ruleset = ruleset
+            .add_rule(PathBeneath::new(path, read))
+            .map_err(|error| format!("{}: {error}", directory.display()))?;
+    }
     for directory in &bounds.write {
         let path =
             PathFd::new(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
         ruleset = ruleset
-            .add_rule(PathBeneath::new(path, handled))
+            .add_rule(PathBeneath::new(path, read | write))
             .map_err(|error| format!("{}: {error}", directory.display()))?;
     }
     // Every program redirects to /dev/null, and it holds nothing, so refusing it
@@ -190,7 +230,7 @@ fn filesystem(bounds: &Bounds) -> Result<(), String> {
         .map_err(|error| format!("landlock: {error}"))?;
     if status.ruleset != RulesetStatus::FullyEnforced {
         return Err(String::from(
-            "this kernel cannot enforce every write bound, so the tool was not started",
+            "this kernel cannot enforce every bound, so the tool was not started",
         ));
     }
     Ok(())
@@ -278,6 +318,21 @@ pub fn launcher() -> Result<PathBuf, String> {
 /// The launcher's name, which is also how it is found beside the daemon.
 pub const LAUNCHER: &str = "agent-confine";
 
+/// Keeps a same-uid tool from reading the daemon's environment or memory.
+///
+/// The provider key may be in the environment, and `/proc/<pid>/environ` is
+/// readable by the same user while the process is dumpable. A non-dumpable
+/// process has root-owned `/proc` entries, so the key stays out of reach without
+/// refusing `apiKeyEnv`.
+///
+/// # Errors
+///
+/// Returns the kernel's reason when the attribute cannot be set.
+pub fn hide_from_tools() -> Result<(), String> {
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+        .map_err(|error| format!("cannot hide the daemon from tools: {error}"))
+}
+
 /// Runs the bounds on this process and says whether they hold here.
 ///
 /// # Errors
@@ -300,6 +355,7 @@ pub fn probe(settings: &Settings) -> Result<(), String> {
                 Network::Any => "any",
             }
         ))
+        .arg(format!("--read={}", settings.workspace.display()))
         .arg("--")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

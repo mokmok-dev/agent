@@ -24,10 +24,12 @@ fn tools() -> Vec<ToolSchema<'static>> {
     vec![
         ToolSchema {
             name: "shell",
+            description: "run a program",
             schema: r#"{"argv":"string"}"#,
         },
         ToolSchema {
             name: "read",
+            description: "read a file",
             schema: r#"{"path":"string"}"#,
         },
     ]
@@ -56,8 +58,12 @@ fn tools_are_written_in_name_order_whatever_order_they_arrive_in() {
 fn the_tool_block_starts_with_read_because_it_sorts_first() {
     let prompt = render(&directive(), &tools(), &[]);
     let block = &prompt.segments[1].text;
-    let read = block.find("4:read").expect("read is in the block");
-    let shell = block.find("5:shell").expect("shell is in the block");
+    let read = block
+        .find(r#""name":"read""#)
+        .expect("read is in the block");
+    let shell = block
+        .find(r#""name":"shell""#)
+        .expect("shell is in the block");
     assert!(read < shell, "{block}");
 }
 
@@ -224,27 +230,32 @@ fn a_tool_segment_cannot_be_confused_by_a_name_that_looks_like_a_length() {
     let tricky = vec![
         ToolSchema {
             name: "4:read",
-            schema: "",
+            description: "one",
+            schema: "{}",
         },
         ToolSchema {
             name: "read",
-            schema: "",
+            description: "two",
+            schema: "{}",
         },
     ];
     let plain = vec![
         ToolSchema {
             name: "read",
-            schema: "",
+            description: "two",
+            schema: "{}",
         },
         ToolSchema {
             name: "4:read",
-            schema: "",
+            description: "one",
+            schema: "{}",
         },
     ];
     let left = render(&directive(), &tricky, &[]);
     let right = render(&directive(), &plain, &[]);
     assert_eq!(left.segments[1].text, right.segments[1].text);
-    assert_eq!(left.segments[1].text, "6:4:read0:4:read0:");
+    assert!(left.segments[1].text.contains(r#""name":"4:read""#));
+    assert!(left.segments[1].text.contains(r#""name":"read""#));
 }
 
 #[test]

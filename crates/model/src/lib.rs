@@ -56,8 +56,8 @@ pub struct Request {
     pub model: String,
     /// The standing instructions. Becomes the first system message.
     pub directive: String,
-    /// The tool block, already ordered and framed by the renderer.
-    pub tools: String,
+    /// The exact `tools` array the provider reads, or nothing when no tool is in force.
+    pub tools: Option<String>,
     pub messages: Vec<Message>,
     pub max_output_tokens: u64,
     /// The renderer's estimate of the input size, used only when the provider reports no usage.
@@ -75,21 +75,55 @@ pub struct Message {
     pub call: Option<String>,
 }
 
+/// Why a prompt could not become a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestError {
+    /// The tool block is not the JSON array the provider's field needs.
+    Tools,
+}
+
+impl core::fmt::Display for RequestError {
+    fn fmt(
+        &self,
+        formatter: &mut core::fmt::Formatter<'_>,
+    ) -> core::fmt::Result {
+        match self {
+            Self::Tools => formatter.write_str("the tool block is not a JSON array"),
+        }
+    }
+}
+
+impl std::error::Error for RequestError {}
+
 impl Request {
     /// Builds a request from a rendered prompt.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RequestError::Tools`] when the rendered block is not the JSON
+    /// array the provider's `tools` field takes. Dropping it silently would give
+    /// the model no tools and no reason why.
     pub fn of(
         prompt: &Prompt,
         model: &str,
         max_output_tokens: u64,
-    ) -> Self {
+    ) -> Result<Self, RequestError> {
         let mut directive = String::new();
-        let mut tools = String::new();
+        let mut tools = None;
         let mut messages = Vec::new();
         for segment in &prompt.segments {
             match segment.kind {
                 Kind::Directive => directive.clone_from(&segment.text),
-                Kind::Tools => tools.clone_from(&segment.text),
+                Kind::Tools => {
+                    if !segment.text.is_empty() {
+                        let block: &serde_json::value::RawValue =
+                            serde_json::from_str(&segment.text).map_err(|_| RequestError::Tools)?;
+                        if !block.get().trim_start().starts_with('[') {
+                            return Err(RequestError::Tools);
+                        }
+                        tools = Some(segment.text.clone());
+                    }
+                },
                 Kind::Message => {
                     if let Some(role) = segment.role {
                         messages.push(Message {
@@ -102,14 +136,14 @@ impl Request {
                 },
             }
         }
-        Self {
+        Ok(Self {
             model: model.to_string(),
             directive,
             tools,
             messages,
             max_output_tokens,
             input_tokens_estimate: prompt.tokens,
-        }
+        })
     }
 }
 

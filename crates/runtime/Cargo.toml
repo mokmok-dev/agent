@@ -9,6 +9,7 @@ agent-core.workspace = true
 agent-model.workspace = true
 agent-prompt.workspace = true
 agent-store.workspace = true
+agent-tools.workspace = true
 landlock.workspace = true
 libc = "0.2"
 rustix.workspace = true
