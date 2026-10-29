@@ -1,6 +1,10 @@
 # Directory Update Log
 
+## 2026-10-30
+* **Update**: Updated the draft tool suite design with `run`'s program allowlist, recorded in the intent.
+
 ## 2026-10-29
+* **Update**: Added a draft design for the first-party tool suite, the workspace, and the structured tools field.
 * **Update**: Added the complexity policy. cccc measures every function, the ceilings are 15 cognitive and 25 cyclomatic, and the baseline of existing offenders may only shrink.
 * **Update**: Split `Timestamp::parse` into date, fraction, and offset helpers and removed its baseline entry.
 

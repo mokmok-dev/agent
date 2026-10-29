@@ -9,5 +9,6 @@
 * [Runtime](runtime.md) - Processes, supervision, the reactor loop, the degradation ladder.
 * [Model gateway](model-gateway.md) - Providers, streaming, retries, accounting.
 * [Tools and effects](tools-and-effects.md) - Intent and result pairs, idempotency, approval.
+* [Tool suite](tool-suite.md) - The first-party tools, the registry, the workspace, and the provider's tools field.
 * [Observability](observability.md) - Logs, metrics, health, watchdog.
 * [Decisions](decisions.md) - What was chosen, what lost, and why.
