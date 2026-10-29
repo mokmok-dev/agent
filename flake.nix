@@ -49,6 +49,7 @@
             nativeBuildInputs = [ pkgs.python3 ];
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+          cccc = import ./nix/cccc.nix { inherit craneLib lib pkgs; };
         in
         {
           _module.args.pkgs = import nixpkgs {
@@ -181,6 +182,7 @@
                 rustToolchain
                 sccache
               ])
+              ++ [ cccc ]
               ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux (
                 with pkgs;
                 [
@@ -200,6 +202,7 @@
           };
 
           packages = {
+            inherit cccc;
             agentd = craneLib.buildPackage (
               commonArgs
               // {
