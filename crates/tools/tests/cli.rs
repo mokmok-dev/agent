@@ -59,12 +59,11 @@ fn call(
         .stderr(Stdio::piped())
         .spawn()
         .expect("starts the tool binary");
-    child
-        .stdin
-        .take()
-        .expect("the tool has standard input")
-        .write_all(input.as_bytes())
-        .expect("writes the arguments");
+    // A tool that refuses at startup never reads its input, and a closed pipe is
+    // that refusal and not a failure of the test.
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes());
+    }
     child.wait_with_output().expect("waits for the tool")
 }
 
