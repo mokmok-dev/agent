@@ -122,13 +122,16 @@ fn window(
     end: Option<usize>,
 ) -> Result<(Vec<String>, bool, usize), ToolError> {
     let file = File::open(path).map_err(|error| ToolError::io(path, &error))?;
+    // Every pass consumes at least one byte, so the file's own length bounds the
+    // walk: a reader that stops advancing ends it rather than spinning on it.
+    let bound = file.metadata().map_or(0, |metadata| metadata.len());
     let mut reader = BufReader::new(file);
     let mut lines = Vec::new();
     let mut number = 0;
     let mut content_bytes = 0;
     let mut stopped = false;
     let mut raw = Vec::new();
-    loop {
+    for _ in 0..=bound {
         if end.is_some_and(|end| number >= end) {
             break;
         }
@@ -172,10 +175,8 @@ fn line(
         }
         let newline = available.iter().position(|byte| *byte == b'\n');
         let take = newline.map_or(available.len(), |index| index + 1);
-        if raw.len() < limit {
-            let room = limit - raw.len();
-            raw.extend_from_slice(&available[..take.min(room)]);
-        }
+        let room = limit.saturating_sub(raw.len());
+        raw.extend_from_slice(&available[..take.min(room)]);
         total += take;
         reader.consume(take);
         if newline.is_some() {

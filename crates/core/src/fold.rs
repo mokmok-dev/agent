@@ -2572,6 +2572,25 @@ mod tests {
     }
 
     #[test]
+    fn a_short_later_round_does_not_hide_a_call_an_earlier_round_asked_for() {
+        let asked = asked_rounds(&[(0, &["a", "b", "c", "d", "e"]), (1, &["x"])]);
+        assert_eq!(
+            asked
+                .request(step_call(2))
+                .map(|request| request.tool.as_str()),
+            Some("c"),
+            "a step at the end of a narrow round still belongs to the wider one"
+        );
+    }
+
+    #[test]
+    fn filing_at_the_end_of_a_round_files_nothing() {
+        let mut asked = asked_rounds(&[(0, &["a", "b"])]);
+        asked.mark_filed(step_call(2));
+        assert_eq!(asked.rounds[0].filed, 0, "the end is exclusive");
+    }
+
+    #[test]
     fn the_rounds_and_their_calls_are_counted() {
         let asked = asked_rounds(&[(0, &["a", "b"]), (2, &["c", "d", "e"])]);
         assert_eq!(asked.rounds(), 2);

@@ -184,10 +184,17 @@ fn stop(child: &mut Child) {
 }
 
 /// Cuts the larger stream in half until the serialized answer fits its cap.
-fn shrink(output: &mut Output) {
-    while json_len(output) > Run::LIMITS.event_bytes {
+///
+/// Each pass at least halves one stream, and a stream is no larger than the cap,
+/// so the passes are bounded by the bits in one length: a wrong step ends the
+/// walk instead of never reaching it.
+pub(super) fn shrink(output: &mut Output) {
+    for _ in 0..=usize::BITS {
+        if json_len(output) <= Run::LIMITS.event_bytes {
+            return;
+        }
         if output.stdout.is_empty() && output.stderr.is_empty() {
-            break;
+            return;
         }
         if output.stdout.len() >= output.stderr.len() {
             let keep = output.stdout.len() / 2;
@@ -201,12 +208,17 @@ fn shrink(output: &mut Output) {
     }
 }
 
-const fn boundary(
+/// The nearest character boundary at or below `at`.
+pub(super) fn boundary(
     text: &str,
-    mut at: usize,
+    at: usize,
 ) -> usize {
-    while !text.is_char_boundary(at) {
-        at -= 1;
+    let mut at = at.min(text.len());
+    for _ in 0..=text.len() {
+        if text.is_char_boundary(at) {
+            return at;
+        }
+        at = at.saturating_sub(1);
     }
-    at
+    0
 }

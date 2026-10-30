@@ -266,7 +266,10 @@ fn cut(line: &str) -> String {
         return line.to_owned();
     }
     let mut end = TEXT_BYTES;
-    while !line.is_char_boundary(end) {
+    for _ in 0..=TEXT_BYTES {
+        if line.is_char_boundary(end) {
+            break;
+        }
         end -= 1;
     }
     format!("{}...", &line[..end])

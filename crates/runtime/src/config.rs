@@ -1522,13 +1522,27 @@ none = false
 
     #[test]
     fn a_program_name_with_an_equals_sign_or_no_text_is_refused() {
+        let (base, state) = writable("run-program");
         for program in ["", "a=b", "/bin/a=b"] {
-            let text =
-                format!("{MINIMAL}\n[[tools]]\npreset = \"run\"\nprograms = [{program:?}]\n");
+            let text = format!("{base}\n[[tools]]\npreset = \"run\"\nprograms = [{program:?}]\n");
             assert!(
                 parse(&text, &preset_env).is_err(),
                 "{program:?} was taken as a program name"
             );
         }
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn a_workspace_is_required_once_a_tool_is_named() {
+        let text = MINIMAL
+            .lines()
+            .filter(|line| !line.starts_with("workspace ="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            parse(&text, &no_env),
+            Err(ConfigError::Missing("workspace"))
+        );
     }
 }

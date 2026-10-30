@@ -303,6 +303,11 @@ fn a_listing_stops_at_its_entry_and_byte_caps() {
     assert!(out.truncated);
     let answer = serde_json::to_vec(&out).expect("serializes");
     assert!(answer.len() <= 24 * 1024);
+    assert!(
+        answer.len() > 24 * 1024 - 200,
+        "the listing was cut to {} bytes",
+        answer.len()
+    );
 }
 
 #[test]
@@ -1038,4 +1043,270 @@ fn the_bounds_are_the_ones_the_cap_table_names() {
     assert_eq!(list_dir::ListDir::LIMITS.event_bytes, 64 * 1024);
     assert_eq!(edit_file::EditFile::LIMITS.timeout_ms, 15_000);
     assert_eq!(edit_file::EditFile::LIMITS.event_bytes, 4 * 1024);
+}
+
+#[test]
+fn the_bounds_are_the_ones_the_cap_table_names_for_run_search_and_write() {
+    assert_eq!(run::Run::LIMITS.timeout_ms, 900_000);
+    assert_eq!(run::Run::LIMITS.event_bytes, 64 * 1024);
+    assert_eq!(search::Search::LIMITS.timeout_ms, 30_000);
+    assert_eq!(search::Search::LIMITS.event_bytes, 64 * 1024);
+    assert_eq!(write_file::WriteFile::LIMITS.timeout_ms, 15_000);
+    assert_eq!(write_file::WriteFile::LIMITS.event_bytes, 4 * 1024);
+}
+
+#[test]
+fn a_stream_is_kept_up_to_twenty_four_kilobytes() {
+    let dir = TempDir::new();
+    let workspace = dir.workspace();
+    let allow = shell();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    let out = run_sh(&ctx, "head -c 100000 /dev/zero | tr '\\0' a", &[]).expect("runs");
+    assert!(out.stdout_truncated);
+    assert_eq!(out.stdout.len(), 24 * 1024);
+}
+
+fn quiet() -> run::Output {
+    run::Output {
+        status: 0,
+        timed_out: false,
+        stdout: String::new(),
+        stderr: String::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+    }
+}
+
+#[test]
+fn an_answer_at_the_cap_is_not_cut_and_one_byte_over_is() {
+    let cap = 64 * 1024;
+    let overhead = serde_json::to_vec(&quiet()).expect("serializes").len();
+
+    let mut exact = quiet();
+    exact.stdout = "a".repeat(cap - overhead);
+    run::shrink(&mut exact);
+    assert_eq!(
+        serde_json::to_vec(&exact).expect("serializes").len(),
+        cap,
+        "an answer exactly at the cap was cut"
+    );
+    assert!(!exact.stdout_truncated);
+
+    let mut over = quiet();
+    over.stdout = "a".repeat(cap - overhead + 1);
+    run::shrink(&mut over);
+    let answer = serde_json::to_vec(&over).expect("serializes").len();
+    assert!(
+        answer <= cap,
+        "an answer of {answer} bytes stayed over {cap}"
+    );
+    assert!(over.stdout_truncated);
+    assert!(
+        over.stdout.len() >= 30_000,
+        "the stream was cut to {} bytes instead of halved",
+        over.stdout.len()
+    );
+}
+
+#[test]
+fn a_large_stderr_is_cut_even_when_stdout_is_empty() {
+    let cap = 64 * 1024;
+    let overhead = serde_json::to_vec(&quiet()).expect("serializes").len();
+    let mut output = quiet();
+    output.stderr = "a".repeat(cap - overhead + 1);
+    run::shrink(&mut output);
+    assert!(serde_json::to_vec(&output).expect("serializes").len() <= cap);
+    assert!(output.stderr_truncated);
+    assert_eq!(output.stdout, String::new());
+}
+
+#[test]
+fn a_cut_lands_on_a_character_boundary() {
+    assert_eq!(run::boundary("aé", 2), 1);
+    assert_eq!(run::boundary("aé", 9), 3);
+    assert_eq!(run::boundary("abc", 2), 2);
+}
+
+#[test]
+fn a_call_that_outlives_its_bound_answers_with_no_status_the_program_chose() {
+    let dir = TempDir::new();
+    let workspace = dir.workspace();
+    let allow = shell();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    let out = run::execute(
+        run::Args {
+            program: "sh".to_string(),
+            arguments: Some(vec!["-c".to_string(), "sleep 5".to_string()]),
+            stdin: None,
+        },
+        &ctx,
+        Duration::from_millis(50),
+    )
+    .expect("a timeout is still an answer");
+    assert!(out.timed_out);
+    assert_eq!(out.status, -1);
+}
+
+#[test]
+fn content_at_the_write_cap_is_written_and_one_byte_over_is_refused() {
+    let cap = 16 * 1024 * 1024;
+    let dir = TempDir::new();
+    let workspace = dir.workspace();
+    let allow = empty();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    let out = write_file::WriteFile::run(
+        write_file::Args {
+            path: "big.txt".to_string(),
+            content: "x".repeat(cap),
+        },
+        &ctx,
+    )
+    .expect("content of exactly the cap is writable");
+    assert_eq!(out.bytes, cap);
+    assert_eq!(
+        code(write_file::WriteFile::run(
+            write_file::Args {
+                path: "over.txt".to_string(),
+                content: "x".repeat(cap + 1),
+            },
+            &ctx,
+        )),
+        Code::TooLarge
+    );
+}
+
+#[test]
+fn writing_over_a_file_keeps_its_mode() {
+    let dir = TempDir::new();
+    dir.write("note.txt", "old");
+    let path = dir.path().join("note.txt");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("sets the mode");
+    let workspace = dir.workspace();
+    let allow = empty();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    write_file::WriteFile::run(
+        write_file::Args {
+            path: "note.txt".to_string(),
+            content: "new".to_string(),
+        },
+        &ctx,
+    )
+    .expect("writes");
+    let mode = std::fs::metadata(&path)
+        .expect("there")
+        .permissions()
+        .mode()
+        & 0o7777;
+    assert_eq!(mode, 0o640, "the mode was not the one the file had");
+}
+
+#[test]
+fn a_plain_subdirectory_is_walked_but_a_git_directory_is_not() {
+    let dir = TempDir::new();
+    dir.write("sub/note.txt", "needle");
+    dir.write(".git/note.txt", "needle");
+    let workspace = dir.workspace();
+    let allow = empty();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    let out = search::Search::run(
+        search::Args {
+            pattern: "needle".to_string(),
+            path: None,
+            glob: None,
+            case_sensitive: None,
+            max_results: None,
+        },
+        &ctx,
+    )
+    .expect("searches");
+    let paths: Vec<&str> = out
+        .matches
+        .iter()
+        .map(|found| found.path.as_str())
+        .collect();
+    assert_eq!(paths, ["sub/note.txt"]);
+}
+
+#[test]
+fn a_file_of_exactly_the_search_file_cap_is_read_and_one_byte_over_is_skipped() {
+    let cap = 1024 * 1024;
+    let dir = TempDir::new();
+    let mut exact = b"needle".to_vec();
+    exact.resize(cap, b'x');
+    dir.write_bytes("exact.txt", &exact);
+    let mut over = b"needle".to_vec();
+    over.resize(cap + 1, b'x');
+    dir.write_bytes("over.txt", &over);
+    let workspace = dir.workspace();
+    let allow = empty();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    let out = search::Search::run(
+        search::Args {
+            pattern: "needle".to_string(),
+            path: None,
+            glob: None,
+            case_sensitive: None,
+            max_results: None,
+        },
+        &ctx,
+    )
+    .expect("searches");
+    let paths: Vec<&str> = out
+        .matches
+        .iter()
+        .map(|found| found.path.as_str())
+        .collect();
+    assert_eq!(paths, ["exact.txt"]);
+}
+
+#[test]
+fn a_long_line_is_cut_at_a_character_boundary() {
+    let dir = TempDir::new();
+    let line = format!("{}é{}", "a".repeat(499), "b".repeat(100));
+    dir.write("long.txt", &line);
+    let workspace = dir.workspace();
+    let allow = empty();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    let out = search::Search::run(
+        search::Args {
+            pattern: "a".to_string(),
+            path: None,
+            glob: None,
+            case_sensitive: None,
+            max_results: None,
+        },
+        &ctx,
+    )
+    .expect("searches");
+    assert_eq!(out.matches[0].text, format!("{}...", "a".repeat(499)));
+}
+
+#[test]
+fn a_search_answer_is_cut_to_twenty_four_kilobytes_and_not_much_further() {
+    let dir = TempDir::new();
+    dir.write(
+        "many.txt",
+        &format!("needle{}\n", "x".repeat(140)).repeat(250),
+    );
+    let workspace = dir.workspace();
+    let allow = empty();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    let out = search::Search::run(
+        search::Args {
+            pattern: "needle".to_string(),
+            path: None,
+            glob: None,
+            case_sensitive: None,
+            max_results: None,
+        },
+        &ctx,
+    )
+    .expect("searches");
+    assert!(out.truncated);
+    let answer = serde_json::to_vec(&out).expect("serializes").len();
+    assert!(answer <= 24 * 1024, "{answer} bytes");
+    assert!(
+        answer > 24 * 1024 - 200,
+        "the answer was cut to {answer} bytes"
+    );
 }
