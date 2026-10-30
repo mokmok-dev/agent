@@ -373,3 +373,18 @@ fn agent_prompt_ref(
         tool: String::from(tool),
     }
 }
+
+#[test]
+fn the_tool_block_is_the_exact_bytes_a_provider_reads() {
+    assert_eq!(
+        super::tool_block(&tools()),
+        r#"[{"type":"function","function":{"name":"read","description":"read a file","parameters":{"path":"string"}}},{"type":"function","function":{"name":"shell","description":"run a program","parameters":{"argv":"string"}}}]"#
+    );
+}
+
+#[test]
+fn a_control_character_is_written_as_two_hex_digits_and_nothing_else_is() {
+    let mut out = String::new();
+    super::push_json_string(&mut out, "a\u{1}\u{1f} \u{7f}é\"\\");
+    assert_eq!(out, "\"a\\u0001\\u001f \u{7f}é\\\"\\\\\"");
+}

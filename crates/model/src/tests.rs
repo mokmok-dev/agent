@@ -5,7 +5,7 @@ use agent_prompt::{Directive, Prompt, render};
 
 use super::{
     Completion, Delta, MAX_DETAIL, Message, Profile, Provider, ProviderError, Purpose, Request,
-    RequestRecord, Usage, backoff,
+    RequestError, RequestRecord, Usage, backoff,
 };
 
 #[allow(dead_code, reason = "the codec's tests render through it too")]
@@ -279,4 +279,62 @@ fn a_cause_is_cut_on_a_character_boundary_so_the_log_cannot_be_filled_by_one() {
         ProviderError::Transport("x".repeat(MAX_DETAIL)).detail() == "x".repeat(MAX_DETAIL),
         "a cause that fits is kept whole"
     );
+}
+
+#[test]
+fn the_request_error_reads_as_the_sentence_it_is() {
+    assert_eq!(
+        RequestError::Tools.to_string(),
+        "the tool block is not a JSON array"
+    );
+}
+
+#[test]
+fn a_tool_block_that_is_json_but_not_an_array_is_refused() {
+    let prompt = Prompt {
+        directive_version: "v1".to_string(),
+        segments: vec![
+            agent_prompt::Segment {
+                kind: agent_prompt::Kind::Directive,
+                role: None,
+                text: "be careful".to_string(),
+                calls: Vec::new(),
+                call: None,
+                tokens: 0,
+            },
+            agent_prompt::Segment {
+                kind: agent_prompt::Kind::Tools,
+                role: None,
+                text: "{}".to_string(),
+                calls: Vec::new(),
+                call: None,
+                tokens: 0,
+            },
+        ],
+        chain: Vec::new(),
+        tokens: 0,
+    };
+    assert_eq!(
+        Request::of(&prompt, "test", 16).err(),
+        Some(RequestError::Tools)
+    );
+}
+
+#[test]
+fn a_tool_block_that_is_an_array_is_carried_into_the_request() {
+    let prompt = Prompt {
+        directive_version: "v1".to_string(),
+        segments: vec![agent_prompt::Segment {
+            kind: agent_prompt::Kind::Tools,
+            role: None,
+            text: "[{\"type\":\"function\"}]".to_string(),
+            calls: Vec::new(),
+            call: None,
+            tokens: 0,
+        }],
+        chain: Vec::new(),
+        tokens: 0,
+    };
+    let request = Request::of(&prompt, "test", 16).expect("an array is what the field takes");
+    assert_eq!(request.tools.as_deref(), Some("[{\"type\":\"function\"}]"));
 }

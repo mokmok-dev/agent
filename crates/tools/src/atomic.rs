@@ -37,12 +37,20 @@ pub fn replace(
 }
 
 fn create(parent: &Path) -> Result<(File, PathBuf), ToolError> {
+    create_from(parent, NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Creates the first of the eight names that is free, counting from `first`.
+fn create_from(
+    parent: &Path,
+    first: u64,
+) -> Result<(File, PathBuf), ToolError> {
     let mut last = None;
-    for _ in 0..8 {
+    for attempt in 0..8 {
         let temp = parent.join(format!(
             ".agent-tool.{}.{}.tmp",
             std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
+            first.wrapping_add(attempt)
         ));
         match OpenOptions::new()
             .write(true)
@@ -81,3 +89,6 @@ fn sync_directory(directory: &Path) -> Result<(), ToolError> {
         .and_then(|directory| directory.sync_all())
         .map_err(|error| ToolError::io(directory, &error))
 }
+
+#[cfg(test)]
+mod tests;

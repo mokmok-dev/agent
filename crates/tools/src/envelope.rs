@@ -74,27 +74,24 @@ pub fn json_len<T: Serialize + ?Sized>(value: &T) -> usize {
 }
 
 /// Keeps the longest prefix of `items` whose result fits `cap` bytes of JSON.
+///
+/// One candidate per possible length, in a walk bounded by the input, so a wrong
+/// comparison or a wrong step ends the walk instead of never reaching it.
 pub fn fit<T, O: Serialize>(
     items: &[T],
     cap: usize,
     build: impl Fn(&[T], bool) -> O,
 ) -> O {
-    let mut fits = 0;
-    let mut beyond = items.len();
-    while fits < beyond {
-        let middle = fits + (beyond - fits).div_ceil(2);
-        if json_len(&build(&items[..middle], middle < items.len())) <= cap {
-            fits = middle;
-        } else {
-            beyond = middle - 1;
-        }
-    }
-    let mut keep = fits;
-    loop {
+    let mut keep = items.len();
+    for _ in 0..=items.len() {
         let candidate = build(&items[..keep], keep < items.len());
         if json_len(&candidate) <= cap || keep == 0 {
             return candidate;
         }
-        keep -= 1;
+        keep = keep.saturating_sub(1);
     }
+    build(&[], items.is_empty())
 }
+
+#[cfg(test)]
+mod tests;

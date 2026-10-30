@@ -85,3 +85,29 @@ fn a_path_is_reported_relative_to_the_root() {
     assert_eq!(workspace.relative(&dir.path().join("a/b")), "a/b");
     assert_eq!(workspace.relative(&dir.path().join("a")), "a");
 }
+
+#[test]
+fn a_file_is_not_a_workspace() {
+    let dir = TempDir::new();
+    dir.write("note.txt", "x");
+    assert_eq!(
+        code(Workspace::open(&dir.path().join("note.txt"))),
+        Code::NotAFile
+    );
+}
+
+#[test]
+fn a_missing_directory_is_not_found() {
+    let dir = TempDir::new();
+    assert_eq!(
+        code(Workspace::open(&dir.path().join("absent"))),
+        Code::NotFound
+    );
+}
+
+#[test]
+fn a_workspace_that_is_there_opens_at_its_canonical_root() {
+    let dir = TempDir::new();
+    let workspace = Workspace::open(dir.path()).expect("opens");
+    assert_eq!(workspace.root(), dir.path());
+}

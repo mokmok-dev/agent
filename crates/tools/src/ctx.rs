@@ -57,12 +57,6 @@ impl<'a> Ctx<'a> {
         self.allow
     }
 
-    /// The environment values the tool was started with.
-    #[must_use]
-    pub fn env(&self) -> &[(String, OsString)] {
-        &self.env
-    }
-
     /// One environment value, when the tool has it.
     #[must_use]
     pub fn value(

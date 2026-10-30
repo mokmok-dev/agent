@@ -186,3 +186,70 @@ fn an_unknown_tool_is_a_usage_error() {
     let output = call(&["fetch"], &scratch.path, "{}");
     assert!(!output.status.success());
 }
+
+#[test]
+fn no_arguments_is_a_usage_error() {
+    let scratch = Scratch::new();
+    let output = call(&[], &scratch.path, "");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("usage: agent-tool"), "{stderr}");
+}
+
+#[test]
+fn an_unknown_flag_is_a_usage_error() {
+    let scratch = Scratch::new();
+    let output = call(&["--bogus"], &scratch.path, "");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("usage: agent-tool"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_schema_for_an_unknown_tool_is_a_usage_error() {
+    let scratch = Scratch::new();
+    let output = call(&["--schema", "fetch"], &scratch.path, "");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("there is no tool named fetch"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_tool_that_takes_no_program_list_refuses_one() {
+    let scratch = Scratch::new();
+    let output = call(&["read_file", "--allow=sh"], &scratch.path, "{}");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("does not take --allow=sh"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn an_input_that_cannot_be_read_is_a_failure_not_an_answer() {
+    let scratch = Scratch::new();
+    // A directory as standard input is the one descriptor a test can open that
+    // fails on the first read.
+    let input = std::fs::File::open(&scratch.path).expect("opens the directory");
+    let output = Command::new(BINARY)
+        .arg("read_file")
+        .current_dir(&scratch.path)
+        .stdin(Stdio::from(input))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("starts the tool binary");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot read standard input"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

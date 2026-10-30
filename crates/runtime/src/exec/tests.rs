@@ -196,3 +196,69 @@ fn a_process_that_kills_itself_reports_the_signal_as_minus_one() {
         Outcome::Failed(class, happened) => panic!("unexpected {class:?} {happened}"),
     }
 }
+
+#[test]
+fn the_head_keeps_one_byte_of_room_past_the_bound() {
+    let mut head = Vec::new();
+    super::keep_head(&mut head, b"ab", 2);
+    assert_eq!(head, b"ab");
+    super::keep_head(&mut head, b"c", 2);
+    assert_eq!(
+        head, b"abc",
+        "the byte past the bound is what says there was more"
+    );
+    super::keep_head(&mut head, b"d", 2);
+    assert_eq!(
+        head, b"abc",
+        "nothing more is kept once the bound is passed"
+    );
+}
+
+#[test]
+fn the_tail_keeps_the_last_half_of_a_long_chunk() {
+    let mut tail = Vec::new();
+    super::keep_tail(&mut tail, b"abcdef", 3);
+    assert_eq!(tail, b"def");
+}
+
+#[test]
+fn the_tail_drops_its_front_and_never_its_back() {
+    let mut tail = Vec::new();
+    super::keep_tail(&mut tail, b"abc", 4);
+    assert_eq!(tail, b"abc");
+    super::keep_tail(&mut tail, b"d", 4);
+    assert_eq!(tail, b"abcd");
+    super::keep_tail(&mut tail, b"ef", 4);
+    assert_eq!(tail, b"cdef", "the front is dropped, not the back");
+}
+
+#[test]
+fn a_zero_half_keeps_nothing() {
+    let mut tail = b"kept".to_vec();
+    super::keep_tail(&mut tail, b"abc", 0);
+    assert_eq!(
+        tail, b"kept",
+        "a zero bound drops nothing and keeps nothing"
+    );
+}
+
+#[test]
+fn a_stopped_tool_is_no_longer_running() {
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("starts a process to stop");
+    super::stop(&mut child);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(status) = child.try_wait().expect("waits") {
+            assert!(!status.success(), "a stopped tool did not fail");
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the tool was not stopped"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}

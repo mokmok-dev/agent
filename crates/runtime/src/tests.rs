@@ -1926,3 +1926,46 @@ fn route_maps_a_refused_fork_to_its_class() {
     assert!(matches!(reply, Err(Refusal::Usage(_))), "{reply:?}");
     assert_eq!(total_events(&scratch), before);
 }
+
+#[test]
+fn a_heartbeat_set_on_the_reactor_is_rung_while_a_tool_runs() {
+    let scratch = Scratch::new();
+    let mut with_tools = settings();
+    with_tools.tools = vec![Tool {
+        description: String::new(),
+        risk: agent_core::event::Risk::Read,
+        argv: vec!["sh".to_string(), "-c".to_string(), "sleep 0.2".to_string()],
+        idempotent: true,
+        max_output: 4096,
+        name: "shell".to_string(),
+        schema: r#"{"argv":"string"}"#.to_string(),
+        timeout: std::time::Duration::from_secs(5),
+        env: Vec::new(),
+        write: Vec::new(),
+        network: Network::Any,
+        memory_bytes: 256 * 1024 * 1024,
+        file_bytes: 8 * 1024 * 1024,
+        confined: false,
+    }];
+    let mut reactor =
+        Reactor::with_model(&scratch.path, Box::new(Asking), with_tools).expect("opens");
+    let rung = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&rung);
+    reactor.set_heartbeat(Box::new(move || {
+        counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+    reactor.start(now()).expect("starts");
+    let mut store = Store::open(&scratch.path).expect("opens");
+    send(&mut store, ROOT_BRANCH, "run the tool");
+    drop(store);
+    for _ in 0..12 {
+        let step = reactor.step(now()).expect("steps");
+        if matches!(step, Step::Idle) {
+            break;
+        }
+    }
+    assert!(
+        rung.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "a heartbeat set on the reactor was never rung"
+    );
+}

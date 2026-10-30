@@ -112,3 +112,6 @@ codes! {
     program_not_allowed: ProgramNotAllowed,
     exec: Exec,
 }
+
+#[cfg(test)]
+mod tests;

@@ -160,6 +160,11 @@ fn a_long_file_stops_at_the_content_cap_and_says_so() {
     .expect("reads");
     assert!(out.truncated);
     assert!(out.content.len() <= 48 * 1024);
+    assert!(
+        out.content.len() > 48 * 1024 - 100,
+        "the cap was spent on {} bytes of 48 KiB",
+        out.content.len()
+    );
     assert_eq!(out.lines, out.content.matches('\n').count());
 }
 
@@ -826,4 +831,211 @@ fn a_timeout_stops_the_whole_program() {
     .expect("runs");
     assert!(out.timed_out);
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn a_start_line_of_zero_is_invalid_args() {
+    let dir = TempDir::new();
+    dir.write("note.txt", "one\n");
+    let workspace = dir.workspace();
+    let allow = empty();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    assert_eq!(
+        code(read_file::ReadFile::run(
+            read_file::Args {
+                path: "note.txt".to_string(),
+                start_line: Some(0),
+                end_line: None,
+            },
+            &ctx,
+        )),
+        Code::InvalidArgs
+    );
+}
+
+#[test]
+fn an_end_before_the_start_is_invalid_args() {
+    let dir = TempDir::new();
+    dir.write("note.txt", "one\ntwo\nthree\n");
+    let workspace = dir.workspace();
+    let allow = empty();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    assert_eq!(
+        code(read_file::ReadFile::run(
+            read_file::Args {
+                path: "note.txt".to_string(),
+                start_line: Some(3),
+                end_line: Some(2),
+            },
+            &ctx,
+        )),
+        Code::InvalidArgs
+    );
+}
+
+#[test]
+fn a_start_past_the_end_of_an_empty_file_is_not_found() {
+    let dir = TempDir::new();
+    dir.write("empty.txt", "");
+    let workspace = dir.workspace();
+    let allow = empty();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    assert_eq!(
+        code(read_file::ReadFile::run(
+            read_file::Args {
+                path: "empty.txt".to_string(),
+                start_line: Some(2),
+                end_line: None,
+            },
+            &ctx,
+        )),
+        Code::NotFound
+    );
+}
+
+#[test]
+fn a_line_of_exactly_the_content_cap_is_read_whole() {
+    let dir = TempDir::new();
+    dir.write("exact.txt", &"a".repeat(48 * 1024));
+    let workspace = dir.workspace();
+    let allow = empty();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    let out = read_file::ReadFile::run(
+        read_file::Args {
+            path: "exact.txt".to_string(),
+            start_line: None,
+            end_line: None,
+        },
+        &ctx,
+    )
+    .expect("reads");
+    assert_eq!(out.lines, 1);
+    assert_eq!(out.content.len(), 48 * 1024, "a whole line was cut");
+    assert!(
+        !out.truncated,
+        "a line that fits the cap was reported as cut"
+    );
+}
+
+#[test]
+fn a_line_over_the_content_cap_is_cut_and_says_so() {
+    let dir = TempDir::new();
+    dir.write("over.txt", &"a".repeat(48 * 1024 + 1));
+    let workspace = dir.workspace();
+    let allow = empty();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    let out = read_file::ReadFile::run(
+        read_file::Args {
+            path: "over.txt".to_string(),
+            start_line: None,
+            end_line: None,
+        },
+        &ctx,
+    )
+    .expect("reads");
+    assert_eq!(out.lines, 1);
+    assert_eq!(out.content.len(), 48 * 1024);
+    assert!(out.truncated);
+}
+
+#[test]
+fn a_listing_names_a_file_size_and_leaves_a_directory_without_one() {
+    let dir = TempDir::new();
+    dir.write("five.txt", "12345");
+    dir.write("sub/x", "");
+    let workspace = dir.workspace();
+    let allow = empty();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    let out = list_dir::ListDir::run(
+        list_dir::Args {
+            path: None,
+            depth: Some(1),
+        },
+        &ctx,
+    )
+    .expect("lists");
+    let five = out
+        .entries
+        .iter()
+        .find(|entry| entry.path == "five.txt")
+        .expect("an entry");
+    assert_eq!(five.size, Some(5));
+    let sub = out
+        .entries
+        .iter()
+        .find(|entry| entry.path == "sub")
+        .expect("an entry");
+    assert_eq!(sub.size, None);
+}
+
+#[test]
+fn a_listing_of_depth_two_stops_before_the_third_level() {
+    let dir = TempDir::new();
+    dir.write("a/b/c.txt", "");
+    let workspace = dir.workspace();
+    let allow = empty();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    let out = list_dir::ListDir::run(
+        list_dir::Args {
+            path: None,
+            depth: Some(2),
+        },
+        &ctx,
+    )
+    .expect("lists");
+    let paths: Vec<&str> = out
+        .entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert_eq!(paths, ["a", "a/b"]);
+}
+
+#[test]
+fn a_file_at_the_edit_cap_is_edited_and_one_byte_over_is_refused() {
+    let cap = 16 * 1024 * 1024;
+    let dir = TempDir::new();
+    let mut bytes = vec![b'x'; cap];
+    bytes[..3].copy_from_slice(b"old");
+    dir.write_bytes("big.txt", &bytes);
+    let workspace = dir.workspace();
+    let allow = empty();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    let out = edit_file::EditFile::run(
+        edit_file::Args {
+            path: "big.txt".to_string(),
+            old: "old".to_string(),
+            new: "new".to_string(),
+            all: None,
+        },
+        &ctx,
+    )
+    .expect("a file of exactly the cap is editable");
+    assert_eq!(out.replacements, 1);
+
+    let mut over = bytes.clone();
+    over.push(b'x');
+    dir.write_bytes("over.txt", &over);
+    assert_eq!(
+        code(edit_file::EditFile::run(
+            edit_file::Args {
+                path: "over.txt".to_string(),
+                old: "old".to_string(),
+                new: "new".to_string(),
+                all: None,
+            },
+            &ctx,
+        )),
+        Code::TooLarge
+    );
+}
+
+#[test]
+fn the_bounds_are_the_ones_the_cap_table_names() {
+    assert_eq!(read_file::ReadFile::LIMITS.timeout_ms, 10_000);
+    assert_eq!(read_file::ReadFile::LIMITS.event_bytes, 64 * 1024);
+    assert_eq!(list_dir::ListDir::LIMITS.timeout_ms, 10_000);
+    assert_eq!(list_dir::ListDir::LIMITS.event_bytes, 64 * 1024);
+    assert_eq!(edit_file::EditFile::LIMITS.timeout_ms, 15_000);
+    assert_eq!(edit_file::EditFile::LIMITS.event_bytes, 4 * 1024);
 }

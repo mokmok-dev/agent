@@ -1,6 +1,7 @@
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 
-use super::{AllowError, Allowlist};
+use super::{AllowError, Allowlist, executable};
 use crate::Code;
 use crate::fixture::path_var;
 
@@ -84,4 +85,41 @@ fn an_empty_list_refuses_every_program() {
         "{}",
         error.message()
     );
+}
+
+#[test]
+fn a_nonempty_list_permits_something() {
+    assert!(!allow(&["sh"]).is_empty());
+}
+
+#[test]
+fn a_directory_is_not_a_program_even_with_every_execute_bit() {
+    let dir = crate::fixture::TempDir::new();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("sets the mode");
+    assert_eq!(executable(dir.path()), None);
+}
+
+#[test]
+fn a_file_without_an_execute_bit_is_not_a_program() {
+    let dir = crate::fixture::TempDir::new();
+    dir.write("plain", "x");
+    let path = dir.path().join("plain");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("sets the mode");
+    assert_eq!(executable(&path), None);
+}
+
+#[test]
+fn a_file_with_an_execute_bit_is_the_program() {
+    let dir = crate::fixture::TempDir::new();
+    dir.write("tool", "x");
+    let path = dir.path().join("tool");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("sets the mode");
+    assert_eq!(executable(&path), Some(path.clone()));
+}
+
+#[test]
+fn a_path_that_is_not_there_is_not_a_program() {
+    let dir = crate::fixture::TempDir::new();
+    assert_eq!(executable(&dir.path().join("absent")), None);
 }

@@ -2,6 +2,7 @@ use serde_json::Value;
 
 use super::{SelectError, registry, select, tool_block};
 use crate::Allowlist;
+use crate::Tool;
 use crate::fixture::{self, TempDir};
 
 /// The bytes the provider receives, pinned so a description or schema edit has
@@ -148,4 +149,71 @@ fn an_outside_path_is_reported_with_its_code() {
     let answer = (tool.call)(br#"{"path":"../secret"}"#, &ctx);
     let value: Value = serde_json::from_slice(&answer).expect("the tool answers with JSON");
     assert_eq!(value["error"]["code"], "outside_workspace");
+}
+
+#[test]
+fn an_unknown_name_reads_as_the_sentence_it_is() {
+    assert_eq!(
+        SelectError::Unknown("fetch".to_string()).to_string(),
+        "there is no tool named fetch"
+    );
+}
+
+#[derive(schemars::JsonSchema, serde::Deserialize)]
+struct EchoArgs {
+    text: String,
+}
+
+struct Echo;
+
+impl crate::Tool for Echo {
+    type Args = EchoArgs;
+    type Output = String;
+
+    const NAME: &'static str = "echo";
+    const DESCRIPTION: &'static str = "Answers with the text it was given.";
+    const CLASS: crate::Class = crate::Class::Idempotent;
+    const RISK: agent_core::event::Risk = agent_core::event::Risk::Read;
+    const SCOPE: crate::Scope = crate::Scope::Read;
+    const LIMITS: crate::Limits = crate::Limits {
+        timeout_ms: 1_000,
+        event_bytes: 64,
+    };
+    const ENV: &'static [&'static str] = &[];
+
+    fn run(
+        args: EchoArgs,
+        _ctx: &crate::Ctx<'_>,
+    ) -> Result<String, crate::ToolError> {
+        Ok(args.text)
+    }
+}
+
+#[test]
+fn an_answer_at_the_cap_is_delivered_and_one_byte_over_is_refused() {
+    let dir = TempDir::new();
+    let workspace = dir.workspace();
+    let allow = Allowlist::default();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    let cap = Echo::LIMITS.event_bytes;
+    let base = crate::envelope::success(&String::new()).len();
+    let exact = "x".repeat(cap - base);
+    let answer = super::call::<Echo>(format!(r#"{{"text":"{exact}"}}"#).as_bytes(), &ctx);
+    let value: Value = serde_json::from_slice(&answer).expect("one object");
+    assert_eq!(
+        value["ok"], true,
+        "an answer of exactly the cap was refused"
+    );
+
+    let over = "x".repeat(cap - base + 1);
+    let answer = super::call::<Echo>(format!(r#"{{"text":"{over}"}}"#).as_bytes(), &ctx);
+    let value: Value = serde_json::from_slice(&answer).expect("one object");
+    assert_eq!(value["error"]["code"], "too_large");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("over its 64 byte cap"),
+        "{value}"
+    );
 }

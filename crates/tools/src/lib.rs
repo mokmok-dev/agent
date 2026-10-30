@@ -123,3 +123,14 @@ pub trait Tool {
         ctx: &Ctx<'_>,
     ) -> Result<Self::Output, ToolError>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Class;
+
+    #[test]
+    fn each_class_has_the_name_the_manifest_writes() {
+        assert_eq!(Class::Idempotent.as_str(), "idempotent");
+        assert_eq!(Class::NonIdempotent.as_str(), "non-idempotent");
+    }
+}

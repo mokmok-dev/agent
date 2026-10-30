@@ -1361,4 +1361,174 @@ none = false
             Err(ConfigError::MissingDirectory(missing.display().to_string()))
         );
     }
+
+    fn named<'a>(
+        config: &'a super::Config,
+        name: &str,
+    ) -> &'a crate::Tool {
+        config
+            .settings
+            .tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .expect("the tool is in the configuration")
+    }
+
+    fn preset(name: &str) -> String {
+        format!("{MINIMAL}\n[[tools]]\npreset = \"{name}\"\n")
+    }
+
+    /// A configuration whose state directory is one a test may write in.
+    fn writable(name: &str) -> (String, std::path::PathBuf) {
+        let state =
+            std::env::temp_dir().join(format!("agent-config-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        std::fs::create_dir_all(&state).expect("creates the state directory");
+        let text = MINIMAL.replace(
+            "state_dir = \"/var/lib/agent\"",
+            &format!("state_dir = {:?}", state.display().to_string()),
+        );
+        (text, state)
+    }
+
+    #[test]
+    fn a_manifest_tool_gets_the_bounds_the_cap_table_names() {
+        let config = parse(MINIMAL, &no_env).expect("parses");
+        let tool = &config.settings.tools[0];
+        assert_eq!(tool.memory_bytes, 268_435_456);
+        assert_eq!(tool.file_bytes, 8_388_608);
+        assert_eq!(tool.max_output, 65_536);
+        assert_eq!(tool.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn a_build_gets_more_room_than_a_reader() {
+        let (base, state) = writable("run-bounds");
+        let text = format!(
+            "{base}\n[[tools]]\npreset = \"run\"\nprograms = [\"sh\"]\n[[tools]]\npreset = \"read_file\"\n"
+        );
+        let config = parse(&text, &preset_env).expect("parses");
+        let run = named(&config, "run");
+        assert_eq!(run.memory_bytes, 2_147_483_648);
+        assert_eq!(run.file_bytes, 536_870_912);
+        let read = named(&config, "read_file");
+        assert_eq!(read.memory_bytes, 268_435_456);
+        assert_eq!(read.file_bytes, 8_388_608);
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn a_bound_over_its_cap_is_held_to_the_cap() {
+        let text = format!(
+            "{}[tool_limits.read_file]\nmemory_bytes = 1099511627776\nfile_bytes = 1099511627776\n",
+            preset("read_file")
+        );
+        let config = parse(&text, &preset_env).expect("parses");
+        let tool = named(&config, "read_file");
+        assert_eq!(tool.memory_bytes, 17_179_869_184);
+        assert_eq!(tool.file_bytes, 1_073_741_824);
+    }
+
+    #[test]
+    fn an_event_cap_at_the_hard_limit_is_allowed_and_one_byte_over_is_not() {
+        let allowed = format!(
+            "{}[tool_limits.read_file]\nmax_output_bytes = 1048576\n",
+            preset("read_file")
+        );
+        let config = parse(&allowed, &preset_env).expect("the cap itself is allowed");
+        assert_eq!(named(&config, "read_file").max_output, 1_048_576);
+
+        let over = format!(
+            "{}[tool_limits.read_file]\nmax_output_bytes = 1048577\n",
+            preset("read_file")
+        );
+        assert!(parse(&over, &preset_env).is_err(), "one byte over the cap");
+    }
+
+    #[test]
+    fn a_timeout_at_the_cap_is_allowed_and_the_edges_are_not() {
+        let allowed = format!(
+            "{}[tool_limits.read_file]\ntimeout_ms = 3600000\n",
+            preset("read_file")
+        );
+        let config = parse(&allowed, &preset_env).expect("the cap itself is allowed");
+        assert_eq!(
+            named(&config, "read_file").timeout,
+            Duration::from_millis(3_600_000)
+        );
+
+        for timeout in ["0", "3600001"] {
+            let text = format!(
+                "{}[tool_limits.read_file]\ntimeout_ms = {timeout}\n",
+                preset("read_file")
+            );
+            assert!(parse(&text, &preset_env).is_err(), "{timeout} was allowed");
+        }
+    }
+
+    #[test]
+    fn a_preset_refuses_every_field_it_does_not_take() {
+        let expected = Err(ConfigError::Message(
+            "read_file is a preset and does not take its own fields".to_string(),
+        ));
+        for extra in [
+            "description = \"mine\"",
+            "class = \"idempotent\"",
+            "timeout_ms = 1000",
+            "max_output_bytes = 1024",
+            "[tools.permissions]\nenv = []\nnetwork = \"none\"\nmemory_bytes = 268435456\nfile_bytes = 8388608",
+        ] {
+            let text = format!("{MINIMAL}\n[[tools]]\npreset = \"read_file\"\n{extra}\n");
+            assert_eq!(parse(&text, &preset_env), expected.clone(), "{extra}");
+        }
+    }
+
+    #[test]
+    fn a_preset_risk_may_be_kept_or_raised() {
+        let (base, state) = writable("run-risk");
+        let same =
+            format!("{base}\n[[tools]]\npreset = \"run\"\nprograms = [\"sh\"]\nrisk = \"write\"\n");
+        let config = parse(&same, &preset_env).expect("the preset's own risk is not a lowering");
+        assert_eq!(named(&config, "run").risk, agent_core::event::Risk::Write);
+
+        let raised = format!(
+            "{base}\n[[tools]]\npreset = \"run\"\nprograms = [\"sh\"]\nrisk = \"destructive\"\n"
+        );
+        let config = parse(&raised, &preset_env).expect("a higher risk is allowed");
+        assert_eq!(
+            named(&config, "run").risk,
+            agent_core::event::Risk::Destructive
+        );
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn a_preset_carries_the_environment_names_its_definition_declares() {
+        let (base, state) = writable("run-env");
+        let text = format!("{base}\n[[tools]]\npreset = \"run\"\nprograms = [\"sh\"]\n");
+        let config = parse(&text, &preset_env).expect("parses");
+        assert_eq!(
+            named(&config, "run").env,
+            ["PATH", "HOME", "TMPDIR", "LANG"]
+        );
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn a_manifest_tool_keeps_the_schema_it_was_given() {
+        let config = parse(MINIMAL, &no_env).expect("parses");
+        assert_eq!(config.settings.tools[0].schema, r#"{"argv":"string"}"#);
+    }
+
+    #[test]
+    fn a_program_name_with_an_equals_sign_or_no_text_is_refused() {
+        for program in ["", "a=b", "/bin/a=b"] {
+            let text =
+                format!("{MINIMAL}\n[[tools]]\npreset = \"run\"\nprograms = [{program:?}]\n");
+            assert!(
+                parse(&text, &preset_env).is_err(),
+                "{program:?} was taken as a program name"
+            );
+        }
+    }
 }

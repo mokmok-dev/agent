@@ -14,8 +14,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use landlock::{
-    ABI, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr as _, RulesetCreatedAttr as _,
-    RulesetStatus,
+    ABI, Access as _, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr as _,
+    RulesetCreatedAttr as _, RulesetStatus,
 };
 use rustix::process::{Resource, Rlimit};
 
@@ -193,8 +193,7 @@ fn filesystem(bounds: &Bounds) -> Result<(), String> {
     // write: without it a tool could empty a file it may not otherwise touch. A
     // kernel older than that is refused rather than bounded by halves.
     let read = AccessFs::from_read(ABI::V3);
-    let write = AccessFs::from_write(ABI::V3);
-    let handled = read | write;
+    let handled = AccessFs::from_all(ABI::V3);
     let mut ruleset = Ruleset::default()
         .handle_access(handled)
         .map_err(|error| format!("landlock ruleset: {error}"))?
@@ -214,7 +213,7 @@ fn filesystem(bounds: &Bounds) -> Result<(), String> {
         let path =
             PathFd::new(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
         ruleset = ruleset
-            .add_rule(PathBeneath::new(path, read | write))
+            .add_rule(PathBeneath::new(path, handled))
             .map_err(|error| format!("{}: {error}", directory.display()))?;
     }
     // Every program redirects to /dev/null, and it holds nothing, so refusing it

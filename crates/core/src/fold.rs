@@ -2465,4 +2465,137 @@ mod tests {
             prop_assert_eq!(state, before);
         }
     }
+
+    fn asked_rounds(rounds: &[(u32, &[&str])]) -> super::Asked {
+        let mut asked = super::Asked::default();
+        for (base, tools) in rounds {
+            asked.push(
+                *base,
+                tools
+                    .iter()
+                    .map(|tool| ToolRequest {
+                        args: String::from("{}"),
+                        tool: (*tool).to_string(),
+                    })
+                    .collect(),
+            );
+        }
+        asked
+    }
+
+    fn step_call(step: u32) -> CallId {
+        CallId { turn: turn(), step }
+    }
+
+    #[test]
+    fn a_request_is_found_by_the_step_it_carries() {
+        let asked = asked_rounds(&[(0, &["a", "b"])]);
+        assert_eq!(
+            asked
+                .request(step_call(0))
+                .map(|request| request.tool.as_str()),
+            Some("a")
+        );
+        assert_eq!(
+            asked
+                .request(step_call(1))
+                .map(|request| request.tool.as_str()),
+            Some("b")
+        );
+        assert_eq!(
+            asked.request(step_call(2)),
+            None,
+            "a step no round asked for is nothing"
+        );
+    }
+
+    #[test]
+    fn a_later_round_wins_where_two_rounds_overlap() {
+        let asked = asked_rounds(&[(0, &["a", "b"]), (1, &["c"])]);
+        assert_eq!(
+            asked
+                .request(step_call(1))
+                .map(|request| request.tool.as_str()),
+            Some("c")
+        );
+        assert_eq!(
+            asked
+                .request(step_call(0))
+                .map(|request| request.tool.as_str()),
+            Some("a")
+        );
+        assert_eq!(asked.request(step_call(2)), None);
+    }
+
+    #[test]
+    fn a_round_that_starts_past_zero_still_answers_its_own_steps() {
+        let asked = asked_rounds(&[(5, &["a", "b", "c"])]);
+        assert_eq!(
+            asked.request(step_call(4)),
+            None,
+            "a step before the base is no call"
+        );
+        assert_eq!(
+            asked
+                .request(step_call(5))
+                .map(|request| request.tool.as_str()),
+            Some("a")
+        );
+        assert_eq!(
+            asked
+                .request(step_call(7))
+                .map(|request| request.tool.as_str()),
+            Some("c")
+        );
+        assert_eq!(asked.request(step_call(8)), None, "the end is exclusive");
+    }
+
+    #[test]
+    fn filing_a_call_advances_only_its_own_round() {
+        let mut asked = asked_rounds(&[(0, &["a", "b"]), (2, &["c"])]);
+        asked.mark_filed(step_call(1));
+        assert_eq!(
+            asked.rounds[0].filed, 2,
+            "the first round filed both of its calls"
+        );
+        assert_eq!(
+            asked.rounds[1].filed, 0,
+            "a call after the base filed nothing"
+        );
+        asked.mark_filed(step_call(2));
+        assert_eq!(asked.rounds[1].filed, 1);
+        asked.mark_filed(step_call(9));
+        assert_eq!(
+            asked.rounds[1].filed, 1,
+            "a step no round asked for filed nothing"
+        );
+    }
+
+    #[test]
+    fn the_rounds_and_their_calls_are_counted() {
+        let asked = asked_rounds(&[(0, &["a", "b"]), (2, &["c", "d", "e"])]);
+        assert_eq!(asked.rounds(), 2);
+        assert_eq!(asked.total_calls(), 5);
+        assert_eq!(super::Asked::default().rounds(), 0);
+        assert_eq!(super::Asked::default().total_calls(), 0);
+    }
+
+    #[test]
+    fn the_next_unfiled_call_carries_the_step_the_round_gave_it() {
+        let mut asked = asked_rounds(&[(0, &["a"]), (4, &["b", "c"])]);
+        let (first, request) = asked
+            .next_unfiled(turn())
+            .expect("the first round is unfiled");
+        assert_eq!(first, step_call(0));
+        assert_eq!(request.tool, "a");
+        asked.mark_filed(step_call(0));
+        let (next, request) = asked
+            .next_unfiled(turn())
+            .expect("the second round is next");
+        assert_eq!(next, step_call(4));
+        assert_eq!(request.tool, "b");
+        asked.mark_filed(step_call(4));
+        asked.mark_filed(step_call(5));
+        assert_eq!(asked.next_unfiled(turn()), None);
+    }
 }
