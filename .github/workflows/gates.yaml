@@ -10,19 +10,29 @@ concurrency:
 permissions:
   contents: read
 jobs:
+  lockfile:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4.4.0
+        with:
+          persist-credentials: false
+      - run: gh extension install github/gh-actions-lock --pin v0.4.0
+      - run: gh actions-lock --verify
   spec:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: actions/checkout@v4.4.0
+      - uses: DeterminateSystems/nix-installer-action@v23
       - run: nix develop --command cargo xtask spec-check
   mutants:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@v4.4.0
         with:
           fetch-depth: 0
-      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: DeterminateSystems/nix-installer-action@v23
       - name: Mutation on the changed lines
         if: github.event_name == 'pull_request'
         run: |
@@ -32,7 +42,7 @@ jobs:
       - name: Mutation over the workspace
         if: github.event_name != 'pull_request'
         run: nix develop --command cargo mutants --workspace
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@v4.6.2
         if: always()
         with:
           name: mutants
