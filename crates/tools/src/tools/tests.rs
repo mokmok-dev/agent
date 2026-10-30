@@ -1114,10 +1114,21 @@ fn a_large_stderr_is_cut_even_when_stdout_is_empty() {
     let overhead = serde_json::to_vec(&quiet()).expect("serializes").len();
     let mut output = quiet();
     output.stderr = "a".repeat(cap - overhead + 1);
+    let written = output.stderr.len();
     run::shrink(&mut output);
     assert!(serde_json::to_vec(&output).expect("serializes").len() <= cap);
     assert!(output.stderr_truncated);
     assert_eq!(output.stdout, String::new());
+    assert!(
+        output.stderr.len() <= written / 2,
+        "the stream was not halved: {} of {written} bytes",
+        output.stderr.len()
+    );
+    assert!(
+        output.stderr.len() >= 30_000,
+        "the stream was cut to {} bytes instead of halved",
+        output.stderr.len()
+    );
 }
 
 #[test]
@@ -1309,4 +1320,39 @@ fn a_search_answer_is_cut_to_twenty_four_kilobytes_and_not_much_further() {
         answer > 24 * 1024 - 200,
         "the answer was cut to {answer} bytes"
     );
+}
+
+#[test]
+fn a_program_the_kernel_stopped_reports_its_signal_as_one_hundred_and_twenty_eight_plus_it() {
+    let dir = TempDir::new();
+    let workspace = dir.workspace();
+    let allow = shell();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    let out = run_sh(&ctx, "kill -9 $$", &[]).expect("runs");
+    assert!(!out.timed_out);
+    assert_eq!(out.status, 128 + 9);
+}
+
+#[test]
+fn a_nul_deep_in_a_file_still_makes_it_binary() {
+    let dir = TempDir::new();
+    let mut bytes = b"needle".to_vec();
+    bytes.resize(6000, b'x');
+    bytes[5000] = 0;
+    dir.write_bytes("deep.dat", &bytes);
+    let workspace = dir.workspace();
+    let allow = empty();
+    let ctx = fixture::ctx(&workspace, &allow, dir.path());
+    let out = search::Search::run(
+        search::Args {
+            pattern: "needle".to_string(),
+            path: None,
+            glob: None,
+            case_sensitive: None,
+            max_results: None,
+        },
+        &ctx,
+    )
+    .expect("searches");
+    assert!(out.matches.is_empty(), "a file with a NUL was searched");
 }

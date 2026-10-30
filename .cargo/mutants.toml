@@ -9,3 +9,19 @@ exclude_globs = ["crates/*/src/main.rs", "crates/xtask/**/*.rs"]
 minimum_test_timeout = 60.0
 test_tool = "nextest"
 timeout_multiplier = 3.0
+
+# Equivalent mutants, each with the reason no test can tell it apart.
+exclude_re = [
+  # The entry cap stops at 1000 or 1001 entries, but a thousand entries cannot
+  # fit the 24 KiB answer cap, so the answer is cut at the same byte either way
+  # and no reader can see the difference.
+  "crates/tools/src/tools/list_dir\\.rs:111:34: replace > with (==|>=)",
+  # The entry cap can only bind when the answer also overflows its byte cap, so
+  # `stopped || over` and `stopped && over` are the same answer.
+  "crates/tools/src/tools/list_dir\\.rs:129:32: replace \\|\\| with &&",
+  # A tail exactly at the bound drops zero bytes, so `>` and `>=` agree.
+  "crates/runtime/src/exec\\.rs:193:19: replace > with >=",
+  # A status is either an exit code or a signal on this platform, so the last
+  # default is never reached and its value never shows.
+  "crates/tools/src/tools/run\\.rs:141:24: delete - in execute",
+]
