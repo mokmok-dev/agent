@@ -8,8 +8,10 @@
     reason = "a test reports a broken assumption by panicking"
 )]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+use agent_runtime::confine::READ_ROOTS;
 
 /// The launcher cargo built for this test, which is the one the daemon ships.
 const LAUNCHER: &str = env!("CARGO_BIN_EXE_agent-confine");
@@ -19,10 +21,30 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("agent-bounds-{}-{name}", std::process::id()));
+        Self::in_parent(&std::env::temp_dir(), name).expect("creates the scratch directory")
+    }
+
+    /// A directory that no read root covers.
+    ///
+    /// The temp dir cannot promise that: it is `/tmp`, a read root, on an ordinary
+    /// host, and `/build` inside a Nix build, where `/var/tmp` does not exist and
+    /// nothing outside the build directory is writable.
+    fn outside_the_roots(name: &str) -> Self {
+        let parents = [PathBuf::from("/var/tmp"), std::env::temp_dir()];
+        parents
+            .into_iter()
+            .filter(|parent| !READ_ROOTS.iter().any(|root| parent.starts_with(*root)))
+            .find_map(|parent| Self::in_parent(&parent, name))
+            .expect("a writable directory outside the read roots")
+    }
+
+    fn in_parent(
+        parent: &Path,
+        name: &str,
+    ) -> Option<Self> {
+        let dir = parent.join(format!("agent-bounds-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("creates the scratch directory");
-        Self(dir)
+        std::fs::create_dir_all(&dir).ok().map(|()| Self(dir))
     }
 }
 
@@ -83,23 +105,28 @@ fn a_tool_writes_where_its_manifest_says_and_nowhere_else() {
 
 #[test]
 fn a_tool_reads_inside_the_roots_and_nowhere_else() {
+    // The visible directory is a declared root because the temp dir is readable on
+    // an ordinary host but not inside a Nix build, where it is /build.
     let visible = Scratch::new("read-visible");
     let file = visible.0.join("visible");
     std::fs::write(&file, b"seen").expect("writes the visible file");
-    let hidden = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let hidden = Scratch::outside_the_roots("read-hidden");
+    let secret = hidden.0.join("hidden");
+    std::fs::write(&secret, b"never").expect("writes the hidden file");
+    let named = format!("--read={}", visible.0.display());
     let script = format!(
         "for path in (r'{}', r'{}'):\n    try:\n        print(path, open(path).read()[:4])\n    except OSError:\n        print(path, 'refused')",
         file.display(),
-        hidden.display()
+        secret.display()
     );
     let output = run(
-        &[MEMORY, FILE, "--network=none"],
+        &[MEMORY, FILE, "--network=none", &named],
         &["python3", "-c", &script],
     );
     let said = said(&output);
     assert!(said.contains(&format!("{} seen", file.display())), "{said}");
     assert!(
-        said.contains(&format!("{} refused", hidden.display())),
+        said.contains(&format!("{} refused", secret.display())),
         "a file outside the read roots was readable: {said}"
     );
 }
