@@ -1,0 +1,11 @@
+ts	phase	decision	why	evidence	result
+2026-11-21T16:00:00Z	scaffold	one mutation gate per package, not one at the repo root	a survivor must name the package that owns it and a package can be fixed alone	packages/*/mutator.config.json	tests green
+2026-11-21T16:00:00Z	scaffold	moved every check into nix flake check	the operator asked for one command and no scripts directory	flake.nix	tests green
+2026-11-21T16:04:00Z	protocol	replaced hand-written parsers with decoder combinators	each decode reads as one rule and the branches became observable	packages/protocol/src/decode.ts	457/457 killed
+2026-11-21T16:12:00Z	adapters	reused the protocol decoders for provider payloads	a malformed body becomes a 400 with the same rule the agent side uses	packages/adapters/src/slack-schema.ts	453/453 killed
+2026-11-21T16:18:00Z	control-plane	made the thread index a Durable Object of its own	two webhooks for one thread can land on different session objects and must still agree	apps/control-plane/src/thread-index-do.ts	143/143 killed
+2026-11-21T16:20:00Z	control-plane	acknowledged a delivery before the agent starts	a provider retries while a turn is still running	apps/control-plane/src/routes.ts	tests green
+2026-11-21T16:33:00Z	gateway	kept one ActiveTurn object instead of two id fields	two fields could drift apart and the guard had an unreachable branch	apps/gateway/src/bridge.ts	215/215 killed
+2026-11-21T16:33:00Z	gateway	drove the real scripted agent over real stdio	the codec, supervisor, and bridge are only proved together	apps/gateway/src/e2e.test.ts	tests green
+2026-11-21T16:40:00Z	gateway	accepted four equivalent mutants with a written reason	an infinite loop body swap and a fire-and-forget kill have no observable difference	apps/gateway/mutator.accepted.json	100.0%
+2026-11-21T16:42:00Z	control-plane	accepted three equivalent mutants in the disk reader	a missing encoding name still parses as JSON and an empty catch falls through to the same undefined	apps/control-plane/mutator.accepted.json	100.0%
