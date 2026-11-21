@@ -67,10 +67,9 @@
             installPhase = ''
               mkdir -p $out
               cp -r node_modules $out/node_modules
-              cp -r packages $out/packages
             '';
             outputHashMode = "recursive";
-            outputHash = "sha256-Vw1eTxbwF6NpdrVs0oWABThBQnPfq4cmCtbJqdjC/+A=";
+            outputHash = "sha256-mU8/NQ/g2+ohmUa2ufHUP5YhXVinF82ApFxPErW3Opw=";
           };
 
           # One derivation per check. `node_modules` and the workspace packages
