@@ -10,6 +10,8 @@ import {
   object,
   oneOf,
   optional,
+  raw,
+  record,
   str,
   tagged,
 } from "./decode.ts";
@@ -259,5 +261,23 @@ describe("diagnostics", () => {
 
   test("arrayLenient reports its diagnostic", () => {
     rejectsWith(() => arrayLenient(str)("x"));
+  });
+});
+
+describe("record and raw", () => {
+  test("record keeps an object and rejects everything else", () => {
+    expect(record({ a: 1 })).toEqual({ a: 1 });
+    expect(record({})).toEqual({});
+    for (const value of [null, [], "x", 1, undefined]) {
+      const error = rejected(() => record(value));
+      expect(error.code).toBe(RpcErrorCode.InvalidRequest);
+      expect(error.message).toBe(Rejection.ErrorShape);
+    }
+  });
+
+  test("raw passes any value through, including undefined", () => {
+    for (const value of [null, undefined, [], "x", 1, { a: 1 }]) {
+      expect(raw(value)).toBe(value);
+    }
   });
 });

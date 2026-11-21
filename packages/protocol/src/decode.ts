@@ -122,3 +122,12 @@ export function arrayLenient<T>(decoder: Decoder<T>): Decoder<T[]> {
     return out;
   };
 }
+
+/** A value that is an object with unknown keys, left as it is. */
+export const record: Decoder<Record<string, unknown>> = (value) => {
+  if (!isRecord(value)) throw reject("ErrorShape");
+  return value;
+};
+
+/** A value of any shape, kept as-is. Use it for fields a variant inspects later. */
+export const raw: Decoder<unknown> = (value) => value;

@@ -1,0 +1,10 @@
+{
+  "1tzqhhv1e9a": {
+    "reason": "Extractable flag on a CryptoKey that never leaves this module. Flipping it changes no observable result.",
+    "where": "src/signature.ts:87:5 false -> true"
+  },
+  "oep2utqo9x": {
+    "reason": "Extractable flag on a CryptoKey that never leaves this module. Flipping it changes no observable result.",
+    "where": "src/signature.ts:75:79 false -> true"
+  }
+}
