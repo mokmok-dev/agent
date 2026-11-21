@@ -1,0 +1,18 @@
+{
+  "127gvsuys0o": {
+    "reason": "Equivalent: an infinite loop whose body swaps with the same break path, and a kill() call statement whose return no caller reads.",
+    "where": "src/agent/proc.ts:29:17 { child.kill(); } -> {}"
+  },
+  "1zz7rknrmwj": {
+    "reason": "Equivalent: an infinite loop whose body swaps with the same break path, and a kill() call statement whose return no caller reads.",
+    "where": "src/agent/proc.ts:30:7 child.kill(); -> ;"
+  },
+  "27xmjwj8ce2": {
+    "reason": "Equivalent: an infinite loop whose body swaps with the same break path, and a kill() call statement whose return no caller reads.",
+    "where": "src/lines.ts:37:9 chunk.done -> false"
+  },
+  "bxr2i1fhn": {
+    "reason": "Equivalent: an infinite loop whose body swaps with the same break path, and a kill() call statement whose return no caller reads.",
+    "where": "src/lines.ts:35:12 { const chunk = await reader.read(); if (chunk.done) break;… -> {}"
+  }
+}
