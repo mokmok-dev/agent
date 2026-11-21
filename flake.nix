@@ -7,13 +7,17 @@
     git-hooks.inputs.nixpkgs.follows = "nixpkgs";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
+    nix-bun.url = "github:ryoppippi/nix-bun";
+    nix-bun.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
     {
+      nixpkgs,
       flake-parts,
       git-hooks,
       treefmt-nix,
+      nix-bun,
       ...
     }@inputs:
     flake-parts.lib.mkFlake { inherit inputs; } {
@@ -26,15 +30,26 @@
         {
           config,
           pkgs,
+          system,
           ...
         }:
         {
+          _module.args.pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ nix-bun.overlays.default ];
+          };
+
           apps = { };
 
           checks = { };
 
           devShells.default = pkgs.mkShellNoCC {
             inputsFrom = [ config.pre-commit.devShell ];
+
+            packages = with pkgs; [
+              ni
+              bun
+            ];
           };
 
           packages = { };

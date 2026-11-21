@@ -1,0 +1,13 @@
+{
+  "name": "@agent/monorepo",
+  "version": "2026.11.1",
+  "workspaces": [],
+  "type": "module",
+  "scripts": {},
+  "devDependencies": {
+    "@types/bun": "1.4.5"
+  },
+  "peerDependencies": {
+    "typescript": "7.0.2"
+  }
+}
