@@ -32,6 +32,8 @@ export type Session = {
   acpSessionId: string | null;
   /** The gateway instance that currently owns this session. */
   gatewayId: string | null;
+  /** How many turns this session has created; the next turn id continues from here. */
+  turnSeq: number;
   createdAt: number;
   updatedAt: number;
 };
