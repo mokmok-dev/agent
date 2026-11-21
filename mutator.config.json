@@ -1,7 +1,0 @@
-{
-  "include": ["packages/*/src/**/*.ts", "apps/*/src/**/*.ts"],
-  "exclude": ["**/*.test.ts", "**/*.d.ts"],
-  "runner": "bun",
-  "reporters": ["text"],
-  "typecheck": false
-}

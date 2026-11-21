@@ -9,7 +9,6 @@ import {
   parseMessage,
   ProtocolError,
   RpcErrorCode,
-  type RpcMessage,
 } from "./jsonrpc.ts";
 
 const requestId = fc.oneof(

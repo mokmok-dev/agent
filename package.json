@@ -4,16 +4,15 @@
   "private": true,
   "type": "module",
   "workspaces": [
-    "apps/*",
-    "packages/*"
+    "packages/*",
+    "apps/*"
   ],
   "scripts": {
     "test": "bun test",
     "check": "bun check -b",
     "fmt": "bun fmt",
     "fmt:check": "bun fmt --check",
-    "mutate": "bun run scripts/mutate.ts",
-    "dev": "bun run apps/control-plane/src/dev.ts"
+    "mutate": "bun --cwd packages/protocol $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2"
   },
   "devDependencies": {
     "@mizchi/mutator": "0.5.2",
