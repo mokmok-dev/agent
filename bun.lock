@@ -25,6 +25,13 @@
         "@cloudflare/workers-types": "4.20260101.0",
       },
     },
+    "apps/gateway": {
+      "name": "@agent/gateway",
+      "version": "0.0.0",
+      "dependencies": {
+        "@agent/protocol": "workspace:*",
+      },
+    },
     "packages/adapters": {
       "name": "@agent/adapters",
       "version": "0.0.0",
@@ -45,6 +52,8 @@
     "@agent/adapters": ["@agent/adapters@workspace:packages/adapters"],
 
     "@agent/control-plane": ["@agent/control-plane@workspace:apps/control-plane"],
+
+    "@agent/gateway": ["@agent/gateway@workspace:apps/gateway"],
 
     "@agent/protocol": ["@agent/protocol@workspace:packages/protocol"],
 

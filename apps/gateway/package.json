@@ -1,0 +1,9 @@
+{
+  "name": "@agent/gateway",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@agent/protocol": "workspace:*"
+  }
+}
