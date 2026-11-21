@@ -352,3 +352,46 @@ describe("storage details", () => {
     expect(await new SessionRepository(storage).session("k")).toBeUndefined();
   });
 });
+
+describe("activeTurn", () => {
+  const withTurns = async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 0);
+    await repo.appendTurn("s1", "first", "e1", 10);
+    await repo.appendTurn("s1", "second", "e2", 20);
+    return repo;
+  };
+
+  test("prefers a running turn over a queued one", async () => {
+    const repo = await withTurns();
+    await repo.transition("s1", "t2", { status: "dispatched" }, 21);
+    await repo.transition("s1", "t2", { status: "running" }, 22);
+    expect((await repo.activeTurn("s1"))?.id).toBe("t2");
+  });
+
+  test("prefers a dispatched turn over a queued one", async () => {
+    const repo = await withTurns();
+    await repo.transition("s1", "t2", { status: "dispatched" }, 21);
+    expect((await repo.activeTurn("s1"))?.id).toBe("t2");
+  });
+
+  test("falls back to the oldest queued turn", async () => {
+    const repo = await withTurns();
+    expect((await repo.activeTurn("s1"))?.id).toBe("t1");
+  });
+
+  test("is undefined when every turn is terminal", async () => {
+    const repo = await withTurns();
+    await repo.transition("s1", "t1", { status: "cancelled" }, 11);
+    await repo.transition("s1", "t2", { status: "cancelled" }, 21);
+    expect(await repo.activeTurn("s1")).toBeUndefined();
+  });
+
+  test("does not pick a completed turn", async () => {
+    const repo = await withTurns();
+    await repo.transition("s1", "t1", { status: "dispatched" }, 11);
+    await repo.transition("s1", "t1", { status: "running" }, 12);
+    await repo.transition("s1", "t1", { status: "completed", stopReason: "end_turn" }, 13);
+    expect((await repo.activeTurn("s1"))?.id).toBe("t2");
+  });
+});

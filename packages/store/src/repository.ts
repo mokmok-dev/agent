@@ -117,6 +117,13 @@ export class SessionRepository {
     return nextQueued(await this.turns(sessionId));
   }
 
+  /** The turn a cancel should end: the live one, else the oldest queued one. */
+  async activeTurn(sessionId: string): Promise<Turn | undefined> {
+    const turns = await this.turns(sessionId);
+    const live = turns.find((turn) => turn.status === "running" || turn.status === "dispatched");
+    return live ?? nextQueued(turns);
+  }
+
   /**
    * Move a turn through the lifecycle. The stored session decides whether the
    * move is legal, and a rejected move leaves storage untouched.

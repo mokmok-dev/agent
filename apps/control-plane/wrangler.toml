@@ -1,0 +1,15 @@
+name = "agent-control-plane"
+main = "src/worker.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[durable_objects]
+bindings = [
+  { name = "SESSIONS", class_name = "SessionDurableObject" },
+  { name = "THREAD_INDEX", class_name = "ThreadIndexDurableObject" },
+  { name = "GATEWAYS", class_name = "GatewayDurableObject" },
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SessionDurableObject", "ThreadIndexDurableObject", "GatewayDurableObject"]

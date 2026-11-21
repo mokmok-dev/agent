@@ -1,0 +1,14 @@
+{
+  "name": "@agent/control-plane",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@agent/adapters": "workspace:*",
+    "@agent/protocol": "workspace:*",
+    "@agent/store": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20260101.0"
+  }
+}
