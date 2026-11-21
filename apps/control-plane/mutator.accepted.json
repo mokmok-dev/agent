@@ -1,0 +1,14 @@
+{
+  "1g6r9c17sws": {
+    "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
+    "where": "src/disk-host.ts:13:31 \"utf8\" -> \"\""
+  },
+  "1omqkceg0f": {
+    "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
+    "where": "src/disk-host.ts:19:11 { return undefined; } -> {}"
+  },
+  "j4hc1r8ola": {
+    "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
+    "where": "src/disk-host.ts:14:11 { return undefined; } -> {}"
+  }
+}
