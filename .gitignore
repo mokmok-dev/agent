@@ -1,4 +1,8 @@
 **/node_modules
+**/.mutator
+**/dist
+**/.wrangler
+**/coverage
 .direnv
 .pre-commit-config.yaml
 /result

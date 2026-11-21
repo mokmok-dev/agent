@@ -1,11 +1,24 @@
 {
   "name": "@agent/monorepo",
   "version": "2026.11.1",
-  "workspaces": [],
+  "private": true,
   "type": "module",
-  "scripts": {},
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "check": "bun check -b",
+    "fmt": "bun fmt",
+    "fmt:check": "bun fmt --check",
+    "mutate": "bun run scripts/mutate.ts",
+    "dev": "bun run apps/control-plane/src/dev.ts"
+  },
   "devDependencies": {
-    "@types/bun": "1.4.5"
+    "@mizchi/mutator": "0.5.2",
+    "@types/bun": "1.4.5",
+    "fast-check": "4.7.0"
   },
   "peerDependencies": {
     "typescript": "7.0.2"

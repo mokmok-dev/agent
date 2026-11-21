@@ -1,0 +1,9 @@
+{
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"],
+  "runner": "bun",
+  "reporters": ["text"],
+  "typecheck": false,
+  "thresholds": { "break": 100 },
+  "failOnSurvived": true
+}
