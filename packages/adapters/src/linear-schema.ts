@@ -26,7 +26,6 @@ export const decodeLinearEvent = object({
 
 export type LinearEvent = ReturnType<typeof decodeLinearEvent>;
 
-/** The prompt a Linear event carries, from whichever field Linear used. */
 export function promptOf(event: LinearEvent): string | undefined {
   const candidates = [
     event.agentActivity?.body,
@@ -41,7 +40,6 @@ export function promptOf(event: LinearEvent): string | undefined {
   return undefined;
 }
 
-/** The user who triggered the event. */
 export function authorOf(event: LinearEvent): string {
   if (event.actor !== undefined) return event.actor.id;
   return event.user === undefined ? "" : event.user.id;

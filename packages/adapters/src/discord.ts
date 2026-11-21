@@ -38,11 +38,6 @@ export async function verifyDiscord(request: RawRequest, config: DiscordConfig):
   await verifyEd25519(config.publicKey, signature, `${timestamp}${request.body}`);
 }
 
-/**
- * Turn a Discord interaction into a product event. `PING` needs a `PONG`, and
- * a slash command or a button press becomes a turn in the interaction's
- * channel and thread.
- */
 export function parseDiscordInteraction(body: unknown): AdapterResult {
   const interaction = decodeOr400(decodeDiscordInteraction, body);
   if (interaction.type === DiscordInteractionType.Ping)

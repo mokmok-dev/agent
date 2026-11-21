@@ -5,7 +5,6 @@ import { AgentSupervisor } from "./supervisor.ts";
 
 const AGENT = new URL("./agent/stdio-agent.ts", import.meta.url).pathname;
 
-/** Boot a supervisor plus bridge against the real scripted agent. */
 function boot(script: string) {
   const events: GatewayEvent[] = [];
   const bridge = new AcpBridge({
@@ -20,7 +19,6 @@ function boot(script: string) {
   return { events, bridge, supervisor };
 }
 
-/** Wait until an event of `type` appears, so a slow process does not race the assertion. */
 async function waitFor<T extends GatewayEvent["type"]>(
   events: GatewayEvent[],
   type: T,

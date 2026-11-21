@@ -2,11 +2,6 @@ import type { StorageHost } from "./storage.ts";
 import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-/**
- * The JSON value a file holds, or `undefined` when the file is missing,
- * unreadable, or not JSON. A corrupt file counts as absent: this class is the
- * only writer, so a broken file is a crash, not a value.
- */
 function readJson<T>(path: string): T | undefined {
   let text: string;
   try {
@@ -21,10 +16,6 @@ function readJson<T>(path: string): T | undefined {
   }
 }
 
-/**
- * Storage that survives a restart, so a session outlives `bun run dev`. Each
- * object gets its own directory, and each key becomes one JSON file.
- */
 export class DiskHost implements StorageHost {
   readonly #dir: string;
 
@@ -33,7 +24,6 @@ export class DiskHost implements StorageHost {
     mkdirSync(dir, { recursive: true });
   }
 
-  /** The file a key lives in. The key is URI-encoded, so a colon stays inside one file name. */
   pathFor(key: string): string {
     return join(this.#dir, `${encodeURIComponent(key)}.json`);
   }

@@ -9,7 +9,6 @@ import {
   type ProviderConfig,
 } from "./routes.ts";
 
-/** A Durable Object namespace, as the Worker uses it. */
 export interface Namespace {
   getByName(name: string): unknown;
 }
@@ -20,7 +19,6 @@ export interface Env extends ProviderConfig {
   THREAD_INDEX: Namespace;
 }
 
-/** The session object's methods, as the Worker calls them. */
 interface SessionRpc {
   active(sessionId: string): Promise<Turn | undefined>;
   deliver(
@@ -40,7 +38,6 @@ interface IndexRpc {
   lookup(thread: ThreadRef): Promise<string>;
 }
 
-/** The reply body for a delivery that reached a session. */
 export function deliveryBody(
   result:
     | { kind: "challenge"; response: string }

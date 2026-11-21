@@ -1,11 +1,6 @@
 import { SessionService } from "./session-service.ts";
 import { durableStorage, type StorageHost } from "./storage.ts";
 
-/**
- * One conversation's Durable Object. Cloudflare serializes calls to one
- * object, so this class needs no lock of its own: every delivery for a thread
- * observes the write the previous one made.
- */
 export class SessionDurableObject {
   readonly #service: SessionService;
 

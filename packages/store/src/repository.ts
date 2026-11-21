@@ -7,11 +7,6 @@ import {
   type TurnUpdate,
 } from "./session.ts";
 
-/**
- * The storage the repository needs. A Durable Object supplies `ctx.storage`
- * through an adapter; a test supplies a map. Nothing here depends on the
- * runtime, so every rule is exercised in a plain process.
- */
 export interface Storage {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
@@ -28,7 +23,6 @@ export type TransitionOutcome =
       reason: "not-found" | "illegal-transition" | "session-closed" | "already-terminal";
     };
 
-/** The session the writer needs, or a not-found outcome. */
 class MissingSession extends Error {
   constructor(readonly sessionId: string) {
     super(`no session ${sessionId}`);
@@ -63,7 +57,6 @@ export class SessionRepository {
     return session;
   }
 
-  /** The session, created on first use. A second call with the same id returns the stored one. */
   async ensureSession(id: string, thread: ThreadRef, now: number): Promise<Session> {
     const existing = await this.session(id);
     return existing ?? (await this.createSession(id, thread, now));
@@ -112,12 +105,10 @@ export class SessionRepository {
     return { kind: "appended", turn };
   }
 
-  /** The turn to dispatch next, or `undefined` when nothing is queued. */
   async nextTurn(sessionId: string): Promise<Turn | undefined> {
     return nextQueued(await this.turns(sessionId));
   }
 
-  /** The turn a cancel should end: the live one, else the oldest queued one. */
   async activeTurn(sessionId: string): Promise<Turn | undefined> {
     const turns = await this.turns(sessionId);
     const live = turns.find((turn) => turn.status === "running" || turn.status === "dispatched");
@@ -144,7 +135,6 @@ export class SessionRepository {
     return result;
   }
 
-  /** Record the ACP session id the gateway reports after `session/new`. */
   async bindAgentSession(sessionId: string, acpSessionId: string, gatewayId: string, now: number) {
     const session = await this.session(sessionId);
     if (session === undefined) throw new MissingSession(sessionId);
@@ -153,7 +143,6 @@ export class SessionRepository {
     return next;
   }
 
-  /** Close a session. Every later turn is refused. */
   async close(sessionId: string, now: number): Promise<Session> {
     const session = await this.session(sessionId);
     if (session === undefined) throw new MissingSession(sessionId);

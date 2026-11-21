@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { AgentSupervisor, type ChildProcess } from "./supervisor.ts";
 
-/** A child process a test can drive. */
 class FakeChild implements ChildProcess {
   readonly written: string[] = [];
   readonly stdin = { write: (chunk: string) => this.written.push(chunk) };

@@ -11,7 +11,6 @@ import {
 } from "./repository.ts";
 import type { ThreadRef, TurnStatus, TurnUpdate } from "./session.ts";
 
-/** A storage a test can inspect: the same contract a Durable Object provides. */
 class MemoryStorage implements Storage {
   readonly values = new Map<string, string>();
 

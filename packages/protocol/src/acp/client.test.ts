@@ -20,7 +20,6 @@ import {
 } from "./types.ts";
 import { decodeMessage, ProtocolError, RpcErrorCode, type RpcMessage } from "../jsonrpc.ts";
 
-/** Records what the client wrote and decodes the frames for assertions. */
 class Recorder {
   readonly sent: RpcMessage[] = [];
 

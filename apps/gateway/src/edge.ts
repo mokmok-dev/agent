@@ -29,17 +29,14 @@ export class EventLog {
     }
   }
 
-  /** Everything not yet acknowledged, oldest first. */
   unacknowledged(): GatewayEvent[] {
     return this.#events.slice(this.#acknowledged);
   }
 
-  /** Mark everything appended so far as delivered. */
   acknowledge(): void {
     this.#acknowledged = this.#events.length;
   }
 
-  /** The events still held by the log. */
   retained(): GatewayEvent[] {
     return [...this.#events];
   }
@@ -49,7 +46,6 @@ export class EventLog {
   }
 }
 
-/** A command from the control plane. */
 export type EdgeFrame =
   | { type: "prompt"; sessionId: string; acpSessionId: string; turnId: string; text: string }
   | { type: "cancel"; acpSessionId: string }
@@ -84,12 +80,9 @@ export function parseEdgeFrame(text: string): EdgeFrame | undefined {
   } catch {
     return undefined;
   }
-  // Only requests and notifications carry params. A result or an error has none,
-  // and the decoder rejects the missing params like any other unknown frame.
   return lenient(decodeEdgeFrame)((message as { params?: unknown }).params);
 }
 
-/** A gateway event as the notification the control plane reads. */
 export function encodeEvent(event: GatewayEvent): string {
   return encodeNotification("gateway/event", event);
 }

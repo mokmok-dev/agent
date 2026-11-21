@@ -1,24 +1,13 @@
-/**
- * The domain model for a conversation: what a session is, what a turn is, and
- * which transitions are legal. The Durable Object persists this model; the
- * rules here are pure so they can be tested without a runtime.
- */
-
-/** A session is one agent conversation bound to one external thread. */
 export type SessionStatus = "active" | "closed";
 
-/** A turn is one user message and the agent's answer to it. */
 export type TurnStatus = "queued" | "dispatched" | "running" | "completed" | "failed" | "cancelled";
 
-/** Where a conversation comes from. The adapter that parsed the webhook owns this value. */
 export type Provider = "slack" | "discord" | "linear";
 
-/** The external conversation a session is bound to. */
 export type ThreadRef = {
   provider: Provider;
   /** Workspace, guild, or organization id. */
   workspaceId: string;
-  /** Channel, or the provider's equivalent. */
   channelId: string;
   /** The thread or conversation id. Empty when a top-level message starts the thread. */
   threadId: string;
@@ -30,7 +19,6 @@ export type Session = {
   status: SessionStatus;
   /** The ACP session id the VM gateway reports after `session/new`. */
   acpSessionId: string | null;
-  /** The gateway instance that currently owns this session. */
   gatewayId: string | null;
   /** How many turns this session has created; the next turn id continues from here. */
   turnSeq: number;
@@ -46,15 +34,12 @@ export type Turn = {
   status: TurnStatus;
   /** The provider's event id: a replay with the same key never creates a second turn. */
   idempotencyKey: string;
-  /** Why the turn ended. Set for `completed`. */
   stopReason: string | null;
-  /** The failure, set for `failed`. */
   error: string | null;
   createdAt: number;
   updatedAt: number;
 };
 
-/** Which statuses a turn may move to from each status. */
 export const TURN_TRANSITIONS: Record<TurnStatus, readonly TurnStatus[]> = {
   queued: ["dispatched", "cancelled"],
   dispatched: ["running", "cancelled", "queued"],
@@ -64,7 +49,6 @@ export const TURN_TRANSITIONS: Record<TurnStatus, readonly TurnStatus[]> = {
   cancelled: [],
 };
 
-/** A status a turn can never leave. Reaching one means the turn is done. */
 export const TERMINAL_TURN_STATUSES: readonly TurnStatus[] = ["completed", "failed", "cancelled"];
 
 export function isTerminal(status: TurnStatus): boolean {
@@ -81,7 +65,6 @@ export type TransitionRejection = "illegal-transition" | "session-closed" | "alr
 export type TransitionResult<S> =
   { ok: true; next: S } | { ok: false; reason: TransitionRejection };
 
-/** What a caller supplies when moving a turn. Only fields the target status needs are read. */
 export type TurnUpdate =
   | { status: "dispatched" }
   | { status: "running" }
@@ -140,7 +123,6 @@ export function nextQueued(turns: readonly Turn[]): Turn | undefined {
   return best;
 }
 
-/** Whether a new turn may be accepted: a closed session accepts nothing. */
 export function acceptsTurns(session: Session): boolean {
   return session.status === "active";
 }

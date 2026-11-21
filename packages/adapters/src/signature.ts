@@ -1,10 +1,8 @@
 import { AdapterError } from "./events.ts";
 import { buffer, bytesEqual, toHex, utf8 } from "./bytes.ts";
 
-/** The WebCrypto digest name for each hash this module signs with. */
 const HASH_NAMES = { sha256: "SHA-256", sha1: "SHA-1" } as const;
 
-/** Hex HMAC for providers that send a hex digest in a header. */
 export async function hmacHex(
   secret: string,
   message: string,
@@ -16,7 +14,6 @@ export async function hmacHex(
   return toHex(await crypto.subtle.sign("HMAC", key, buffer(utf8(message))));
 }
 
-/** Two hex digests are equal. Both sides are hex, so a length check is enough to start. */
 export function constantTimeEqual(a: string, b: string): boolean {
   return bytesEqual(utf8(a), utf8(b));
 }
@@ -31,7 +28,6 @@ export async function verifyHmac(
   if (!constantTimeEqual(expected, signature)) throw new AdapterError(401, "invalid signature");
 }
 
-/** Hex HMAC-SHA256 of a message, for signing requests we send back. */
 export async function signSha256(secret: string, message: string): Promise<string> {
   return hmacHex(secret, message, "sha256");
 }
@@ -53,7 +49,6 @@ export function decodeSecret(secret: string): Uint8Array {
   );
 }
 
-/** Ed25519 verification, for Discord's interaction signatures. */
 export async function verifyEd25519(
   publicKeyHex: string,
   signatureHex: string,
@@ -66,7 +61,6 @@ export async function verifyEd25519(
   if (!verified) throw new AdapterError(401, "invalid signature");
 }
 
-/** Import an Ed25519 public key, reporting a key WebCrypto rejects as a 401. */
 async function importPublicKey(
   publicKey: Uint8Array,
   algorithm: { name: string },
@@ -78,7 +72,6 @@ async function importPublicKey(
   }
 }
 
-/** A signing key. The key never leaves this module, so it is imported non-extractable. */
 function importHmacKey(secret: string, hash: "sha256" | "sha1"): Promise<CryptoKey> {
   return crypto.subtle.importKey(
     "raw",

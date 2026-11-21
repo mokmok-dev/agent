@@ -37,7 +37,6 @@ export const ClientMethod = {
   ReleaseTerminal: "terminal/release",
 } as const;
 
-/** The protocol version this client speaks. */
 export const PROTOCOL_VERSION = 1;
 
 export const STOP_REASONS = [

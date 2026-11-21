@@ -13,7 +13,6 @@ const bridge = () => {
   return { agent, events, bridge };
 };
 
-/** Let the pending promise callbacks run. */
 const tick = () => Promise.resolve();
 
 describe("open", () => {
@@ -22,7 +21,6 @@ describe("open", () => {
     const opened = acp.open("sess-1", "/work");
     expect(agent.last()).toMatchObject({ kind: "request", method: "initialize", id: 1 });
     agent.answer(1, { protocolVersion: 1 });
-    // `open` awaits initialize, then sends the session/new frame.
     await until(() => agent.outbound().length === 2);
     expect(agent.last()).toMatchObject({ kind: "request", method: "session/new", id: 2 });
     agent.answer(2, { sessionId: "acp-9" });
@@ -352,7 +350,6 @@ describe("edges the survivors pointed at", () => {
 
   test("an update during a turn but before a session is bound is dropped", () => {
     const { agent, events, bridge: acp } = bridge();
-    // Open the session but never bind it to a control-plane session id.
     void acp.open("s", "/w");
     agent.answer(1, { protocolVersion: 1 });
     agent.answer(2, { sessionId: "acp-9" });

@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnProcess } from "./proc.ts";
 
-/** Wait for `predicate` to hold, so a real process gets time to run. */
 async function eventually(predicate: () => boolean, attempts = 100): Promise<boolean> {
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (predicate()) return true;

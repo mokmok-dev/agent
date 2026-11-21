@@ -9,20 +9,11 @@ import {
   type TurnUpdate,
 } from "@agent/store";
 
-/**
- * What a caller can ask a session to do. Every method is a named operation so
- * a Durable Object RPC call reads as one intent, and the caller cannot reach
- * the storage directly.
- */
 export type DeliveryOutcome =
   | { kind: "accepted"; session: Session; turn: Turn }
   | { kind: "replayed"; session: Session; turn: Turn }
   | { kind: "refused"; reason: "closed" };
 
-/**
- * One conversation. Calls arrive serialized per object, so two webhooks for
- * one thread cannot interleave a read and a write.
- */
 export class SessionService {
   readonly #repo: SessionRepository;
 
@@ -30,7 +21,6 @@ export class SessionService {
     this.#repo = new SessionRepository(storage);
   }
 
-  /** Accept a delivery and queue its turn, or return the turn a replay already created. */
   async deliver(
     sessionId: string,
     thread: ThreadRef,
@@ -73,7 +63,6 @@ export class SessionService {
     return this.#repo.transition(sessionId, turnId, update, now);
   }
 
-  /** Record the ACP session the gateway reports. A missing session is the caller's error. */
   bind(sessionId: string, acpSessionId: string, gatewayId: string, now: number) {
     return this.#repo.bindAgentSession(sessionId, acpSessionId, gatewayId, now);
   }

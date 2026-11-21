@@ -1,7 +1,6 @@
 import { readLines } from "../lines.ts";
 import type { ChildProcess, Spawn } from "../supervisor.ts";
 
-/** A real child process, adapted to what the supervisor needs. */
 export function spawnProcess(
   command: string,
   args: readonly string[],

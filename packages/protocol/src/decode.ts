@@ -13,27 +13,20 @@ const fail: Decoder<never> = () => {
 
 export const str: Decoder<string> = (value) => (typeof value === "string" ? value : fail(value));
 
-/** `Number.isFinite` already rejects every non-number, so it is the only guard. */
 export const num: Decoder<number> = (value) =>
   Number.isFinite(value) ? (value as number) : fail(value);
 
 export const bool: Decoder<boolean> = (value) => (typeof value === "boolean" ? value : fail(value));
 
-/** One of a fixed set of strings. `includes` already rejects a non-string. */
 export function oneOf<const T extends readonly string[]>(...values: T): Decoder<T[number]> {
   return (value) =>
     (values as readonly string[]).includes(value as string) ? (value as T[number]) : fail(value);
 }
 
-/**
- * A value of shape `T` that is either absent (an optional key) or, when
- * present, must decode. `null` is a value here, and `optional` rejects it.
- */
 export function optional<T>(decoder: Decoder<T>): Decoder<T | undefined> {
   return (value) => (value === undefined ? undefined : decoder(value));
 }
 
-/** A present value or `null`. */
 export function nullable<T>(decoder: Decoder<T>): Decoder<T | null> {
   return (value) => (value === null ? null : decoder(value));
 }
@@ -78,11 +71,6 @@ export function object<S extends Record<string, Decoder<unknown>>>(shape: S): De
   };
 }
 
-/**
- * A discriminated union: `tag` names the field that selects the variant, and
- * `variants` maps each tag value to its decoder. Unknown tags are rejected.
- * Each variant decoder returns one member of `R`.
- */
 export function tagged<R>(
   tag: string,
   variants: { readonly [key: string]: Decoder<unknown> },
@@ -96,7 +84,6 @@ export function tagged<R>(
   };
 }
 
-/** A decode that yields `undefined` when it throws; the absent case is the return value */
 function discard<T>(run: () => T): T | undefined {
   try {
     return run();
@@ -105,12 +92,10 @@ function discard<T>(run: () => T): T | undefined {
   }
 }
 
-/** A value that must decode, or `undefined` when it does not. */
 export function lenient<T>(decoder: Decoder<T>): Decoder<T | undefined> {
   return (value) => discard(() => decoder(value));
 }
 
-/** An array whose members must all decode, keeping only the ones that do. */
 export function arrayLenient<T>(decoder: Decoder<T>): Decoder<T[]> {
   return (value) => {
     if (!Array.isArray(value)) throw reject("ErrorShape");
@@ -123,11 +108,9 @@ export function arrayLenient<T>(decoder: Decoder<T>): Decoder<T[]> {
   };
 }
 
-/** A value that is an object with unknown keys, left as it is. */
 export const record: Decoder<Record<string, unknown>> = (value) => {
   if (!isRecord(value)) throw reject("ErrorShape");
   return value;
 };
 
-/** A value of any shape, kept as-is. Use it for fields a variant inspects later. */
 export const raw: Decoder<unknown> = (value) => value;

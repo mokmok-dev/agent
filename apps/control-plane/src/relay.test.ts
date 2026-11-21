@@ -3,10 +3,6 @@ import { accept } from "./worker.ts";
 import type { Env } from "./worker.ts";
 import type { ThreadRef, Turn } from "@agent/store";
 
-/**
- * A session object that records what the Worker asked it to do, standing in
- * for the Durable Object across the RPC boundary.
- */
 class FakeSessions {
   readonly calls: Array<{ method: string; args: unknown[] }> = [];
   active: Turn | undefined;

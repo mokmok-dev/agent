@@ -52,11 +52,6 @@ export async function verifySlack(
   if (!constantTimeEqual(expected, signature)) throw new AdapterError(401, "invalid signature");
 }
 
-/**
- * Turn a Slack envelope into a product event. `url_verification` is answered
- * with its challenge, a bot's own message is ignored, and a user message
- * becomes a turn.
- */
 export function parseSlackEvent(body: unknown, config: SlackConfig): AdapterResult {
   const envelope = decodeOr400(decodeSlackEnvelope, body);
   if (envelope.type === "url_verification") {
@@ -103,7 +98,6 @@ function messageEvent(
   return messageResult(envelope, thread, event, config);
 }
 
-/** A message or a cancel, from one event and its thread. */
 function messageResult(
   envelope: SlackEnvelope,
   thread: ThreadId,
@@ -134,7 +128,6 @@ function messageResult(
   return { kind: "event", event: message };
 }
 
-/** The full adapter: verify, then parse. */
 export async function adaptSlack(
   request: RawRequest,
   config: SlackConfig,

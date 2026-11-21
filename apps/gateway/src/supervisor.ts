@@ -1,4 +1,3 @@
-/** A child process, as the supervisor needs it. */
 export interface ChildProcess {
   readonly stdin: { write(chunk: string): void } | null;
   readonly stdout: { onLine(listener: (line: string) => void): void } | null;
@@ -6,7 +5,6 @@ export interface ChildProcess {
   once(event: "exit", listener: (code: number | null) => void): void;
 }
 
-/** How a process is started. A test supplies a fake. */
 export type Spawn = (command: string, args: readonly string[]) => ChildProcess;
 
 export type SupervisorState = "idle" | "running" | "stopped";
@@ -16,7 +14,6 @@ type Handlers = {
   onExit?: (code: number | null, restarts: number) => void;
 };
 
-/** A command to run, fixed at `start` so every restart reuses it. */
 type Launch = { command: string; args: readonly string[] };
 
 /**
@@ -27,7 +24,6 @@ type Launch = { command: string; args: readonly string[] };
 export class AgentSupervisor {
   readonly #spawn: Spawn;
   readonly #maxRestarts: number;
-  /** The command a restart reuses. Undefined until `start`. */
   #launch: Launch | undefined;
   #handlers!: Handlers;
   #child: ChildProcess | undefined;
@@ -47,7 +43,6 @@ export class AgentSupervisor {
     return this.#restarts;
   }
 
-  /** Start the process and stream its stdout lines. */
   start(command: string, args: readonly string[], handlers: Handlers): void {
     this.#launch = { command, args };
     this.#handlers = handlers;
@@ -79,7 +74,6 @@ export class AgentSupervisor {
     child.once("exit", (code) => this.#handleExit(code));
   }
 
-  /** One restart per exit until the limit. The code is the one the process exited with. */
   #handleExit(code: number | null): void {
     const exitedAfterStop = this.#state === "stopped";
     const outOfRestarts = this.#restarts === this.#maxRestarts;

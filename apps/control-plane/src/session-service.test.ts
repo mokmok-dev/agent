@@ -4,10 +4,8 @@ import { indexKey } from "./thread-index.ts";
 import { SessionDurableObject } from "./session-do.ts";
 import { ThreadIndexDurableObject } from "./thread-index-do.ts";
 import { durableStorage, type StorageHost } from "./storage.ts";
-import { sessionIdFor, sameThread, threadFor } from "./thread-index.ts";
-import { MissingSession, type ThreadRef } from "@agent/store";
+import { MissingSession, threadKey, type ThreadRef } from "@agent/store";
 
-/** The storage contract, backed by a map. */
 class Host implements StorageHost {
   readonly values = new Map<string, string>();
   writes = 0;
@@ -64,15 +62,9 @@ describe("thread index", () => {
     expect(indexKey(thread)).toBe("thread:slack:T1:C1:1.5");
   });
 
-  test("the session id is the thread key, so it is stable", () => {
-    expect(sessionIdFor(thread)).toBe("slack:T1:C1:1.5");
-    expect(sessionIdFor({ ...thread, threadId: "other" })).not.toBe(sessionIdFor(thread));
-  });
-
-  test("threadFor builds the same thread sameThread compares", () => {
-    const built = threadFor("slack", "T1", "C1", "1.5");
-    expect(sameThread(built, thread)).toBe(true);
-    expect(sameThread(built, { ...thread, provider: "discord" })).toBe(false);
+  test("the session id is the thread key, so it is stable across restarts", () => {
+    expect(threadKey(thread)).toBe("slack:T1:C1:1.5");
+    expect(threadKey({ ...thread, threadId: "other" })).not.toBe(threadKey(thread));
   });
 
   test("lookup assigns once and returns the same id after that", async () => {

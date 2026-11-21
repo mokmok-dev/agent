@@ -7,7 +7,6 @@ export type ProviderConfig = {
   linear: { webhookSecret: string };
 };
 
-/** The routes the control plane serves. One per provider, plus health. */
 export type Route =
   | { kind: "slack" }
   | { kind: "discord" }
@@ -26,17 +25,12 @@ export function routeOf(pathname: string): Route {
   return ROUTES.get(pathname) ?? { kind: "not-found" };
 }
 
-/** The raw request a provider adapter needs, from a `Request`. */
 export async function rawRequestOf(request: Request): Promise<Raw> {
   const headers: Record<string, string | undefined> = {};
   for (const [name, value] of request.headers) headers[name.toLowerCase()] = value;
   return { method: request.method, headers, body: await request.text() };
 }
 
-/**
- * Run one provider adapter. Only a POST is a delivery: anything else is a
- * probe the provider or a health check sends.
- */
 export async function handleWebhook(
   provider: Route["kind"],
   request: Raw,
@@ -66,12 +60,10 @@ export function responseFor(result: AdapterResult): { status: number; body: unkn
   }
 }
 
-/** Discord answers a PING with `{"type":1}`; Slack returns the challenge string. */
 function isPong(response: string): boolean {
   return response === "pong";
 }
 
-/** The error an adapter throws, as an HTTP response. */
 export function errorResponse(error: unknown): Response {
   if (error instanceof AdapterError) {
     return Response.json({ error: { message: error.message } }, { status: error.status });

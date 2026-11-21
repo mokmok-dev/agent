@@ -1,4 +1,3 @@
-/** JSON-RPC 2.0 ids: a string or a number, never null. */
 export type RequestId = string | number;
 
 /** The standard codes JSON-RPC defines, plus ACP's reserved range. */
@@ -42,10 +41,6 @@ export type RpcFailure = { kind: "error"; id: RequestId; error: RpcErrorShape };
 
 export type RpcMessage = RpcRequest | RpcNotification | RpcSuccess | RpcFailure;
 
-/**
- * A rejected frame or a JSON-RPC error reply. It carries the JSON-RPC shape it
- * serializes to, so `encodeErrorResponse` needs no special case for it.
- */
 export class ProtocolError extends Error {
   readonly code: number;
   readonly data: unknown;
@@ -77,7 +72,6 @@ function isRequestId(value: unknown): value is RequestId {
   }
 }
 
-/** A wire error shape, with `data` only when the caller supplied one. */
 function withData(shape: RpcErrorShape, data: unknown): RpcErrorShape {
   return data === undefined ? shape : { ...shape, data };
 }

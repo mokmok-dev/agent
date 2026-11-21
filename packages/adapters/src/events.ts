@@ -6,7 +6,6 @@
 
 export type Provider = "slack" | "discord" | "linear";
 
-/** A request as the adapter receives it: method, headers, and body bytes. */
 export type RawRequest = {
   method: string;
   /** Header names in lower case, as the runtime gives them. */
@@ -15,21 +14,18 @@ export type RawRequest = {
   body: string;
 };
 
-/** The external conversation an inbound event belongs to. */
 export type ThreadId = {
   workspaceId: string;
   channelId: string;
   threadId: string;
 };
 
-/** A user message that should become a turn. */
 export type InboundMessage = {
   kind: "message";
   provider: Provider;
   /** The provider's id for this delivery, used to ignore a replay. */
   eventId: string;
   thread: ThreadId;
-  /** Who sent it, as the provider names them. */
   authorId: string;
   /** The text, with the mention of the agent removed. */
   text: string;
@@ -37,7 +33,6 @@ export type InboundMessage = {
   replyTo: { channelId: string; threadId: string };
 };
 
-/** A user cancelled the running turn. */
 export type InboundCancel = {
   kind: "cancel";
   provider: Provider;
@@ -46,7 +41,6 @@ export type InboundCancel = {
   authorId: string;
 };
 
-/** A provider asking us to prove we own the endpoint. */
 export type InboundChallenge = {
   kind: "challenge";
   provider: Provider;
@@ -54,7 +48,6 @@ export type InboundChallenge = {
   response: string;
 };
 
-/** A delivery we accept and ignore, such as a bot's own message. */
 export type InboundIgnored = {
   kind: "ignored";
   provider: Provider;
@@ -63,7 +56,6 @@ export type InboundIgnored = {
 
 export type InboundEvent = InboundMessage | InboundCancel | InboundChallenge | InboundIgnored;
 
-/** What an adapter returns: an event to act on, or a response to acknowledge. */
 export type AdapterResult =
   | { kind: "event"; event: InboundMessage | InboundCancel }
   | { kind: "challenge"; response: string }

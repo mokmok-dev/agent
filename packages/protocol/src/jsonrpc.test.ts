@@ -27,7 +27,6 @@ function thrown(fn: () => unknown): ProtocolError {
   throw new Error("expected a ProtocolError");
 }
 
-/** JSON text of a value, so `-0` and `0` compare equal the way the wire does. */
 const asJson = (value: unknown): string => JSON.stringify(value) ?? "null";
 
 describe("codec round trip", () => {

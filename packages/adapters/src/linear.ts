@@ -16,10 +16,6 @@ export async function verifyLinear(request: RawRequest, config: LinearConfig): P
   await verifyHmac(config.webhookSecret, request.body, signature, "sha256");
 }
 
-/**
- * Turn a Linear agent-session event into a turn. A thought echo from the agent
- * is ignored, and so is any other event type.
- */
 export function parseLinearEvent(body: unknown): AdapterResult {
   const event = decodeOr400(decodeLinearEvent, body);
   if (event.type !== "AgentSessionEvent") {

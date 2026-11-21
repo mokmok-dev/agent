@@ -1,8 +1,3 @@
-/**
- * The gateway process. It runs the ACP agent for one session and relays every
- * event to the control plane over an outbound WebSocket, so the VM accepts no
- * inbound connection.
- */
 import { AcpBridge } from "./bridge.ts";
 import { encodeEvent, EventLog, parseEdgeFrame } from "./edge.ts";
 import { spawnProcess } from "./agent/proc.ts";
@@ -19,7 +14,6 @@ const log = new EventLog(500);
 const supervisor = new AgentSupervisor({ spawn: spawnProcess });
 let socket: WebSocket | undefined;
 
-/** Send everything not yet acknowledged, then acknowledge it. */
 function flush(): void {
   const pending = log.unacknowledged();
   if (socket?.readyState !== WebSocket.OPEN || pending.length === 0) return;
@@ -74,7 +68,6 @@ function connect(): void {
   });
   opened.addEventListener("close", () => {
     socket = undefined;
-    // Reconnect with a short backoff; unacknowledged events replay on open.
     setTimeout(connect, 1000);
   });
 }

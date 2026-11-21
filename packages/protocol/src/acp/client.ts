@@ -40,7 +40,6 @@ import {
   type WriteTextFileParams,
 } from "./types.ts";
 
-/** The transport an `AcpClient` writes JSON-RPC frames to. */
 export interface Channel {
   send(text: string): void;
 }
@@ -71,16 +70,11 @@ export type AcpClientOptions = {
 
 type Pending = { resolve: (value: unknown) => void; reject: (error: ProtocolError) => void };
 
-/** One agent-to-client method: take raw params, return the JSON-RPC result. */
 type Route = (params: unknown) => Promise<unknown>;
 
 const noHandler = (method: string): ProtocolError =>
   new ProtocolError(RpcErrorCode.MethodNotFound, `this client does not handle ${method}`);
 
-/**
- * One entry per client method, so a missing handler is refused by the same
- * code path for every method and each entry reads as one rule.
- */
 function routes(handlers: AgentRequestHandlers): Record<string, Route> {
   const route =
     <T>(decode: (value: unknown) => T, then: (value: T) => Promise<unknown>): Route =>
@@ -130,10 +124,6 @@ function routes(handlers: AgentRequestHandlers): Record<string, Route> {
   };
 }
 
-/**
- * The client half of ACP. It correlates responses by id, answers the agent's
- * requests through `handlers`, and forwards `session/update` notifications.
- */
 export class AcpClient {
   readonly #channel: Channel;
   readonly #handlers: AgentRequestHandlers;
@@ -153,7 +143,6 @@ export class AcpClient {
     this.#routes = routes(this.#handlers);
   }
 
-  /** Requests still waiting for a response. */
   get pendingCount(): number {
     return this.#pending.size;
   }
