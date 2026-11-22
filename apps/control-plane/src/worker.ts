@@ -203,12 +203,17 @@ export async function resolveGatewaySession(
     const sessions = env.SESSIONS.getByName(sessionId) as SessionRpc;
     const queued = await sessions.next(sessionId);
     if (queued !== undefined) return sessionId;
-    // A session with nothing queued may still be holding an abandoned turn.
-    // Nothing else would ever sweep it: the sweep runs on a gateway message,
-    // and this poll is the one event that keeps arriving. Sweeping here stops
-    // the turn from hiding its thread for ever; a turn it fails is reported to
-    // the thread by the sweep itself, so there is nothing more to hand out.
-    await sessions.expire(sessionId, Date.now());
+    // A session with nothing queued may be holding an abandoned turn, and this
+    // poll is the one event that keeps arriving while nothing else does. The
+    // sweep is best-effort: a deployment mid-upgrade can hold an object whose
+    // class predates `expire`, and a missing sweep must not turn a poll into a
+    // 500 that hides every session.
+    try {
+      await sessions.expire(sessionId, Date.now());
+    } catch {
+      // Nothing to report here: the next poll tries again, and the gateway's
+      // own reconnect is what eventually gives this session a runner.
+    }
   }
   return undefined;
 }
