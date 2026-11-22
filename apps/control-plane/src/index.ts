@@ -175,6 +175,11 @@ export class SessionDurableObject extends DurableObject<Env> {
   close(...args: Parameters<SessionObject["close"]>) {
     return this.#object.close(...args);
   }
+
+  /** The sweep a gateway poll runs, so an abandoned turn cannot hide a thread. */
+  expire(...args: Parameters<SessionObject["expire"]>) {
+    return this.#object.expire(...args);
+  }
 }
 
 export class ThreadIndexDurableObject extends DurableObject<Env> {

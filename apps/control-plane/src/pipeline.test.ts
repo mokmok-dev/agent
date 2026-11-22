@@ -1366,22 +1366,28 @@ describe("the deployed entry exposes the gateway socket", () => {
     expect(source).toContain("this.#object.gateway(");
   });
 
-  test("every index method the Worker calls is exposed by the platform class", async () => {
+  test("every RPC method the Worker calls is exposed by its platform class", async () => {
     // A Durable Object's RPC only sees methods on the class, so a method on the
-    // pure object is invisible until it is forwarded here. Omitting one is a
-    // production-only 500 that no pure test reaches, which is exactly how this
-    // was first missed.
+    // pure object is invisible until it is forwarded. Omitting one is a
+    // production-only failure that no pure test reaches; this happened twice,
+    // to the index and then to the session sweep.
     const worker = await Bun.file(new URL("./worker.ts", import.meta.url)).text();
     const entry = await Bun.file(new URL("./index.ts", import.meta.url)).text();
-    const rpc = /interface IndexRpc \{([\s\S]*?)\n\}/.exec(worker);
-    if (rpc === null) throw new Error("the Worker has no IndexRpc interface");
-    const methods = [...rpc[1]!.matchAll(/^\s+(\w+)\(/gm)].map((match) => match[1]!);
-    expect(methods.length).toBeGreaterThan(0);
-    const classBody = /export class ThreadIndexDurableObject[\s\S]*?\n\}/.exec(entry);
-    if (classBody === null) throw new Error("the entry has no ThreadIndexDurableObject");
-    for (const method of methods) {
-      // A declaration, not a mention: `recentRenamed(` must not satisfy `recent`.
-      expect(classBody[0]).toMatch(new RegExp("\\n  " + method + "\\("));
+    const cases = [
+      { rpc: "IndexRpc", cls: "ThreadIndexDurableObject" },
+      { rpc: "SessionRpc", cls: "SessionDurableObject" },
+    ];
+    for (const { rpc, cls } of cases) {
+      const declared = new RegExp("interface " + rpc + " \\{([\\s\\S]*?)\\n\\}").exec(worker);
+      if (declared === null) throw new Error("the Worker has no " + rpc + " interface");
+      const methods = [...declared[1]!.matchAll(/^\s+(\w+)\(/gm)].map((m) => m[1]!);
+      expect(methods.length).toBeGreaterThan(0);
+      const body = new RegExp("export class " + cls + "[\\s\\S]*?\\n\\}").exec(entry);
+      if (body === null) throw new Error("the entry has no " + cls);
+      for (const method of methods) {
+        // A declaration, not a mention: `recentRenamed(` must not satisfy `recent`.
+        expect(body[0]).toContain("\n  " + method + "(");
+      }
     }
   });
 
