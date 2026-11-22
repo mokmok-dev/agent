@@ -109,6 +109,35 @@ describe("the state", () => {
     expect(first).toMatch(/^[0-9a-f]{64}$/);
     expect(first).not.toBe(second);
   });
+
+  test("every byte is two hex digits, including a zero byte", () => {
+    // A byte below 16 would be one digit without the pad, so the state would be
+    // short and a callback's state comparison could match a prefix. The random
+    // bytes are replaced so the zero case is reached every time.
+    const original = crypto.getRandomValues;
+    crypto.getRandomValues = ((bytes: Uint8Array) => {
+      bytes.fill(0);
+      return bytes;
+    }) as typeof crypto.getRandomValues;
+    try {
+      expect(newState()).toBe("0".repeat(64));
+    } finally {
+      crypto.getRandomValues = original;
+    }
+  });
+
+  test("a byte above fifteen is two digits, so no padding hides a short state", () => {
+    const original = crypto.getRandomValues;
+    crypto.getRandomValues = ((bytes: Uint8Array) => {
+      bytes.fill(0xff);
+      return bytes;
+    }) as typeof crypto.getRandomValues;
+    try {
+      expect(newState()).toBe("ff".repeat(32));
+    } finally {
+      crypto.getRandomValues = original;
+    }
+  });
 });
 
 describe("the callback query", () => {
