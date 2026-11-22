@@ -41,6 +41,21 @@ internet can reach the agent directly.
 | cloudflare-sandbox | pi, codex                             |
 | local-vm           | pi, claude code, opencode, grok build |
 
+## Which model a turn runs
+
+The provider is configuration, not code. `PI_PROVIDERS` is a comma-separated
+list of pi-ai providers and `PI_DEFAULT_MODEL` is `provider:modelId`.
+
+```sh
+wrangler secret put OPENAI_API_KEY        # one secret per provider you enable
+wrangler vars edit                        # PI_PROVIDERS, PI_DEFAULT_MODEL
+```
+
+A provider's key is reachable only for the providers the deployment enabled, so
+a secret for a provider the operator did not choose cannot be used. An unknown
+provider, a missing key, or a default model outside the list fails the turn with
+a sentence that names it, rather than falling back silently.
+
 ## Packages
 
 | path                    | what it owns                                                    |
