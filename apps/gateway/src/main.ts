@@ -1,7 +1,7 @@
 import { AcpBridge } from "./bridge.ts";
 import { encodeEvent, EventLog, parseEdgeFrame } from "./edge.ts";
-import { spawnProcess } from "./agent/proc.ts";
-import { AgentSupervisor } from "./supervisor.ts";
+import { spawnProcess } from "@agent/runtime";
+import { AgentSupervisor } from "@agent/runtime";
 
 const edgeUrl = process.env.EDGE_URL ?? "ws://localhost:8787/gateway";
 const agentCommand = process.env.AGENT_COMMAND ?? "bun";

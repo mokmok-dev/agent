@@ -1,0 +1,10 @@
+{
+  "2fr9usle7c3": {
+    "reason": "A container exec that exposes no stdin makes every write a no-op, so guarding the write and flushing before the first line cannot change what the container receives.",
+    "where": "src/sandbox.ts:81:5 flushWrites(process); -> ;"
+  },
+  "wi5nyq2oxc": {
+    "reason": "A container exec that exposes no stdin makes every write a no-op, so guarding the write and flushing before the first line cannot change what the container receives.",
+    "where": "src/sandbox.ts:76:64 ?. -> ."
+  }
+}

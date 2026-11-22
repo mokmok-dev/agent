@@ -1,5 +1,5 @@
-import { readLines } from "../lines.ts";
-import type { ChildProcess, Spawn } from "../supervisor.ts";
+import { readLines } from "./lines.ts";
+import type { ChildProcess, Spawn } from "./supervisor.ts";
 
 export function spawnProcess(
   command: string,

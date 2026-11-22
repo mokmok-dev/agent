@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { AcpBridge, type GatewayEvent } from "./bridge.ts";
-import { spawnProcess } from "./agent/proc.ts";
-import { AgentSupervisor } from "./supervisor.ts";
+import { spawnProcess } from "@agent/runtime";
+import { AgentSupervisor } from "@agent/runtime";
 
 const AGENT = new URL("./agent/stdio-agent.ts", import.meta.url).pathname;
 

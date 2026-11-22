@@ -37,6 +37,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@agent/protocol": "workspace:*",
+        "@agent/runtime": "workspace:*",
       },
     },
     "packages/adapters": {
@@ -67,6 +68,10 @@
       "name": "@agent/protocol",
       "version": "0.0.0",
     },
+    "packages/runtime": {
+      "name": "@agent/runtime",
+      "version": "0.0.0",
+    },
     "packages/store": {
       "name": "@agent/store",
       "version": "0.0.0",
@@ -86,6 +91,8 @@
     "@agent/gateway": ["@agent/gateway@workspace:apps/gateway"],
 
     "@agent/protocol": ["@agent/protocol@workspace:packages/protocol"],
+
+    "@agent/runtime": ["@agent/runtime@workspace:packages/runtime"],
 
     "@agent/store": ["@agent/store@workspace:packages/store"],
 
