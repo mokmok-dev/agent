@@ -127,3 +127,37 @@ function parseJson(text: string): unknown {
     return undefined;
   }
 }
+
+/** What a socket needs to expose for one gateway to be driven. */
+export interface GatewaySocket {
+  /** Send one frame to the gateway. */
+  send(frame: string): void;
+  /** The session this connection speaks for, once it has said hello. */
+  sessionId: string | undefined;
+}
+
+/**
+ * One message from a gateway, applied to the connection.
+ *
+ * The Worker and the dev server both call this, so the deployed path and the
+ * local path cannot drift. Messages on one connection are serialized by the
+ * caller, so a bind and a completed event that arrive together cannot both read
+ * the session as it was before the bind; the returned promise is what a caller
+ * chains.
+ */
+export async function handleSocketMessage(
+  sessions: GatewaySessions,
+  socket: GatewaySocket,
+  raw: string,
+  now: number,
+  onSettled?: (
+    settled:
+      | { sessionId: string; replyTo: string; text: string }
+      | { sessionId: string; replyTo: string; error: string },
+  ) => Promise<void>,
+): Promise<void> {
+  const step = await onMessage(sessions, { sessionId: socket.sessionId }, raw, now);
+  socket.sessionId = step.connection.sessionId;
+  for (const frame of step.send) socket.send(frame);
+  if (step.settled !== undefined && onSettled !== undefined) await onSettled(step.settled);
+}

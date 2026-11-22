@@ -55,6 +55,13 @@ export async function open(state: DurableObjectState, env: Env): Promise<Convers
   // it; a provider whose endpoint is unreachable leaves it empty, which the
   // failed turn then names.
   await refreshCatalog(setup.models, providerConfigOf(env).providers);
+  // A pinned model that the catalog does not hold is exactly what pi reports as
+  // `no_model`, so the deployment records what it resolved against.
+  const pinned = setup.models.getModel(setup.defaultModel.provider, setup.defaultModel.modelId);
+  console.log(
+    `open: pinned ${setup.defaultModel.provider}/${setup.defaultModel.modelId} ` +
+      `= ${pinned === undefined ? "MISSING" : "found"}`,
+  );
   const conversation = await ConversationBase.open(storage, {
     models: setup.models,
     registry: createRegistry(),

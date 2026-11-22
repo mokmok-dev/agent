@@ -1,4 +1,5 @@
 import {
+  expireTurn,
   nextQueued,
   transitionTurn,
   type Session,
@@ -122,6 +123,30 @@ export class SessionRepository {
     if (session === undefined) return undefined;
     const turn = nextQueued(await this.turns(sessionId));
     return turn === undefined ? undefined : { turn, session };
+  }
+
+  /**
+   * Fail every queued turn that waited past its claim deadline, and return the
+   * ones that changed.
+   *
+   * A `stdio` turn is run by the gateway that hosts its agent, so a stopped VM
+   * would otherwise leave it queued forever and the thread silent. Running the
+   * sweep on the same object that owns the turns keeps it to one storage read
+   * per turn and makes it idempotent: an already terminal turn is skipped.
+   */
+  async expireStaleTurns(sessionId: string, now: number): Promise<Turn[]> {
+    return this.#serialized(async () => {
+      const session = await this.session(sessionId);
+      if (session === undefined) return [];
+      const expired: Turn[] = [];
+      for (const turn of await this.turns(sessionId)) {
+        const next = expireTurn(turn, session, now);
+        if (next === undefined) continue;
+        await this.#storage.put(turnKey(sessionId, turn.id), next);
+        expired.push(next);
+      }
+      return expired;
+    });
   }
 
   async activeTurn(sessionId: string): Promise<Turn | undefined> {

@@ -60,7 +60,9 @@ export type Turn = {
 };
 
 export const TURN_TRANSITIONS: Record<TurnStatus, readonly TurnStatus[]> = {
-  queued: ["dispatched", "cancelled"],
+  // A `stdio` turn waits for the gateway that hosts its agent. If none claims
+  // it, the turn fails rather than leaving the thread silent.
+  queued: ["dispatched", "failed", "cancelled"],
   // A dispatch may fail before the agent ever runs, so `failed` is legal here.
   dispatched: ["running", "failed", "cancelled", "queued"],
   running: ["completed", "failed", "cancelled"],
@@ -145,4 +147,42 @@ export function nextQueued(turns: readonly Turn[]): Turn | undefined {
 
 export function acceptsTurns(session: Session): boolean {
   return session.status === "active";
+}
+
+/**
+ * How long a queued turn waits for a gateway before it is spent. A `stdio`
+ * turn is run by the process that hosts its agent, so a VM that is stopped
+ * leaves the turn queued forever. Five minutes is long enough for a gateway
+ * restart and short enough that a person is not left waiting on nothing.
+ */
+export const GATEWAY_CLAIM_DEADLINE_MS = 5 * 60 * 1000;
+
+/** The error a turn carries when no gateway claimed it in time. */
+export const NO_GATEWAY_REASON =
+  "no gateway claimed this turn: the runtime that hosts this agent was not connected";
+
+/**
+ * Whether a queued turn has waited past its claim deadline.
+ *
+ * Expiry is derived rather than stored, so the rule is a pure function of the
+ * turn and the clock and a test can decide it without waiting.
+ */
+export function hasExpired(turn: Turn, now: number, deadline = GATEWAY_CLAIM_DEADLINE_MS): boolean {
+  return turn.status === "queued" && now - turn.createdAt >= deadline;
+}
+
+/**
+ * The turn failed because no gateway claimed it, or `undefined` when it is
+ * still within its deadline or has already advanced. The caller stores the
+ * returned turn, so a second sweep finds it terminal and does nothing.
+ */
+export function expireTurn(
+  turn: Turn,
+  session: Session,
+  now: number,
+  deadline = GATEWAY_CLAIM_DEADLINE_MS,
+): Turn | undefined {
+  if (!hasExpired(turn, now, deadline)) return undefined;
+  const result = transitionTurn(turn, session, { status: "failed", error: NO_GATEWAY_REASON }, now);
+  return result.ok ? result.next : undefined;
 }

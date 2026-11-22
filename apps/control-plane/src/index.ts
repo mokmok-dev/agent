@@ -5,11 +5,14 @@ import { objectStorage } from "./platform-storage.ts";
 import { SessionObject } from "./session-do.ts";
 import { ThreadIndexObject } from "./thread-index-do.ts";
 import { oauthConfigOf } from "./routes.ts";
+import { catalogOf, routingPolicyOf } from "./routing.ts";
 import type { AccessToken, Completed } from "./linear-oauth-do.ts";
 import type { Credential, CredentialInfo } from "@earendil-works/pi-ai";
 import { ProviderCredentialObject } from "./providers-do.ts";
 import { piRunnerFor } from "./pi-runtime.ts";
-import { fetch as handle, type Env } from "./worker.ts";
+import { fetch as handle, replyFor, type Env } from "./worker.ts";
+import { linearReplies } from "./linear-reply.ts";
+import type { LinearOAuthPort } from "./linear-oauth-port.ts";
 
 /**
  * The entry Wrangler deploys. A Durable Object's RPC is class-based, so each
@@ -19,14 +22,64 @@ import { fetch as handle, type Env } from "./worker.ts";
  */
 export class SessionDurableObject extends DurableObject<Env> {
   readonly #object: SessionObject;
+  /** Chains one connection's messages, so a bind and a settle cannot interleave. */
+  #gatewayQueue: Promise<void> = Promise.resolve();
 
   constructor(state: DurableObjectState, env: Env) {
     super(state, env);
+    // The route and the model are stated together, because the router pins a
+    // model that pi then resolves against the providers this deployment
+    // registered. A catalog naming another provider's model fails `no_model`.
+    const policy = routingPolicyOf(env);
     this.#object = new SessionObject(
       objectStorage(state.storage),
-      undefined,
+      { policy, catalog: catalogOf(env, policy.defaultAgent) },
       piRunnerFor(state, env),
+      // `accept` answers Linear inside its five-second window, so the model call
+      // runs after that answer. Without waitUntil the object hibernates on
+      // return and cancels the run mid-flight.
+      (work) => state.waitUntil(work),
+      // The reply follows the run, not the webhook: by the time the agent speaks
+      // Linear has already been answered, so this is the only place the words
+      // can reach the thread.
+      (outcome, threadId) => this.#answer(env, outcome, threadId),
     );
+  }
+
+  async #answer(
+    env: Env,
+    outcome: { kind: "answered"; text: string } | { kind: "failed"; error: string },
+    threadId: string,
+  ): Promise<void> {
+    const port = linearReplies(env.LINEAR_OAUTH.getByName("linear") as LinearOAuthPort);
+    await replyFor(port, threadId, outcome, Date.now());
+  }
+
+  /**
+   * Take the gateway's WebSocket. A Durable Object answers `fetch` for its own
+   * name, so the upgrade happens here rather than in the Worker's route table,
+   * and every message is driven by the object's own connection handler.
+   */
+  override async fetch(request: Request): Promise<Response> {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return Response.json({ error: "expected a WebSocket upgrade" }, { status: 426 });
+    }
+    const pair = new WebSocketPair();
+    const [client, server] = [pair[0], pair[1]];
+    server.accept();
+    const gateway = {
+      sessionId: undefined as string | undefined,
+      send: (frame: string) => server.send(frame),
+    };
+    server.addEventListener("message", (event) => {
+      const raw = typeof event.data === "string" ? event.data : "";
+      // Messages are serialized by chaining, so a bind and a completed event that
+      // arrive together cannot both read the session as it was before the bind.
+      this.#gatewayQueue = this.#gatewayQueue.then(() =>
+        this.#object.gateway(gateway, raw, Date.now()),
+      );
+    });
+    return new Response(null, { status: 101, webSocket: client });
   }
 
   accept(...args: Parameters<SessionObject["accept"]>) {

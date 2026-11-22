@@ -786,12 +786,14 @@ describe("the exact step a connection produces", () => {
 });
 
 describe("the gateway route and the executor choice", () => {
-  test("GET /gateway without an upgrade says what it needs, and the route exists", async () => {
+  test("GET /gateway without an upgrade answers 426, whatever else it names", async () => {
     const { dir, env } = await deployment();
     try {
-      const response = await controlPlane(new Request("https://x/gateway"), env);
-      expect(response.status).toBe(426);
-      expect(await response.json()).toEqual({ error: "expected a WebSocket upgrade" });
+      for (const path of ["https://x/gateway", "https://x/gateway?session=s1"]) {
+        const response = await controlPlane(new Request(path), env);
+        expect(response.status).toBe(426);
+        expect(await response.json()).toEqual({ error: "expected a WebSocket upgrade" });
+      }
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -829,7 +831,9 @@ describe("the gateway route and the executor choice", () => {
       expect(runs).toEqual([]);
       expect((await stdioObject.turns(SESSION))[0]?.status).toBe("queued");
 
-      // A durable route is this process, so the runner is asked.
+      // A durable route is this process. The run is detached so the webhook can
+      // answer inside Linear's five-second window, so the test waits for the
+      // turn to settle rather than for `accept` to return.
       const durableObject = new SessionObject(
         new DiskHost(join(dir, "durable-runs")),
         { policy: routingPolicyOf({}) },
@@ -842,6 +846,7 @@ describe("the gateway route and the executor choice", () => {
         "evt-2",
         10,
       );
+      await settle(() => runs.length > 0);
       expect(runs).toEqual([SESSION]);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -1025,5 +1030,44 @@ describe("the settled step's exact shape", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Wait until a detached run has taken effect. `accept` returns before the run
+ * because Linear needs an answer inside five seconds, so a test that asserts on
+ * the run has to wait for it rather than for `accept`.
+ */
+async function settle(done: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 200 && !done(); attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+describe("the deployed entry exposes the gateway socket", () => {
+  test("the platform entry exports the session class and overrides fetch to accept an upgrade", async () => {
+    // The object owns the socket, so the class must carry `fetch`; a missing one
+    // is what the Worker's route would call and fail on.
+    const source = await Bun.file(new URL("./index.ts", import.meta.url)).text();
+    expect(source).toContain("export class SessionDurableObject");
+    expect(source).toContain("override async fetch");
+    expect(source).toContain("WebSocketPair");
+    expect(source).toContain("this.#object.gateway(");
+  });
+
+  test("the Worker's gateway route hands the request to the session object", async () => {
+    const source = await Bun.file(new URL("./worker.ts", import.meta.url)).text();
+    // The route resolves the session's object and forwards the upgrade to it;
+    // the names may wrap, so the check is on the identifiers a handoff needs.
+    expect(source).toContain("env.SESSIONS.getByName(sessionId)");
+    expect(source).toContain("object.fetch(request)");
+    expect(source).toContain("?session=<id>");
+  });
+
+  test("the deployed entry states the local VM as its runtime", async () => {
+    const config = await Bun.file(new URL("../wrangler.toml", import.meta.url)).text();
+    expect(config).toContain('AGENT_RUNTIMES = "local-vm"');
+    expect(config).toContain('AGENT_AVAILABLE_RUNTIMES = "local-vm"');
+    expect(config).toContain('AGENT_DEFAULT = "claude-code"');
   });
 });

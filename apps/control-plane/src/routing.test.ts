@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { AGENTS, DEFAULT_POLICY } from "@agent/capability";
-import { routingPolicyOf, unknownAgents } from "./routing.ts";
+import { AGENTS, CATALOG, DEFAULT_POLICY } from "@agent/capability";
+import { catalogOf, routingPolicyOf, unknownAgents } from "./routing.ts";
 
 describe("the routing a deployment states", () => {
   test("no configuration keeps the shipped default, so an unconfigured deploy is unchanged", () => {
@@ -115,5 +115,45 @@ describe("the exact parsing rules", () => {
     expect(routingPolicyOf({ AGENT_AVAILABLE_RUNTIMES: "nope" }).available).toEqual(
       DEFAULT_POLICY.available,
     );
+  });
+});
+
+describe("the catalog the router answers with", () => {
+  test("the shipped catalog names a provider the deployment may not register", () => {
+    // This coupling is what produced `no_model` on the deployment: the router
+    // pinned a Workers AI model while only ollama-cloud was registered.
+    expect(CATALOG.agents.pi.defaultModel.provider).toBe("cloudflare-workers-ai");
+  });
+
+  test("a deployment's model replaces the shipped default for its agent", () => {
+    const catalog = catalogOf({ PI_DEFAULT_MODEL: "ollama-cloud:deepseek-v4.1-flash" }, "pi");
+    expect(catalog.agents.pi.defaultModel).toEqual({
+      provider: "ollama-cloud",
+      modelId: "deepseek-v4.1-flash",
+    });
+  });
+
+  test("the model ids with a colon are kept whole, because Ollama's ids carry one", () => {
+    const catalog = catalogOf({ PI_DEFAULT_MODEL: "ollama-cloud:gpt-oss:120b" }, "pi");
+    expect(catalog.agents.pi.defaultModel.modelId).toBe("gpt-oss:120b");
+  });
+
+  test("no stated model keeps the shipped catalog, so an unconfigured deploy is unchanged", () => {
+    expect(catalogOf({}, "pi")).toEqual(CATALOG);
+  });
+
+  test("a model with no separator is ignored rather than guessed", () => {
+    expect(catalogOf({ PI_DEFAULT_MODEL: "ollama-cloud" }, "pi")).toEqual(CATALOG);
+  });
+
+  test("an empty provider or model id is ignored", () => {
+    expect(catalogOf({ PI_DEFAULT_MODEL: ":deepseek-v4.1-flash" }, "pi")).toEqual(CATALOG);
+    expect(catalogOf({ PI_DEFAULT_MODEL: "ollama-cloud:" }, "pi")).toEqual(CATALOG);
+  });
+
+  test("a model replaces only the named agent, leaving the others as shipped", () => {
+    const catalog = catalogOf({ PI_DEFAULT_MODEL: "ollama-cloud:deepseek-v4.1-flash" }, "pi");
+    expect(catalog.agents.codex).toEqual(CATALOG.agents.codex);
+    expect(catalog.runtimes).toEqual(CATALOG.runtimes);
   });
 });

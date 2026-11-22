@@ -105,9 +105,23 @@ export async function fetch(request: Request, env: Env, now = Date.now()): Promi
   }
 
   if (route.kind === "gateway") {
-    // A Worker reaches this only when the request is not an upgrade; the
-    // dev server handles the socket itself.
-    return Response.json({ error: "expected a WebSocket upgrade" }, { status: 426 });
+    // The Worker only routes: the gateway names the session it serves, and that
+    // object owns the socket. A non-upgrade is refused here, so the answer does
+    // not depend on reaching the object at all.
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return Response.json({ error: "expected a WebSocket upgrade" }, { status: 426 });
+    }
+    const sessionId = url.searchParams.get("session");
+    if (sessionId === null || sessionId === "") {
+      return Response.json(
+        { error: "name the session a gateway serves with ?session=<id>" },
+        { status: 400 },
+      );
+    }
+    const object = env.SESSIONS.getByName(sessionId) as {
+      fetch(request: Request): Promise<Response>;
+    };
+    return object.fetch(request);
   }
   if (route.kind === "providers-status") {
     return providersStatus(env);
@@ -172,13 +186,9 @@ export async function accept(
   if (port !== undefined && event.stage === "start") {
     await port.acknowledge(event.thread.threadId, now);
   }
-  const outcome = await sessions.accept(sessionId, thread, event.text, event.eventId, now);
-  if (port === undefined) return outcome;
-  // A refusal is passed through as it is; a delivery that reached a turn
-  // carries the run its agent produced, which is what the reply is made of.
-  if (outcome.kind === "refused") return outcome;
-  const reply = await replyFor(port, event.thread.threadId, outcome.run, now);
-  return reply === undefined ? outcome : { ...outcome, reply };
+  // The reply is not built here: the run settles after this webhook has already
+  // answered Linear, so the session object sends the answer from the run.
+  return sessions.accept(sessionId, thread, event.text, event.eventId, now);
 }
 
 /**

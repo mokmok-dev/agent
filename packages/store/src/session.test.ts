@@ -101,9 +101,14 @@ describe("the transition table", () => {
     });
   });
 
-  test("a queued turn cannot jump straight to failed, so a dispatch is always the first step", () => {
-    const result = transitionTurn(turn(), session(), { status: "failed", error: "x" }, 60);
-    expect(result).toEqual({ ok: false, reason: "illegal-transition" });
+  test("a queued turn can fail without a dispatch, which is what an unclaimed gateway turn does", () => {
+    // A `stdio` turn waits for the gateway that hosts its agent. When none
+    // claims it, the turn fails from `queued`; see `expireTurn`.
+    const result = transitionTurn(turn(), session(), { status: "failed", error: "no gateway" }, 60);
+    expect(result).toEqual({
+      ok: true,
+      next: expect.objectContaining({ status: "failed", error: "no gateway" }),
+    });
   });
 
   test("the terminal statuses are the ones with no outgoing edge", () => {

@@ -1,5 +1,7 @@
 import { SessionService } from "./session-service.ts";
 import { durableStorage, type StorageHost } from "./storage.ts";
+import { handleSocketMessage, type GatewaySessions } from "./gateway-connection.ts";
+import type { TurnRunOutcome } from "./session-service.ts";
 import type { TurnRunner } from "./turn-runner.ts";
 
 /**
@@ -15,14 +17,22 @@ import type { TurnRunner } from "./turn-runner.ts";
 export class SessionObject {
   readonly #service: SessionService;
   readonly #runner: TurnRunner | undefined;
+  /** Keeps a detached run alive after `accept` answers, on the platform. */
+  readonly #keepAlive: (work: Promise<unknown>) => void;
+  /** Answers the thread a settled turn came from. */
+  readonly #replies: ReplySink;
 
   constructor(
     storageHost: StorageHost,
     deps?: ConstructorParameters<typeof SessionService>[1],
     runner?: TurnRunner,
+    keepAlive?: (work: Promise<unknown>) => void,
+    replies?: ReplySink,
   ) {
     this.#service = new SessionService(durableStorage(storageHost), deps);
     this.#runner = runner;
+    this.#keepAlive = keepAlive ?? (() => undefined);
+    this.#replies = replies ?? (async () => undefined);
   }
 
   deliver(...args: Parameters<SessionService["deliver"]>) {
@@ -33,6 +43,11 @@ export class SessionObject {
    * Record a delivery and run its turn when this object hosts that turn's
    * agent. A `stdio` session is left queued for its gateway, which is what
    * makes a VM-routed delivery reach the VM rather than a local pi loop.
+   *
+   * The run is handed to the host's keep-alive, because Linear requires a
+   * webhook answer within five seconds and a model call outlives that. Without
+   * it the object hibernates the moment `accept` returns and the run is
+   * cancelled mid-flight, which is what left turns with no reply and no error.
    */
   async accept(
     sessionId: string,
@@ -43,18 +58,70 @@ export class SessionObject {
   ): Promise<unknown> {
     const outcome = await this.#service.deliver(sessionId, thread, prompt, idempotencyKey, now);
     if (outcome.kind === "refused") return outcome;
-    if (!this.#hostsTurn(outcome.selection)) return outcome;
-    if (this.#runner === undefined) return outcome;
-    const run = await this.#service.runNext(sessionId, this.#runner, now);
-    return { ...outcome, run };
+    // A `stdio` route is a process the gateway supervises, so the turn waits.
+    if (outcome.selection.protocol !== "stdio") {
+      if (this.#runner === undefined) return outcome;
+      this.#keepAlive(this.#runDetached(sessionId, now));
+      return outcome;
+    }
+    // A `stdio` turn may be the one that replaces a turn whose gateway never
+    // arrived, so the delivery is also the moment to record that failure.
+    await this.expire(sessionId, now);
+    return outcome;
   }
 
   /**
-   * Whether this object runs the turn, which only a `durable` route does. A
-   * `stdio` route is a process the gateway supervises, so the turn waits there.
+   * Fail the queued turns no gateway claimed in time. Called on a delivery and
+   * on a gateway connection, which are the two moments a thread can learn that
+   * the agent it waits for is not coming.
    */
-  #hostsTurn(selection: { protocol: string }): boolean {
-    return selection.protocol === "durable";
+  async expire(sessionId: string, now: number): Promise<unknown[]> {
+    const expired = await this.#service.expire(sessionId, now);
+    for (const turn of expired) {
+      const session = await this.#service.session(sessionId);
+      if (session === undefined) continue;
+      await this.#replies(
+        { kind: "failed", error: turn.error ?? "no gateway claimed this turn" },
+        session.thread.threadId,
+      );
+    }
+    return expired;
+  }
+
+  /**
+   * Run the queued turn without holding the caller. A failure is recorded on
+   * the turn, which is what a later read reports, so a rejected promise here
+   * cannot leave the session silently stuck.
+   */
+  /**
+   * Run the queued turn without holding the caller, then answer the thread it
+   * came from. The reply belongs here rather than in the webhook handler,
+   * because the webhook has already answered Linear by the time the run
+   * settles; only the run knows whether the agent spoke or failed.
+   */
+  async #runDetached(sessionId: string, now: number): Promise<void> {
+    if (this.#runner === undefined) return;
+    try {
+      const outcome = await this.#service.runNext(sessionId, this.#runner, now);
+      console.log(
+        `turn run settled for ${sessionId}: ${outcome?.kind ?? "nothing-queued"}` +
+          (outcome?.kind === "failed" ? ` reason=${outcome.error}` : ""),
+      );
+      if (outcome === undefined) return;
+      const session = await this.#service.session(sessionId);
+      if (session === undefined) return;
+      const reply =
+        outcome.kind === "answered"
+          ? { kind: "answered" as const, text: outcome.text }
+          : outcome.kind === "failed"
+            ? { kind: "failed" as const, error: outcome.error }
+            : undefined;
+      if (reply !== undefined) await this.#replies(reply, session.thread.threadId);
+    } catch (error) {
+      console.log(
+        `turn run failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   session(...args: Parameters<SessionService["session"]>) {
@@ -84,4 +151,54 @@ export class SessionObject {
   close(...args: Parameters<SessionService["close"]>) {
     return this.#service.close(...args);
   }
+
+  /**
+   * Take one message from a gateway that is serving this session, and answer
+   * with whatever frame the connection owes back.
+   *
+   * The socket itself belongs to the platform class, so this is the point the
+   * deployed path and the dev server meet: both feed the same connection
+   * handlers, and both send the reply that a settled turn earns.
+   */
+  async gateway(
+    socket: { sessionId: string | undefined; send(frame: string): void },
+    raw: string,
+    now: number,
+  ): Promise<void> {
+    await handleSocketMessage(this.#sessions(), socket, raw, now, (settled) =>
+      this.#replies(
+        "text" in settled
+          ? { kind: "answered", text: settled.text }
+          : { kind: "failed", error: settled.error },
+        settled.replyTo,
+      ),
+    );
+    // A gateway that has just spoken may have left other turns waiting, and a
+    // connection is the moment a thread learns its agent is present.
+    await this.expire(socket.sessionId ?? "", now);
+  }
+
+  /** The session surface the connection handlers read. */
+  #sessions(): GatewaySessions {
+    return {
+      session: (sessionId) => this.#service.session(sessionId),
+      turns: (sessionId) => this.#service.turns(sessionId),
+      transition: (sessionId, turnId, update, at) =>
+        this.#service.transition(sessionId, turnId, update, at),
+      bind: (sessionId, acpSessionId, gatewayId, at) =>
+        this.#service.bind(sessionId, acpSessionId, gatewayId, at),
+    };
+  }
 }
+
+/**
+ * Answers the thread a settled turn came from. A reply that cannot be sent is
+ * swallowed rather than thrown, so a provider outage cannot undo a turn that
+ * already ran.
+ */
+export type ReplySink = (
+  outcome: { kind: "answered"; text: string } | { kind: "failed"; error: string },
+  threadId: string,
+) => Promise<void>;
+
+export type { TurnRunOutcome };

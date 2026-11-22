@@ -6,7 +6,7 @@ import { ProviderCredentialObject } from "./providers-do.ts";
 import { DiskHost } from "./disk-host.ts";
 import type { StorageHost } from "./storage.ts";
 import { routingPolicyOf } from "./routing.ts";
-import { onMessage, type GatewaySessions } from "./gateway-connection.ts";
+import { handleSocketMessage, type GatewaySessions } from "./gateway-connection.ts";
 import { linearReplies } from "./linear-reply.ts";
 import type { LinearOAuthPort } from "./linear-oauth-port.ts";
 import { join } from "node:path";
@@ -115,15 +115,13 @@ async function handleGatewayMessage(
   socket: { data: SocketData; send: (frame: string) => void },
   raw: string,
 ): Promise<void> {
-  const step = await onMessage(
-    gatewaySessions(),
-    { sessionId: socket.data.sessionId },
-    raw,
-    Date.now(),
-  );
-  socket.data.sessionId = step.connection.sessionId;
-  for (const frame of step.send) socket.send(frame);
-  if (step.settled !== undefined) await replyToLinear(step.settled);
+  // The same driver the deployed object uses, so the two paths cannot drift.
+  const gateway = {
+    sessionId: socket.data.sessionId,
+    send: (frame: string) => socket.send(frame),
+  };
+  await handleSocketMessage(gatewaySessions(), gateway, raw, Date.now(), replyToLinear);
+  socket.data.sessionId = gateway.sessionId;
 }
 
 export function serve(port: number): ReturnType<typeof Bun.serve> {

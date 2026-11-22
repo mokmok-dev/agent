@@ -130,6 +130,15 @@ export class SessionService {
     return this.#repo.nextTurn(sessionId);
   }
 
+  /**
+   * Fail every queued turn that no gateway claimed in time, and return the ones
+   * that changed. A gateway connection and a delivery both call this, so a
+   * thread is never left waiting on a VM that is not running.
+   */
+  expire(sessionId: string, now: number): Promise<Turn[]> {
+    return this.#repo.expireStaleTurns(sessionId, now);
+  }
+
   active(sessionId: string): Promise<Turn | undefined> {
     return this.#repo.activeTurn(sessionId);
   }

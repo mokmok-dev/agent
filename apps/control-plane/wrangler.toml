@@ -72,3 +72,10 @@ LINEAR_REDIRECT_URI = "https://agent-control-plane.mokmok.workers.dev/oauth/line
 #   PI_DEFAULT_MODEL = "ollama-cloud:gemma4:31b"
 PI_PROVIDERS = "ollama-cloud"
 PI_DEFAULT_MODEL = "ollama-cloud:deepseek-v4.1-flash"
+
+# Where a turn runs. The local VM hosts the agent's own process, so a turn is
+# handed to the gateway that serves it rather than run inside the Worker. A
+# deployment that wants the sandbox states `cloudflare-sandbox` instead.
+AGENT_DEFAULT = "claude-code"
+AGENT_RUNTIMES = "local-vm"
+AGENT_AVAILABLE_RUNTIMES = "local-vm"

@@ -5,6 +5,7 @@ import type { ThreadRef, Turn } from "@agent/store";
 import { OAUTH } from "./test-env.ts";
 import { SessionObject } from "./session-do.ts";
 import type { StorageHost } from "./storage.ts";
+import { GATEWAY_CLAIM_DEADLINE_MS } from "@agent/store";
 
 class FakeSessions {
   readonly calls: Array<{ method: string; args: unknown[] }> = [];
@@ -264,249 +265,83 @@ describe("the control plane to session relay", () => {
   });
 });
 
-describe("answering a Linear session with the agent's words", () => {
-  const port = (sent: { sessionId: string; text: string }[]) => ({
-    acknowledge: async () => ({ kind: "sent" as const, activityId: null }),
-    answer: async (sessionId: string, text: string) => {
-      sent.push({ sessionId, text });
-      return { kind: "sent" as const, activityId: "a-1" };
-    },
-  });
+describe("the reply a settled run sends", () => {
+  const thread = { provider: "linear" as const, workspaceId: "w", channelId: "i", threadId: "t" };
 
-  test("an answered turn reaches the session's thread", async () => {
-    const sessions = new FakeSessions();
-    sessions.answerWith = { kind: "answered", text: "the build is green" };
-    const sent: { sessionId: string; text: string }[] = [];
-    const env = envWith(sessions, ["session-1"]);
-    const outcome = (await accept(
-      env,
-      { ...message, provider: "linear", stage: "start" },
-      1,
-      port(sent),
-    )) as { reply?: unknown };
-    expect(sent).toEqual([{ sessionId: message.thread.threadId, text: "the build is green" }]);
-    expect(outcome.reply).toEqual({ kind: "sent", activityId: "a-1" });
-  });
-
-  test("a failed turn says so rather than leaving the session silent", async () => {
-    const sessions = new FakeSessions();
-    sessions.answerWith = { kind: "failed", error: "no model key" };
-    const sent: { sessionId: string; text: string }[] = [];
-    const env = envWith(sessions, ["session-1"]);
-    await accept(env, { ...message, provider: "linear", stage: "start" }, 1, port(sent));
-    expect(sent[0]?.text).toContain("no model key");
-  });
-
-  test("a turn that never ran sends no answer, so a runner-less deployment stays quiet", async () => {
-    const sessions = new FakeSessions();
-    sessions.answerWith = undefined;
-    const sent: { sessionId: string; text: string }[] = [];
-    const env = envWith(sessions, ["session-1"]);
-    const outcome = (await accept(
-      env,
-      { ...message, provider: "linear", stage: "start" },
-      1,
-      port(sent),
-    )) as { reply?: unknown };
-    expect(sent).toEqual([]);
-    expect(outcome.reply).toBeUndefined();
-  });
-
-  test("a Slack delivery sends no Linear answer, because it has no Linear session", async () => {
-    const sessions = new FakeSessions();
-    sessions.answerWith = { kind: "answered", text: "hello" };
-    const sent: { sessionId: string; text: string }[] = [];
-    const env = envWith(sessions, ["session-1"]);
-    await accept(env, message, 1, port(sent));
-    expect(sent).toEqual([]);
-  });
-
-  test("a refused delivery sends no answer", async () => {
-    const sessions = new FakeSessions();
-    sessions.refuse = true;
-    const sent: { sessionId: string; text: string }[] = [];
-    const env = envWith(sessions, ["session-1"]);
-    await accept(env, { ...message, provider: "linear", stage: "start" }, 1, port(sent));
-    expect(sent).toEqual([]);
-  });
-});
-
-describe("the answer a run produces", () => {
-  const port = (sent: string[]) => ({
-    acknowledge: async () => ({ kind: "sent" as const, activityId: null }),
-    answer: async (_sessionId: string, text: string) => {
-      sent.push(text);
-      return { kind: "sent" as const, activityId: null };
-    },
-  });
-
-  const runWith = async (run: { kind: string; text?: string; error?: string } | undefined) => {
-    const sessions = new FakeSessions();
-    sessions.answerWith = run as never;
-    const sent: string[] = [];
-    await accept(
-      envWith(sessions, ["session-1"]),
-      { ...message, provider: "linear", stage: "start" },
-      1,
-      port(sent),
-    );
-    return sent;
-  };
-
-  test("an answered run sends its text", async () => {
-    expect(await runWith({ kind: "answered", text: "done" })).toEqual(["done"]);
-  });
-
-  test("an answered run with no text sends an empty answer rather than nothing", async () => {
-    expect(await runWith({ kind: "answered" })).toEqual([""]);
-  });
-
-  test("a failed run sends its reason", async () => {
-    expect(await runWith({ kind: "failed", error: "boom" })).toEqual(["The run failed: boom"]);
-  });
-
-  test("a failed run with no reason still says it failed", async () => {
-    expect(await runWith({ kind: "failed" })).toEqual(["The run failed: no reason given"]);
-  });
-
-  test("a run in an unrecognized state sends nothing", async () => {
-    expect(await runWith({ kind: "not-queued" })).toEqual([]);
-  });
-});
-
-describe("the outcome a Linear delivery returns", () => {
-  const port = (sent: string[]) => ({
-    acknowledge: async () => ({ kind: "sent" as const, activityId: null }),
-    answer: async (_sessionId: string, text: string) => {
-      sent.push(text);
-      return { kind: "sent" as const, activityId: null };
-    },
-  });
-
-  test("a refused delivery returns the refusal, so the provider can retry", async () => {
-    const sessions = new FakeSessions();
-    sessions.refuse = true;
-    const outcome = await accept(
-      envWith(sessions, ["session-1"]),
-      { ...message, provider: "linear", stage: "start" },
-      1,
-      port([]),
-    );
-    expect(outcome).toEqual({ kind: "refused", reason: "closed" });
-  });
-
-  test("a delivery with no run reports that nothing ran", async () => {
-    const sessions = new FakeSessions();
-    const outcome = (await accept(
-      envWith(sessions, ["session-1"]),
-      { ...message, provider: "linear", stage: "start" },
-      1,
-      port([]),
-    )) as { reply?: unknown };
-    expect(outcome.reply).toBeUndefined();
-  });
-});
-
-describe("a refused delivery is returned before a reply is attempted", () => {
-  test("the port is never asked to answer a refused delivery", async () => {
-    const sessions = new FakeSessions();
-    sessions.refuse = true;
-    const asked: string[] = [];
-    const outcome = (await accept(
-      envWith(sessions, ["session-1"]),
-      { ...message, provider: "linear", stage: "start" },
-      1,
-      {
-        acknowledge: async () => ({ kind: "sent" as const, activityId: null }),
-        answer: async (_sessionId: string, text: string) => {
-          asked.push(text);
-          return { kind: "sent" as const, activityId: null };
-        },
+  /** A sink that records what the session object asked it to answer. */
+  function sink() {
+    const sent: { kind: string; text?: string; error?: string; threadId: string }[] = [];
+    return {
+      sent,
+      replies: async (
+        outcome: { kind: "answered"; text: string } | { kind: "failed"; error: string },
+        threadId: string,
+      ) => {
+        sent.push({ ...outcome, threadId });
       },
-    )) as { kind?: string; reply?: unknown };
-    expect(asked).toEqual([]);
-    expect(outcome.kind).toBe("refused");
-  });
-});
-
-describe("a delivery that carries no run", () => {
-  test("a delivery with no run gets no reply, and one with a run does", async () => {
-    const withRun = new FakeSessions();
-    withRun.answerWith = { kind: "answered", text: "yes" };
-    const ran: string[] = [];
-    await accept(envWith(withRun, ["s"]), { ...message, provider: "linear", stage: "start" }, 1, {
-      acknowledge: async () => ({ kind: "sent" as const, activityId: null }),
-      answer: async (_id: string, text: string) => {
-        ran.push(text);
-        return { kind: "sent" as const, activityId: null };
-      },
-    });
-
-    const withoutRun = new FakeSessions();
-    const quiet: string[] = [];
-    await accept(
-      envWith(withoutRun, ["s"]),
-      { ...message, provider: "linear", stage: "start" },
-      1,
-      {
-        acknowledge: async () => ({ kind: "sent" as const, activityId: null }),
-        answer: async (_id: string, text: string) => {
-          quiet.push(text);
-          return { kind: "sent" as const, activityId: null };
-        },
-      },
-    );
-
-    expect(ran).toEqual(["yes"]);
-    expect(quiet).toEqual([]);
-  });
-});
-
-describe("the object's accept records before it runs", () => {
-  test("a runner runs the turn the delivery created and attaches its outcome", async () => {
-    const host = new SessionHost();
-    const object = new SessionObject(host, undefined, {
-      run: async () => ({ kind: "answered", text: "ran" }),
-    });
-    const outcome = (await object.accept(
-      "s1",
-      { provider: "linear", workspaceId: "w", channelId: "i", threadId: "t" },
-      "hello",
-      "evt-1",
-      10,
-    )) as { run?: unknown; turn?: unknown };
-    expect(outcome.run).toEqual({ kind: "answered", text: "ran" });
-    expect(outcome.turn).toBeDefined();
-  });
-
-  test("a deployment with no runner records the turn and runs nothing", async () => {
-    const object = new SessionObject(new SessionHost());
-    const outcome = (await object.accept(
-      "s1",
-      { provider: "linear", workspaceId: "w", channelId: "i", threadId: "t" },
-      "hello",
-      "evt-1",
-      10,
-    )) as { run?: unknown };
-    expect(outcome.run).toBeUndefined();
-  });
-
-  test("a refused delivery never asks the runner", async () => {
-    let runs = 0;
-    const closed = new SessionObject(new SessionHost(), undefined, {
-      run: async () => {
-        runs += 1;
-        return { kind: "answered", text: "x" };
-      },
-    });
-    const thread = { provider: "linear" as const, workspaceId: "w", channelId: "i", threadId: "t" };
-    await closed.accept("s1", thread, "hello", "evt-1", 10);
-    await closed.close("s1", 11);
-    const outcome = (await closed.accept("s1", thread, "again", "evt-2", 12)) as {
-      kind?: string;
     };
-    expect(outcome.kind).toBe("refused");
-    expect(runs).toBe(1);
+  }
+
+  test("an answered run sends the agent's words to the thread", async () => {
+    const { sent, replies } = sink();
+    const object = new SessionObject(
+      new SessionHost(),
+      undefined,
+      { run: async () => ({ kind: "answered", text: "the answer" }) },
+      () => undefined,
+      replies,
+    );
+    await object.accept("s1", thread, "hello", "evt-1", 10);
+    await until(() => sent.length > 0);
+    expect(sent).toEqual([{ kind: "answered", text: "the answer", threadId: "t" }]);
+  });
+
+  test("a failed run sends its reason, never silence", async () => {
+    const { sent, replies } = sink();
+    const object = new SessionObject(
+      new SessionHost(),
+      undefined,
+      { run: async () => ({ kind: "unanswered", reason: "no key" }) },
+      () => undefined,
+      replies,
+    );
+    await object.accept("s1", thread, "hello", "evt-1", 10);
+    await until(() => sent.length > 0);
+    expect(sent).toEqual([{ kind: "failed", error: "no key", threadId: "t" }]);
+  });
+
+  test("a run that never settles sends no reply, so a deployment without a runner stays quiet", async () => {
+    const { sent, replies } = sink();
+    const object = new SessionObject(
+      new SessionHost(),
+      undefined,
+      undefined,
+      () => undefined,
+      replies,
+    );
+    await object.accept("s1", thread, "hello", "evt-1", 10);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(sent).toEqual([]);
+  });
+
+  test("the reply names the session's thread, not the issue", async () => {
+    const { sent, replies } = sink();
+    const object = new SessionObject(
+      new SessionHost(),
+      undefined,
+      { run: async () => ({ kind: "answered", text: "x" }) },
+      () => undefined,
+      replies,
+    );
+    await object.accept(
+      "s1",
+      { provider: "linear", workspaceId: "w", channelId: "issue-1", threadId: "sess-1" },
+      "hello",
+      "evt-1",
+      10,
+    );
+    await until(() => sent.length > 0);
+    expect(sent[0]?.threadId).toBe("sess-1");
   });
 });
 
@@ -536,74 +371,83 @@ class SessionHost implements StorageHost {
   }
 }
 
-describe("a refused Linear delivery sends no reply even with a live port", () => {
-  test("the port is never asked, and the refusal reaches the caller", async () => {
-    const sessions = new FakeSessions();
-    sessions.refuse = true;
-    const asked: string[] = [];
-    const outcome = (await accept(
-      envWith(sessions, ["session-1"]),
-      { ...message, provider: "linear", stage: "start" },
-      1,
+/**
+ * Wait until a detached run has taken effect. `accept` returns before the run,
+ * because Linear needs an answer inside five seconds.
+ */
+async function until(done: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 200 && !done(); attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+describe("a stdio turn whose gateway never arrives", () => {
+  const thread = { provider: "linear" as const, workspaceId: "w", channelId: "i", threadId: "t" };
+
+  /** A session object routed to the VM, with a clock the test controls. */
+  function vmObject(replies: () => void = () => undefined) {
+    const host = new SessionHost();
+    const handed: Promise<unknown>[] = [];
+    const object = new SessionObject(
+      host,
       {
-        acknowledge: async () => ({ kind: "sent" as const, activityId: null }),
-        answer: async (_sessionId: string, text: string) => {
-          asked.push(text);
-          return { kind: "sent" as const, activityId: null };
+        policy: {
+          defaultAgent: "claude-code",
+          runtimePreference: ["local-vm"],
+          available: ["local-vm"],
         },
       },
-    )) as { kind?: string; reply?: unknown };
-    expect(asked).toEqual([]);
-    expect(outcome.kind).toBe("refused");
-    expect(outcome.reply).toBeUndefined();
-  });
-});
+      { run: async () => ({ kind: "answered", text: "never" }) },
+      (work) => handed.push(work),
+      async () => replies(),
+    );
+    return { host, object, handed };
+  }
 
-describe("the outcome a Linear caller sees", () => {
-  const port = (sent: string[]) => ({
-    acknowledge: async () => ({ kind: "sent" as const, activityId: null }),
-    answer: async (_sessionId: string, text: string) => {
-      sent.push(text);
-      return { kind: "sent" as const, activityId: null };
-    },
+  test("the delivery leaves the turn queued, because the gateway hosts it", async () => {
+    const { object, handed } = vmObject();
+    await object.accept("s1", thread, "hello", "evt-1", 0);
+    expect(handed).toEqual([]);
+    expect((await object.turns("s1"))[0]?.status).toBe("queued");
   });
 
-  test("a run that produced an answer yields a reply field", async () => {
-    const sessions = new FakeSessions();
-    sessions.answerWith = { kind: "answered", text: "hi" };
-    const outcome = (await accept(
-      envWith(sessions, ["s"]),
-      { ...message, provider: "linear", stage: "start" },
-      1,
-      port([]),
-    )) as Record<string, unknown>;
-    expect("reply" in outcome).toBe(true);
-    expect(outcome.reply).toEqual({ kind: "sent", activityId: null });
+  test("the turn fails at its deadline and the thread is told why", async () => {
+    let answered = 0;
+    const { object } = vmObject(() => {
+      answered += 1;
+    });
+    await object.accept("s1", thread, "hello", "evt-1", 0);
+    const expired = await object.expire("s1", GATEWAY_CLAIM_DEADLINE_MS);
+    expect(expired).toHaveLength(1);
+    const turn = (await object.turns("s1"))[0];
+    expect(turn?.status).toBe("failed");
+    expect(turn?.error).toContain("no gateway claimed this turn");
+    expect(answered).toBe(1);
   });
 
-  test("a run with no answer yields no reply field at all", async () => {
-    const sessions = new FakeSessions();
-    sessions.answerWith = { kind: "not-queued" } as never;
-    const outcome = (await accept(
-      envWith(sessions, ["s"]),
-      { ...message, provider: "linear", stage: "start" },
-      1,
-      port([]),
-    )) as Record<string, unknown>;
-    expect("reply" in outcome).toBe(false);
+  test("the turn is left alone before its deadline", async () => {
+    const { object } = vmObject();
+    await object.accept("s1", thread, "hello", "evt-1", 0);
+    expect(await object.expire("s1", GATEWAY_CLAIM_DEADLINE_MS - 1)).toEqual([]);
+    expect((await object.turns("s1"))[0]?.status).toBe("queued");
   });
 
-  test("a refusal yields no reply field and no answer", async () => {
-    const sessions = new FakeSessions();
-    sessions.refuse = true;
-    const sent: string[] = [];
-    const outcome = (await accept(
-      envWith(sessions, ["s"]),
-      { ...message, provider: "linear", stage: "start" },
-      1,
-      port(sent),
-    )) as Record<string, unknown>;
-    expect("reply" in outcome).toBe(false);
-    expect(sent).toEqual([]);
+  test("a claimed turn is not failed by the sweep, so a slow agent survives", async () => {
+    const { object } = vmObject();
+    await object.accept("s1", thread, "hello", "evt-1", 0);
+    await object.transition("s1", "t1", { status: "dispatched" }, 1);
+    expect(await object.expire("s1", GATEWAY_CLAIM_DEADLINE_MS * 2)).toEqual([]);
+    expect((await object.turns("s1"))[0]?.status).toBe("dispatched");
+  });
+
+  test("a second sweep finds nothing, so the failure is reported once", async () => {
+    let answered = 0;
+    const { object } = vmObject(() => {
+      answered += 1;
+    });
+    await object.accept("s1", thread, "hello", "evt-1", 0);
+    await object.expire("s1", GATEWAY_CLAIM_DEADLINE_MS);
+    expect(await object.expire("s1", GATEWAY_CLAIM_DEADLINE_MS * 2)).toEqual([]);
+    expect(answered).toBe(1);
   });
 });
