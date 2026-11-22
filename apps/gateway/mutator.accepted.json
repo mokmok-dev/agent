@@ -15,6 +15,10 @@
     "reason": "Both branches of parseEdgeFrame return undefined, so which one runs cannot change what a caller sees; the tests pin both inputs to undefined.",
     "where": "src/edge.ts:78:7 message.kind === \"rejected\" -> false"
   },
+  "1h9bizkr5hl": {
+    "reason": "equivalent: an emptied catch falls off the end of the function, which returns undefined, exactly as the explicit return does.",
+    "where": "src/edge.ts:137:11 { return undefined; } -> {}"
+  },
   "24g2ufrdgqv": {
     "reason": "equivalent: only an agent_message_chunk carries a text content block, so dropping the type check cannot append text from another update kind.",
     "where": "src/bridge.ts:116:9 update.sessionUpdate === \"agent_message_chunk\" -> true"

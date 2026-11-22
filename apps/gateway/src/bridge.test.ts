@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { AgentRecorder, until } from "./recorder.ts";
 import { AcpBridge, errorMessage, type GatewayEvent } from "./bridge.ts";
 import { ProtocolError } from "@agent/protocol";
-import { encodeEvent, EventLog, parseEdgeFrame } from "./edge.ts";
+import { encodeEvent, EventLog, helloFrame, identityOf, parseEdgeFrame } from "./edge.ts";
 import { decodeMessage } from "@agent/protocol";
 
 const bridge = (options: { mcpServers?: "array" | "record" } = {}) => {
@@ -889,5 +889,70 @@ describe("the model list a selection reads", () => {
       false,
     );
     expect(unreported.agent.outbound()).toHaveLength(0);
+  });
+});
+
+describe("the hello a gateway sends on open", () => {
+  test("a gateway with no configured session asks the control plane to name one", () => {
+    // This is how a gateway serves a delegation that had not happened when it
+    // started. Sending no hello at all leaves the socket open and silent, which
+    // is what a live delegation first hit.
+    expect(helloFrame(undefined)).toBe('{"type":"hello","sessionId":"auto"}');
+  });
+
+  test("a gateway with a configured session names it", () => {
+    expect(helloFrame("linear:org:issue:sess")).toBe(
+      '{"type":"hello","sessionId":"linear:org:issue:sess"}',
+    );
+  });
+
+  test("the control plane's answer names the session the gateway reached", () => {
+    expect(
+      identityOf(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/command",
+          params: { type: "hello", sessionId: "linear:org:issue:sess" },
+        }),
+      ),
+    ).toBe("linear:org:issue:sess");
+  });
+
+  test("text that is not JSON names nothing", () => {
+    // The control plane always writes JSON, so a body that is not JSON is not
+    // an answer; reading it must not throw.
+    expect(identityOf("not json")).toBeUndefined();
+    expect(identityOf("")).toBeUndefined();
+  });
+
+  test("a JSON value with no params object names nothing", () => {
+    // Each shape below is a different way the body can fail to be a frame: a
+    // bare number, a null params, and params that is not an object at all.
+    expect(identityOf(JSON.stringify({ jsonrpc: "2.0", method: "x" }))).toBeUndefined();
+    expect(identityOf(JSON.stringify({ params: null }))).toBeUndefined();
+    expect(identityOf(JSON.stringify({ params: "hello" }))).toBeUndefined();
+    expect(identityOf(JSON.stringify({ params: 7 }))).toBeUndefined();
+    expect(identityOf("null")).toBeUndefined();
+    expect(identityOf("42")).toBeUndefined();
+  });
+
+  test("params of another type name nothing, whatever they carry", () => {
+    expect(
+      identityOf(
+        JSON.stringify({ params: { type: "prompt", sessionId: "linear:org:issue:sess" } }),
+      ),
+    ).toBeUndefined();
+    expect(identityOf(JSON.stringify({ params: { sessionId: "s" } }))).toBeUndefined();
+  });
+
+  test("a hello whose id is absent, empty, or not a string names nothing", () => {
+    expect(identityOf(JSON.stringify({ params: { type: "hello" } }))).toBeUndefined();
+    expect(
+      identityOf(JSON.stringify({ params: { type: "hello", sessionId: "" } })),
+    ).toBeUndefined();
+    expect(identityOf(JSON.stringify({ params: { type: "hello", sessionId: 7 } }))).toBeUndefined();
+    expect(
+      identityOf(JSON.stringify({ params: { type: "hello", sessionId: null } })),
+    ).toBeUndefined();
   });
 });

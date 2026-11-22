@@ -95,4 +95,48 @@ export function encodeEvent(event: GatewayEvent): string {
   return encodeNotification("gateway/event", event);
 }
 
+/**
+ * The `hello` a gateway sends as soon as its socket opens.
+ *
+ * Every gateway announces itself, whatever it was configured with. A gateway
+ * started with `AGENT_SESSION_ID` names that session; one started with
+ * nothing — which is how a gateway serves a delegation that had not happened
+ * yet — asks the control plane to name the session it reached. The control
+ * plane sends a turn only in answer to a hello, so skipping it leaves the
+ * socket open and silent.
+ */
+export function helloFrame(configured: string | undefined): string {
+  return JSON.stringify({ type: "hello", sessionId: configured ?? "auto" });
+}
+
+/**
+ * The session id a control plane's answer to a hello names, if it is one.
+ *
+ * The answer arrives from the deployment, so every field is checked: a frame
+ * that is not JSON, names another type, or carries a non-string or empty id
+ * names no session. Treating one of those as a name would make the gateway
+ * serve a session that does not exist.
+ */
+export function identityOf(text: string): string | undefined {
+  const parsed = parseJson(text);
+  // `null` and a bare scalar are valid JSON, so the body must be an object
+  // before its fields are read.
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const params = (parsed as { params?: unknown }).params;
+  if (typeof params !== "object" || params === null) return undefined;
+  const frame = params as { type?: unknown; sessionId?: unknown };
+  if (frame.type !== "hello") return undefined;
+  const sessionId = frame.sessionId;
+  // An empty id names no session, so it is the same as no answer at all.
+  return typeof sessionId === "string" && sessionId !== "" ? sessionId : undefined;
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
 export { decodeMessage };

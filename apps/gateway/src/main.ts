@@ -1,5 +1,5 @@
 import { AcpBridge } from "./bridge.ts";
-import { encodeEvent, EventLog, parseEdgeFrame } from "./edge.ts";
+import { encodeEvent, EventLog, helloFrame, identityOf, parseEdgeFrame } from "./edge.ts";
 import { AgentSupervisor, localVmTarget } from "@agent/runtime";
 
 const edgeUrl = process.env.EDGE_URL ?? "ws://localhost:8787/gateway";
@@ -58,17 +58,9 @@ let serving: string | undefined = sessionId;
  * reply is sent as a gateway command, the same envelope as every other frame.
  */
 function adoptIdentity(text: string): boolean {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return false;
-  }
-  const record = parsed as { params?: { type?: string; sessionId?: unknown } };
-  if (record?.params?.type !== "hello" || typeof record.params.sessionId !== "string") {
-    return false;
-  }
-  serving = record.params.sessionId;
+  const named = identityOf(text);
+  if (named === undefined) return false;
+  serving = named;
   console.error(`gateway: serving session ${serving}`);
   // The gateway has just learned its id, so it asks again: the queued turn is
   // dispatched against the session it serves rather than the word "auto".
@@ -110,13 +102,11 @@ const connect = (): void => {
   const opened = new WebSocket(edgeUrl);
   opened.addEventListener("open", () => {
     socket = opened;
-    // A gateway that names a session announces it, so the control plane sends
-    // that session's queued turn rather than waiting to be asked. The control
-    // plane answers the hello with the session it resolved, which is how a
-    // gateway that asked for `auto` learns the id it is serving.
-    if (sessionId !== undefined) {
-      opened.send(JSON.stringify({ type: "hello", sessionId }));
-    }
+    // Every connection announces itself, because a gateway that asked for
+    // `auto` has no id yet and the control plane only sends a turn in answer to
+    // a hello. Sending the literal `auto` is what asks the object to name the
+    // session it resolved.
+    opened.send(helloFrame(serving));
     flush();
   });
   opened.addEventListener("message", (message) => {
