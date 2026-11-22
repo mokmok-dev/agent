@@ -3,13 +3,13 @@
     "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
     "where": "src/disk-host.ts:13:31 \"utf8\" -> \"\""
   },
-  "1jpunyqqwvu": {
-    "reason": "The non-event branch only carries a challenge or an ignored delivery, and both answer 200, so dropping the status from the response is unobservable.",
-    "where": "src/worker.ts:67:34 { status } -> {}"
-  },
   "1omqkceg0f": {
     "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
     "where": "src/disk-host.ts:19:11 { return undefined; } -> {}"
+  },
+  "2g681ouj2qz": {
+    "reason": "The non-event branch only carries a challenge or an ignored delivery, and both answer 200, so dropping the status from the response is unobservable.",
+    "where": "src/worker.ts:78:34 { status } -> {}"
   },
   "j4hc1r8ola": {
     "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",

@@ -1,5 +1,12 @@
-import type { AdapterResult, InboundEvent, RawRequest as Raw } from "@agent/adapters";
-import { adaptDiscord, adaptLinear, adaptSlack, AdapterError } from "@agent/adapters";
+import type { AdapterResult, RawRequest as Raw } from "@agent/adapters";
+import {
+  adaptDiscord,
+  adaptLinear,
+  adaptSlack,
+  AdapterError,
+  authorizeUrl,
+  type LinearOAuthConfig,
+} from "@agent/adapters";
 
 export type ProviderConfig = {
   slack: { signingSecret: string; botUserId: string };
@@ -7,10 +14,41 @@ export type ProviderConfig = {
   linear: { webhookSecret: string };
 };
 
+/**
+ * The Linear OAuth application, as the platform exposes it: two secrets and a
+ * var, each named for the binding it comes from.
+ */
+export type LinearOAuthEnv = {
+  LINEAR_CLIENT_ID: string;
+  LINEAR_CLIENT_SECRET: string;
+  /** The exact redirect URI registered on the Linear application. */
+  LINEAR_REDIRECT_URI: string;
+};
+
+/** The same application, in the shape the adapters take. */
+export function oauthConfigOf(env: LinearOAuthEnv): LinearOAuthConfig {
+  return {
+    clientId: env.LINEAR_CLIENT_ID,
+    clientSecret: env.LINEAR_CLIENT_SECRET,
+    redirectUri: env.LINEAR_REDIRECT_URI,
+  };
+}
+
+/**
+ * Whether the OAuth application is configured. A missing secret makes the
+ * consent screen useless, so the start route reports that instead of sending a
+ * person to Linear with an empty client id.
+ */
+export function oauthConfigured(env: LinearOAuthEnv): boolean {
+  return env.LINEAR_CLIENT_ID !== "" && env.LINEAR_CLIENT_SECRET !== "";
+}
+
 export type Route =
   | { kind: "slack" }
   | { kind: "discord" }
   | { kind: "linear" }
+  | { kind: "linear-oauth-start" }
+  | { kind: "linear-oauth-callback" }
   | { kind: "health" }
   | { kind: "not-found" };
 
@@ -18,6 +56,8 @@ const ROUTES = new Map<string, Route>([
   ["/webhooks/slack", { kind: "slack" }],
   ["/webhooks/discord", { kind: "discord" }],
   ["/webhooks/linear", { kind: "linear" }],
+  ["/oauth/linear", { kind: "linear-oauth-start" }],
+  ["/oauth/linear/callback", { kind: "linear-oauth-callback" }],
   ["/health", { kind: "health" }],
 ]);
 
@@ -42,6 +82,14 @@ export async function handleWebhook(
   if (provider === "discord") return adaptDiscord(request, config.discord);
   if (provider === "linear") return adaptLinear(request, config.linear);
   throw new AdapterError(404, "no adapter for this route");
+}
+
+/**
+ * Send a person to Linear's consent screen. The `state` is written to the
+ * object before this returns, so the callback can prove it started the flow.
+ */
+export function oauthStart(config: LinearOAuthConfig, state: string): Response {
+  return Response.redirect(authorizeUrl(config, state), 302);
 }
 
 /**
@@ -72,5 +120,17 @@ export function errorResponse(error: unknown): Response {
   return Response.json({ error: { message } }, { status: 500 });
 }
 
+/** A small HTML page, so a person finishing a login sees a result. */
+export function page(title: string, detail: string): Response {
+  const escaped = detail.replace(/[<>&]/g, (character) =>
+    character === "<" ? "&lt;" : character === ">" ? "&gt;" : "&amp;",
+  );
+  return new Response(
+    `<!doctype html><meta charset="utf-8"><title>${title}</title>` +
+      `<body style="font:16px system-ui;max-width:40rem;margin:4rem auto"><h1>${title}</h1>` +
+      `<p>${escaped}</p></body>`,
+    { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
+  );
+}
+
 export { isPong };
-export type { InboundEvent };

@@ -1,6 +1,7 @@
 import { fetch as handle, type Env, type Namespace } from "./worker.ts";
 import { SessionObject } from "./session-do.ts";
 import { ThreadIndexObject } from "./thread-index-do.ts";
+import { LinearOAuthObject } from "./linear-oauth-do.ts";
 import { DiskHost } from "./disk-host.ts";
 import type { StorageHost } from "./storage.ts";
 import { join } from "node:path";
@@ -17,8 +18,21 @@ export const env: Env = {
   },
   discord: { publicKey: process.env.DISCORD_PUBLIC_KEY ?? "" },
   linear: { webhookSecret: process.env.LINEAR_WEBHOOK_SECRET ?? "dev-linear-secret" },
+  LINEAR_CLIENT_ID: process.env.LINEAR_CLIENT_ID ?? "",
+  LINEAR_CLIENT_SECRET: process.env.LINEAR_CLIENT_SECRET ?? "",
+  LINEAR_REDIRECT_URI:
+    process.env.LINEAR_REDIRECT_URI ?? "http://localhost:8787/oauth/linear/callback",
   SESSIONS: namespace((host) => new SessionObject(host), join(root, "sessions")),
   THREAD_INDEX: namespace((host) => new ThreadIndexObject(host), join(root, "index")),
+  LINEAR_OAUTH: namespace(
+    (host) =>
+      new LinearOAuthObject(host, {
+        clientId: process.env.LINEAR_CLIENT_ID ?? "",
+        clientSecret: process.env.LINEAR_CLIENT_SECRET ?? "",
+        redirectUri: process.env.LINEAR_REDIRECT_URI ?? "",
+      }),
+    join(root, "linear"),
+  ),
 };
 
 export function serve(port: number): void {

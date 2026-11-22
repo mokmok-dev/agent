@@ -7,12 +7,29 @@ compatibility_flags = ["nodejs_compat"]
 bindings = [
   { name = "SESSIONS", class_name = "SessionDurableObject" },
   { name = "THREAD_INDEX", class_name = "ThreadIndexDurableObject" },
+  { name = "LINEAR_OAUTH", class_name = "LinearOAuthDurableObject" },
 ]
 
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SessionDurableObject", "ThreadIndexDurableObject"]
 
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["LinearOAuthDurableObject"]
+
+# The sandbox target runs an agent in a Container attached to the session
+# object, which needs the Workers Paid plan.
 [[containers]]
 class_name = "SessionDurableObject"
 scheduling_policy = "durable_object"
+
+# Provider secrets, set with `wrangler secret put`:
+#   SLACK_SIGNING_SECRET, SLACK_BOT_USER_ID, DISCORD_PUBLIC_KEY,
+#   LINEAR_WEBHOOK_SECRET, LINEAR_CLIENT_ID, LINEAR_CLIENT_SECRET
+#
+# LINEAR_CLIENT_ID, LINEAR_CLIENT_SECRET, and LINEAR_REDIRECT_URI are plain
+# vars because they are not secret, but the secret and the redirect must match
+# the Linear OAuth application exactly.
+[vars]
+LINEAR_REDIRECT_URI = "https://agent-control-plane.mokmok.workers.dev/oauth/linear/callback"

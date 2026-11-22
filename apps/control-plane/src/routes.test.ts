@@ -4,6 +4,7 @@ import worker, { accept, deliveryBody, fetch, type Env } from "./worker.ts";
 import { AdapterError, type AdapterResult } from "@agent/adapters";
 import type { ThreadRef, Turn } from "@agent/store";
 import { signSha256 } from "@agent/adapters";
+import { envWith, OAUTH } from "./test-env.ts";
 
 const config = {
   slack: { signingSecret: "shhh", botUserId: "UBOT" },
@@ -19,6 +20,11 @@ describe("routeOf", () => {
     expect(routeOf("/health")).toEqual({ kind: "health" });
     expect(routeOf("/nope")).toEqual({ kind: "not-found" });
     expect(routeOf("/webhooks/slack/extra")).toEqual({ kind: "not-found" });
+  });
+
+  test("maps the two Linear OAuth paths", () => {
+    expect(routeOf("/oauth/linear")).toEqual({ kind: "linear-oauth-start" });
+    expect(routeOf("/oauth/linear/callback")).toEqual({ kind: "linear-oauth-callback" });
   });
 });
 
@@ -143,6 +149,8 @@ describe("fetch", () => {
     const calls: string[] = [];
     const value: Env = {
       ...config,
+      ...OAUTH,
+      LINEAR_OAUTH: { getByName: () => ({}) },
       THREAD_INDEX: {
         getByName: () => ({
           lookup: async (thread: ThreadRef) => {
@@ -233,6 +241,81 @@ describe("fetch", () => {
 
   test("the Worker default export serves fetch", () => {
     expect(typeof worker.fetch).toBe("function");
+  });
+
+  test("a login request redirects through the OAuth object", async () => {
+    const starts: number[] = [];
+    const names: string[] = [];
+    const value = envWith({
+      LINEAR_OAUTH: {
+        getByName: (name: string) => {
+          names.push(name);
+          return {
+            start: async () => {
+              starts.push(1);
+              return "state-1";
+            },
+            complete: async () => {
+              throw new Error("not called");
+            },
+          };
+        },
+      },
+    });
+    const response = await fetch(new Request("https://x/oauth/linear"), value);
+    expect(response.status).toBe(302);
+    expect(starts).toHaveLength(1);
+    expect(names).toEqual(["linear"]);
+    const location = new URL(response.headers.get("location") ?? "");
+    expect(location.searchParams.get("client_id")).toBe(OAUTH.LINEAR_CLIENT_ID);
+  });
+
+  test("a callback reads the query and finishes the login through the OAuth object", async () => {
+    const seen: URLSearchParams[] = [];
+    const value = envWith({
+      LINEAR_OAUTH: {
+        getByName: () => ({
+          start: async () => "",
+          complete: async (params: URLSearchParams) => {
+            seen.push(params);
+            return {
+              accessToken: "at",
+              refreshToken: "rt",
+              expiresIn: 86_400,
+              issuedAt: 0,
+              scope: "read",
+              organizationId: "org-1",
+            };
+          },
+        }),
+      },
+    });
+    const response = await fetch(
+      new Request("https://x/oauth/linear/callback?code=c1&state=s1"),
+      value,
+      50,
+    );
+    expect(response.status).toBe(200);
+    expect(seen[0]?.get("code")).toBe("c1");
+    expect(seen[0]?.get("state")).toBe("s1");
+  });
+
+  test("a refused callback answers its refusal and never touches a session", async () => {
+    const value = envWith({
+      LINEAR_OAUTH: {
+        getByName: () => ({
+          start: async () => "",
+          complete: async () => {
+            throw Object.assign(new Error("linear callback state does not match"), { status: 400 });
+          },
+        }),
+      },
+    });
+    const response = await fetch(new Request("https://x/oauth/linear/callback?code=c1"), value);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: { message: "linear callback state does not match" },
+    });
   });
 
   test("an ignored delivery answers 200, which differs from an event's 202", async () => {
@@ -329,6 +412,8 @@ describe("fetch", () => {
   test("a cancel with no active turn is refused", async () => {
     const value: Env = {
       ...config,
+      ...OAUTH,
+      LINEAR_OAUTH: { getByName: () => ({}) },
       THREAD_INDEX: { getByName: () => ({ lookup: async () => "session-1" }) },
       SESSIONS: {
         getByName: () => ({
@@ -391,6 +476,8 @@ describe("accept", () => {
     const seen: unknown[] = [];
     const env: Env = {
       ...config,
+      ...OAUTH,
+      LINEAR_OAUTH: { getByName: () => ({}) },
       THREAD_INDEX: { getByName: () => ({ lookup: async () => "session-1" }) },
       SESSIONS: {
         getByName: () => ({
@@ -411,6 +498,8 @@ describe("accept", () => {
     let captured: ThreadRef | undefined;
     const env: Env = {
       ...config,
+      ...OAUTH,
+      LINEAR_OAUTH: { getByName: () => ({}) },
       THREAD_INDEX: { getByName: () => ({ lookup: async () => "session-1" }) },
       SESSIONS: {
         getByName: () => ({

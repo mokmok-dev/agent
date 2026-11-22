@@ -4,19 +4,23 @@ import {
   errorResponse,
   handleWebhook,
   rawRequestOf,
+  oauthConfigOf,
   responseFor,
   routeOf,
+  type LinearOAuthEnv,
   type ProviderConfig,
 } from "./routes.ts";
+import { finishLogin, startLogin, type LinearOAuthPort } from "./linear-oauth-port.ts";
 
 export interface Namespace {
   getByName(name: string): unknown;
 }
 
 /** The bindings the Worker needs. Names match `wrangler.toml`. */
-export interface Env extends ProviderConfig {
+export interface Env extends ProviderConfig, LinearOAuthEnv {
   SESSIONS: Namespace;
   THREAD_INDEX: Namespace;
+  LINEAR_OAUTH: Namespace;
 }
 
 interface SessionRpc {
@@ -52,9 +56,16 @@ export function deliveryBody(
 }
 
 export async function fetch(request: Request, env: Env, now = Date.now()): Promise<Response> {
-  const route = routeOf(new URL(request.url).pathname);
+  const url = new URL(request.url);
+  const route = routeOf(url.pathname);
   if (route.kind === "not-found") return Response.json({ error: "not found" }, { status: 404 });
   if (route.kind === "health") return Response.json({ ok: true });
+  if (route.kind === "linear-oauth-start" || route.kind === "linear-oauth-callback") {
+    const port = env.LINEAR_OAUTH.getByName("linear") as LinearOAuthPort;
+    return route.kind === "linear-oauth-start"
+      ? startLogin(port, env, oauthConfigOf(env))
+      : finishLogin(port, url.searchParams, now);
+  }
   try {
     const result = await handleWebhook(
       route.kind,

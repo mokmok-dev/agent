@@ -1,8 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 import type { ThreadRef } from "@agent/store";
+import { LinearOAuthObject, type LinearCredential } from "./linear-oauth-do.ts";
 import { objectStorage } from "./platform-storage.ts";
 import { SessionObject } from "./session-do.ts";
 import { ThreadIndexObject } from "./thread-index-do.ts";
+import { oauthConfigOf } from "./routes.ts";
 import { fetch as handle, type Env } from "./worker.ts";
 
 /**
@@ -74,3 +76,35 @@ export default {
     return handle(request, env);
   },
 };
+/**
+ * The Linear authorization. One object named `linear` holds the pairing for the
+ * deployment, so completing a second login replaces the first.
+ */
+export class LinearOAuthDurableObject extends DurableObject<Env> {
+  readonly #object: LinearOAuthObject;
+
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env);
+    this.#object = new LinearOAuthObject(objectStorage(state.storage), oauthConfigOf(env));
+  }
+
+  start(): Promise<string> {
+    return this.#object.start();
+  }
+
+  complete(params: URLSearchParams, now: number): Promise<LinearCredential> {
+    return this.#object.complete(params, now);
+  }
+
+  accessToken(now: number): Promise<string | undefined> {
+    return this.#object.accessToken(now);
+  }
+
+  refresh(now: number): Promise<boolean> {
+    return this.#object.refresh(now);
+  }
+
+  disconnect(): Promise<void> {
+    return this.#object.disconnect();
+  }
+}

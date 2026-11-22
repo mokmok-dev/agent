@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { accept } from "./worker.ts";
 import type { Env } from "./worker.ts";
 import type { ThreadRef, Turn } from "@agent/store";
+import { OAUTH } from "./test-env.ts";
 
 class FakeSessions {
   readonly calls: Array<{ method: string; args: unknown[] }> = [];
@@ -29,6 +30,8 @@ const envWith = (sessions: FakeSessions, sessionIds: string[] = ["session-1"]): 
     slack: { signingSecret: "s", botUserId: "B" },
     discord: { publicKey: "p" },
     linear: { webhookSecret: "l" },
+    ...OAUTH,
+    LINEAR_OAUTH: { getByName: () => ({}) },
     THREAD_INDEX: {
       getByName: () => ({
         lookup: (thread: ThreadRef) => {
