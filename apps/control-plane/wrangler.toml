@@ -63,5 +63,12 @@ LINEAR_REDIRECT_URI = "https://agent-control-plane.mokmok.workers.dev/oauth/line
 # The models a turn may run. PI_PROVIDERS is a comma-separated list of pi-ai
 # providers; PI_DEFAULT_MODEL is `provider:modelId`. A provider's key is a
 # secret named after it, for example OPENAI_API_KEY or ANTHROPIC_API_KEY.
-PI_PROVIDERS = "cloudflare-workers-ai,openai,anthropic"
-PI_DEFAULT_MODEL = "cloudflare-workers-ai:@cf/deepseek-ai/deepseek-v4.1-flash"
+#
+# `ollama-cloud` is this repository's own provider: it reaches Ollama's
+# OpenAI-compatible endpoint at https://ollama.com/v1 with OLLAMA_API_KEY.
+# Enable it with:
+#   wrangler secret put OLLAMA_API_KEY
+#   PI_PROVIDERS = "cloudflare-workers-ai,ollama-cloud"
+#   PI_DEFAULT_MODEL = "ollama-cloud:gemma4:31b"
+PI_PROVIDERS = "ollama-cloud"
+PI_DEFAULT_MODEL = "ollama-cloud:deepseek-v4.1-flash:1017"

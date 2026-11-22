@@ -312,3 +312,55 @@ describe("the store is passed only when there is one", () => {
     expect(await without.models.checkAuth("anthropic")).toBeUndefined();
   });
 });
+
+describe("a provider this repository supplies itself", () => {
+  const ollama = {
+    providers: ["ollama-cloud"],
+    defaultModel: { provider: "ollama-cloud", modelId: "gemma4:31b" },
+  };
+
+  test("is configured when the deployment enables it, and reaches Ollama's endpoint", () => {
+    const setup = configureProviders(config(ollama), envOf({}));
+    if (setup.kind !== "configured") throw new Error("expected a configured collection");
+    const provider = setup.models.getProvider("ollama-cloud");
+    expect(provider?.id).toBe("ollama-cloud");
+    expect(provider?.baseUrl).toBe("https://ollama.com/v1");
+  });
+
+  test("registers its models, so a turn can name one", async () => {
+    const setup = configureProviders(config(ollama), envOf({}));
+    if (setup.kind !== "configured") throw new Error("expected a configured collection");
+    const listed = await setup.models.getProvider("ollama-cloud")?.getModels();
+    expect(listed?.map((model) => model.id)).toContain("gemma4:31b");
+  });
+
+  test("is not registered when the deployment does not enable it", () => {
+    const setup = configureProviders(
+      config({
+        providers: ["openai"],
+        defaultModel: { provider: "openai", modelId: "gpt-5-codex" },
+      }),
+      envOf({}),
+    );
+    if (setup.kind !== "configured") throw new Error("expected a configured collection");
+    // Pi has no Ollama provider of its own, so an unlisted one is absent
+    // rather than reachable through some default.
+    expect(setup.models.getProvider("ollama-cloud")).toBeUndefined();
+  });
+
+  test("its key is OLLAMA_API_KEY, and a deployment without it reports unauthenticated", async () => {
+    const setup = configureProviders(config(ollama), envOf({}));
+    if (setup.kind !== "configured") throw new Error("expected a configured collection");
+    expect(await setup.models.checkAuth("ollama-cloud")).toBeUndefined();
+    expect(PROVIDER_KEYS["ollama-cloud"]).toEqual(["OLLAMA_API_KEY"]);
+  });
+
+  test("a key in the environment authenticates it", async () => {
+    const setup = configureProviders(config(ollama), envOf({ OLLAMA_API_KEY: "k" }));
+    if (setup.kind !== "configured") throw new Error("expected a configured collection");
+    expect(await setup.models.checkAuth("ollama-cloud")).toEqual({
+      source: "OLLAMA_API_KEY",
+      type: "api_key",
+    });
+  });
+});

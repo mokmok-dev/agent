@@ -1,6 +1,7 @@
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import type { CreateModelsOptions, CredentialStore, MutableModels } from "@earendil-works/pi-ai";
 import type { ModelRef } from "@agent/capability";
+import { OLLAMA_CLOUD_ID, ollamaCloudProvider } from "./ollama-cloud.ts";
 
 /**
  * Which providers a deployment enables, and the environment keys they read.
@@ -44,6 +45,20 @@ export const PROVIDER_KEYS: Readonly<Record<string, readonly string[]>> = {
   minimax: ["MINIMAX_API_KEY"],
   moonshotai: ["MOONSHOT_API_KEY"],
   zai: ["ZAI_API_KEY"],
+  // Ollama Cloud is not a pi built-in, so this module supplies it; the key name
+  // is the one its own docs use.
+  [OLLAMA_CLOUD_ID]: ["OLLAMA_API_KEY"],
+};
+
+/**
+ * The providers this repository adds itself. Pi's collection knows the built-ins
+ * and nothing else, so a provider that is not built in is registered here after
+ * the collection is built.
+ */
+const CUSTOM_PROVIDERS: Readonly<
+  Record<string, () => Parameters<MutableModels["setProvider"]>[0]>
+> = {
+  [OLLAMA_CLOUD_ID]: ollamaCloudProvider,
 };
 
 export type ProviderRefused =
@@ -89,7 +104,14 @@ export function configureProviders(
   }
   const options = authContext(env, config.providers);
   if (credentials !== undefined) options.credentials = credentials;
-  return { kind: "configured", models: builtinModels(options), defaultModel: config.defaultModel };
+  const models = builtinModels(options);
+  // Pi registers its built-ins; the providers this repository adds are
+  // registered after it, and only when the deployment enabled them.
+  for (const provider of config.providers) {
+    const build = CUSTOM_PROVIDERS[provider];
+    if (build !== undefined) models.setProvider(build());
+  }
+  return { kind: "configured", models, defaultModel: config.defaultModel };
 }
 
 /**
