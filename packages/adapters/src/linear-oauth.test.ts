@@ -353,7 +353,7 @@ describe("the viewer lookup", () => {
 describe("the viewer request's shape", () => {
   test("posts JSON to the GraphQL URL with the bearer token", async () => {
     const seen: { method: string; type: string; query: string }[] = [];
-    await fetchViewer("at-1", async (url, init) => {
+    await fetchViewer("at-1", async (_url, init) => {
       seen.push({
         method: init.method,
         type: init.headers["content-type"] ?? "",
