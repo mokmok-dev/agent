@@ -6,6 +6,8 @@ import { SessionObject } from "./session-do.ts";
 import { ThreadIndexObject } from "./thread-index-do.ts";
 import { oauthConfigOf } from "./routes.ts";
 import type { AccessToken, Completed } from "./linear-oauth-do.ts";
+import type { Credential, CredentialInfo } from "@earendil-works/pi-ai";
+import { ProviderCredentialObject } from "./providers-do.ts";
 import { piRunnerFor } from "./pi-runtime.ts";
 import { fetch as handle, type Env } from "./worker.ts";
 
@@ -120,5 +122,34 @@ export class LinearOAuthDurableObject extends DurableObject<Env> {
 
   disconnect(): Promise<void> {
     return this.#object.disconnect();
+  }
+}
+
+/**
+ * The provider credentials for the deployment. One object named `providers`,
+ * so a credential an operator stores applies to every session.
+ */
+export class ProviderCredentialDurableObject extends DurableObject<Env> {
+  readonly #object: ProviderCredentialObject;
+
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env);
+    this.#object = new ProviderCredentialObject(objectStorage(state.storage));
+  }
+
+  read(providerId: string): Promise<Credential | undefined> {
+    return this.#object.read(providerId);
+  }
+
+  list(): Promise<readonly CredentialInfo[]> {
+    return this.#object.list();
+  }
+
+  write(providerId: string, credential: Credential): Promise<void> {
+    return this.#object.write(providerId, credential);
+  }
+
+  delete(providerId: string): Promise<void> {
+    return this.#object.delete(providerId);
   }
 }

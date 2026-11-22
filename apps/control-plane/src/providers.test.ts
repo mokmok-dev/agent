@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { ObjectCredentialStore } from "./credential-store.ts";
+import type { StorageHost } from "./storage.ts";
 import {
   availableProviders,
   configureProviders,
@@ -181,5 +183,132 @@ describe("the pieces a caller cannot reach", () => {
     if (setup.kind !== "configured") throw new Error("expected a configured collection");
     await setup.models.checkAuth("openai");
     expect(asked).toEqual(["OPENAI_API_KEY"]);
+  });
+});
+
+describe("a credential stored on the object", () => {
+  const openai = {
+    providers: ["openai"],
+    defaultModel: { provider: "openai", modelId: "gpt-5-codex" },
+  };
+
+  test("authenticates a provider with no environment key, which is how OAuth works", async () => {
+    const store = new ObjectCredentialStore(memoryHost());
+    await store.put("openai", { type: "api_key", key: "stored-1" });
+    const setup = configureProviders(config(openai), envOf({}), store);
+    if (setup.kind !== "configured") throw new Error("expected a configured collection");
+    expect(await setup.models.checkAuth("openai")).toEqual({
+      source: "stored credential",
+      type: "api_key",
+    });
+  });
+
+  test("wins over an environment key, so a login takes effect without a redeploy", async () => {
+    const store = new ObjectCredentialStore(memoryHost());
+    await store.put("openai", { type: "api_key", key: "stored-1" });
+    const setup = configureProviders(config(openai), envOf({ OPENAI_API_KEY: "sk-env" }), store);
+    if (setup.kind !== "configured") throw new Error("expected a configured collection");
+    const resolved = await setup.models.getAuth("openai");
+    expect(resolved?.source).toBe("stored credential");
+    expect(resolved?.auth.apiKey ?? "").toBe("stored-1");
+  });
+
+  test("an oauth credential authenticates as oauth, which carries a refresh token", async () => {
+    const store = new ObjectCredentialStore(memoryHost());
+    await store.put("anthropic", {
+      type: "oauth",
+      access: "at-1",
+      refresh: "rt-1",
+      expires: Date.now() + 3_600_000,
+    });
+    const setup = configureProviders(
+      config({
+        providers: ["anthropic"],
+        defaultModel: { provider: "anthropic", modelId: "claude-opus-4-7" },
+      }),
+      envOf({}),
+      store,
+    );
+    if (setup.kind !== "configured") throw new Error("expected a configured collection");
+    expect(await setup.models.checkAuth("anthropic")).toMatchObject({ type: "oauth" });
+  });
+
+  test("an empty store leaves the environment as the only source", async () => {
+    const store = new ObjectCredentialStore(memoryHost());
+    const setup = configureProviders(config(openai), envOf({ OPENAI_API_KEY: "sk-env" }), store);
+    if (setup.kind !== "configured") throw new Error("expected a configured collection");
+    expect(await setup.models.checkAuth("openai")).toEqual({
+      source: "OPENAI_API_KEY",
+      type: "api_key",
+    });
+  });
+});
+
+/** The in-memory storage a credential store needs. */
+function memoryHost(): StorageHost {
+  const values = new Map<string, string>();
+  return {
+    get: async <T>(key: string) => {
+      const raw = values.get(key);
+      return raw === undefined ? undefined : (JSON.parse(raw) as T);
+    },
+    put: async <T>(key: string, value: T) => {
+      values.set(key, JSON.stringify(value));
+    },
+    delete: async (key: string) => {
+      values.delete(key);
+    },
+    list: async <T>(options: { prefix: string }) =>
+      new Map(
+        [...values.entries()]
+          .filter(([key]) => key.startsWith(options.prefix))
+          .map(([key, raw]) => [key, JSON.parse(raw) as T]),
+      ),
+  };
+}
+
+describe("a deployment with no credential store", () => {
+  test("still configures, so a secret-only deployment needs no object", () => {
+    const setup = configureProviders(
+      config({
+        providers: ["openai"],
+        defaultModel: { provider: "openai", modelId: "gpt-5-codex" },
+      }),
+      envOf({ OPENAI_API_KEY: "sk" }),
+    );
+    expect(setup.kind).toBe("configured");
+  });
+
+  test("does not fall back to a stored credential when none is given", async () => {
+    const store = new ObjectCredentialStore(memoryHost());
+    await store.put("openai", { type: "api_key", key: "stored-1" });
+    const setup = configureProviders(
+      config({
+        providers: ["openai"],
+        defaultModel: { provider: "openai", modelId: "gpt-5-codex" },
+      }),
+      envOf({}),
+    );
+    if (setup.kind !== "configured") throw new Error("expected a configured collection");
+    // The store exists but was not passed, so it is not consulted.
+    expect(await setup.models.checkAuth("openai")).toBeUndefined();
+  });
+});
+
+describe("the store is passed only when there is one", () => {
+  test("a store authenticates while no store leaves the provider unauthenticated", async () => {
+    const store = new ObjectCredentialStore(memoryHost());
+    await store.put("anthropic", { type: "api_key", key: "stored-1" });
+    const base = config({
+      providers: ["anthropic"],
+      defaultModel: { provider: "anthropic", modelId: "claude-opus-4-7" },
+    });
+    const withStore = configureProviders(base, envOf({}), store);
+    const without = configureProviders(base, envOf({}));
+    if (withStore.kind !== "configured" || without.kind !== "configured") {
+      throw new Error("expected two configured collections");
+    }
+    expect(await withStore.models.checkAuth("anthropic")).toMatchObject({ type: "api_key" });
+    expect(await without.models.checkAuth("anthropic")).toBeUndefined();
   });
 });

@@ -71,6 +71,7 @@ export type Route =
   | { kind: "linear-oauth-start" }
   | { kind: "linear-oauth-callback" }
   | { kind: "linear-oauth-status" }
+  | { kind: "providers-status" }
   | { kind: "health" }
   | { kind: "not-found" };
 
@@ -81,6 +82,7 @@ const ROUTES = new Map<string, Route>([
   ["/oauth/linear", { kind: "linear-oauth-start" }],
   ["/oauth/linear/callback", { kind: "linear-oauth-callback" }],
   ["/oauth/linear/status", { kind: "linear-oauth-status" }],
+  ["/providers/status", { kind: "providers-status" }],
   ["/health", { kind: "health" }],
 ]);
 

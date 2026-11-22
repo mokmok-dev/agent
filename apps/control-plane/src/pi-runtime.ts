@@ -1,9 +1,10 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { createRegistry } from "@earendil-works/pi-durable";
-import type { MutableModels } from "@earendil-works/pi-ai";
+import type { CredentialStore, MutableModels } from "@earendil-works/pi-ai";
 import type { ModelRef } from "@agent/capability";
 import { ConversationBase } from "@agent/conversation";
+
 import type { Env } from "./worker.ts";
 import { configureProviders, type ProviderConfig, type ProviderRefused } from "./providers.ts";
 import { piTurnRunner } from "./pi-turn-runner.ts";
@@ -42,7 +43,10 @@ export function piRunnerOver(openOnce: () => Promise<ConversationBase>): TurnRun
 
 export async function open(state: DurableObjectState, env: Env): Promise<ConversationBase> {
   const storage = await openDurableObjectSqliteStorage(state.storage);
-  const setup = setupFor(env);
+  // The credentials live on the `providers` object, not this one, because a
+  // login applies to every session rather than to one conversation.
+  const credentials = env.PROVIDERS?.getByName("providers") as CredentialStore | undefined;
+  const setup = setupFor(env, credentials);
   const conversation = await ConversationBase.open(storage, {
     models: setup.models,
     registry: createRegistry(),
@@ -58,11 +62,18 @@ export async function open(state: DurableObjectState, env: Env): Promise<Convers
  * The configured collection, or the error a misconfiguration deserves. Split
  * from `open` so everything except the Durable Object's SQLite is testable.
  */
-export function setupFor(env: Env): { models: MutableModels; defaultModel: ModelRef } {
-  const setup = configureProviders(providerConfigOf(env), (name) => {
-    const value = env[name as keyof Env];
-    return typeof value === "string" ? value : undefined;
-  });
+export function setupFor(
+  env: Env,
+  credentials?: CredentialStore,
+): { models: MutableModels; defaultModel: ModelRef } {
+  const setup = configureProviders(
+    providerConfigOf(env),
+    (name) => {
+      const value = env[name as keyof Env];
+      return typeof value === "string" ? value : undefined;
+    },
+    credentials,
+  );
   if (setup.kind === "refused") throw new Error(refusalText(setup.refusal));
   return { models: setup.models, defaultModel: setup.defaultModel };
 }

@@ -92,3 +92,21 @@ export async function loginStatus(port: LinearOAuthPort, now: number): Promise<R
     renewsInSeconds: Math.round((credential.issuedAt + credential.expiresIn * 1000 - now) / 1000),
   });
 }
+
+/**
+ * `GET /providers`: which providers this deployment may run and which have a
+ * credential. A provider name and its credential type are safe to show; the
+ * credential itself never appears here.
+ */
+export function providerStatus(
+  configured: readonly string[],
+  stored: readonly { providerId: string; type: string }[],
+): Response {
+  const held = new Map(stored.map((entry) => [entry.providerId, entry.type]));
+  return Response.json({
+    providers: configured.map((provider) => ({
+      provider,
+      credential: held.get(provider) ?? null,
+    })),
+  });
+}

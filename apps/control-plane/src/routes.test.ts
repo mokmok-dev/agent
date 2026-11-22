@@ -8,6 +8,7 @@ import {
   routeOf,
 } from "./routes.ts";
 import worker, { accept, deliveryBody, fetch, type Env } from "./worker.ts";
+import { providerStatus } from "./linear-oauth-port.ts";
 import type { AdapterResult } from "@agent/adapters";
 
 /** The hex a signature produced, or a failure naming the refusal. */
@@ -689,6 +690,119 @@ describe("each provider route reaches its own adapter", () => {
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({
       error: { message: "missing x-signature-ed25519" },
+    });
+  });
+});
+
+describe("the provider status route", () => {
+  test("names each configured provider and the credential it holds", async () => {
+    const response = providerStatus(
+      ["cloudflare-workers-ai", "openai"],
+      [{ providerId: "openai", type: "api_key" }],
+    );
+    expect(await response.json()).toEqual({
+      providers: [
+        { provider: "cloudflare-workers-ai", credential: null },
+        { provider: "openai", credential: "api_key" },
+      ],
+    });
+  });
+
+  test("shows a credential type but never the credential", async () => {
+    const response = providerStatus(["anthropic"], [{ providerId: "anthropic", type: "oauth" }]);
+    const text = await response.text();
+    expect(text).toContain("oauth");
+    expect(text).not.toContain("at-1");
+  });
+
+  test("through the Worker, the route answers from the deployment config", async () => {
+    const value = envWith({
+      PI_PROVIDERS: "openai",
+      PROVIDERS: {
+        getByName: () => ({ list: async () => [{ providerId: "openai", type: "api_key" }] }),
+      },
+    });
+    const response = await fetch(new Request("https://x/providers/status"), value);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      providers: [{ provider: "openai", credential: "api_key" }],
+    });
+  });
+
+  test("a deployment with no credential object reports no credentials", async () => {
+    const value = envWith({ PI_PROVIDERS: "openai" });
+    const response = await fetch(new Request("https://x/providers/status"), value);
+    expect(await response.json()).toEqual({
+      providers: [{ provider: "openai", credential: null }],
+    });
+  });
+
+  test("no stated providers falls back to Workers AI", async () => {
+    const response = await fetch(new Request("https://x/providers/status"), envWith());
+    expect(await response.json()).toEqual({
+      providers: [{ provider: "cloudflare-workers-ai", credential: null }],
+    });
+  });
+
+  test("a provider list of only separators falls back too", async () => {
+    const value = envWith({ PI_PROVIDERS: " , " });
+    const response = await fetch(new Request("https://x/providers/status"), value);
+    expect(await response.json()).toEqual({
+      providers: [{ provider: "cloudflare-workers-ai", credential: null }],
+    });
+  });
+});
+
+describe("the provider status route addresses the deployment's one object", () => {
+  test("asks for the object named providers, whose credentials are shared", async () => {
+    const names: string[] = [];
+    const value = envWith({
+      PI_PROVIDERS: "openai",
+      PROVIDERS: {
+        getByName: (name: string) => {
+          names.push(name);
+          return { list: async () => [] };
+        },
+      },
+    });
+    await fetch(new Request("https://x/providers/status"), value);
+    expect(names).toEqual(["providers"]);
+  });
+
+  test("a deployment with no object lists nothing rather than failing", async () => {
+    const response = await fetch(
+      new Request("https://x/providers/status"),
+      envWith({ PI_PROVIDERS: "openai" }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      providers: [{ provider: "openai", credential: null }],
+    });
+  });
+});
+
+describe("a deployment whose provider object has credentials", () => {
+  test("the empty-list branch shows no credential while a listed one shows its type", async () => {
+    const blank = await fetch(
+      new Request("https://x/providers/status"),
+      envWith({
+        PI_PROVIDERS: "openai",
+        PROVIDERS: { getByName: () => ({ list: async () => [] }) },
+      }),
+    );
+    expect(await blank.json()).toEqual({ providers: [{ provider: "openai", credential: null }] });
+
+    const listed = await fetch(
+      new Request("https://x/providers/status"),
+      envWith({
+        PI_PROVIDERS: "openai",
+        PROVIDERS: {
+          getByName: () => ({ list: async () => [{ providerId: "openai", type: "oauth" }] }),
+        },
+      }),
+    );
+    expect(await listed.json()).toEqual({
+      providers: [{ provider: "openai", credential: "oauth" }],
     });
   });
 });

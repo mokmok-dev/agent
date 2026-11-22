@@ -1,5 +1,5 @@
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
-import type { CreateModelsOptions, MutableModels } from "@earendil-works/pi-ai";
+import type { CreateModelsOptions, CredentialStore, MutableModels } from "@earendil-works/pi-ai";
 import type { ModelRef } from "@agent/capability";
 
 /**
@@ -63,13 +63,15 @@ export type ProviderSetup =
  * filtered to the named providers, so a session cannot run on a provider the
  * operator did not enable even though pi knows it.
  *
- * A provider with no key is still registered, because pi reports that as "not
- * authenticated" with the key's name, which is a better message than the
- * provider being absent.
+ * A credential stored on the object wins over the environment, because a login
+ * through OAuth has no secret to put there. A provider with neither is still
+ * registered, since pi reports that as "not authenticated" with the key's name,
+ * which is a better message than the provider being absent.
  */
 export function configureProviders(
   config: ProviderConfig,
   env: (name: string) => string | undefined,
+  credentials?: CredentialStore,
 ): ProviderSetup {
   const unknown = config.providers.find((provider) => PROVIDER_KEYS[provider] === undefined);
   if (unknown !== undefined) {
@@ -85,11 +87,9 @@ export function configureProviders(
       refusal: { kind: "unknown-provider", provider: config.defaultModel.provider },
     };
   }
-  return {
-    kind: "configured",
-    models: builtinModels(authContext(env, config.providers)),
-    defaultModel: config.defaultModel,
-  };
+  const options = authContext(env, config.providers);
+  if (credentials !== undefined) options.credentials = credentials;
+  return { kind: "configured", models: builtinModels(options), defaultModel: config.defaultModel };
 }
 
 /**

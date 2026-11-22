@@ -11,7 +11,13 @@ import {
   providerConfigOf,
   type ProviderEnv,
 } from "./routes.ts";
-import { finishLogin, loginStatus, startLogin, type LinearOAuthPort } from "./linear-oauth-port.ts";
+import {
+  finishLogin,
+  loginStatus,
+  providerStatus,
+  startLogin,
+  type LinearOAuthPort,
+} from "./linear-oauth-port.ts";
 import { linearReplies, type LinearReplyPort, type ReplyOutcome } from "./linear-reply.ts";
 
 export interface Namespace {
@@ -23,6 +29,8 @@ export interface Env extends ProviderEnv, LinearOAuthEnv, ModelEnv {
   SESSIONS: Namespace;
   THREAD_INDEX: Namespace;
   LINEAR_OAUTH: Namespace;
+  /** The one object that holds the provider credentials for the deployment. */
+  PROVIDERS?: Namespace;
 }
 
 /**
@@ -91,6 +99,9 @@ export async function fetch(request: Request, env: Env, now = Date.now()): Promi
     if (route.kind === "linear-oauth-start") return startLogin(port, env, oauthConfigOf(env));
     if (route.kind === "linear-oauth-status") return loginStatus(port, now);
     return finishLogin(port, callbackOf(url.searchParams), now);
+  }
+  if (route.kind === "providers-status") {
+    return providersStatus(env);
   }
   try {
     const result = await handleWebhook(
@@ -170,3 +181,31 @@ async function replyFor(
 }
 
 export default { fetch };
+
+/**
+ * `GET /providers/status`: the providers this deployment may run and whether
+ * each has a credential. A name and a credential type are safe to show; the
+ * credential itself never appears.
+ */
+export async function providersStatus(env: Env): Promise<Response> {
+  const configured = modelProvidersOf(env);
+  const stored =
+    env.PROVIDERS === undefined
+      ? []
+      : await (env.PROVIDERS.getByName("providers") as ProviderRpc).list();
+  return providerStatus(configured, stored);
+}
+
+/** The provider list a deployment states, from `PI_PROVIDERS`. */
+export function modelProvidersOf(env: Env): readonly string[] {
+  const stated = (env.PI_PROVIDERS ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name !== "");
+  return stated.length > 0 ? stated : ["cloudflare-workers-ai"];
+}
+
+/** The credential object's RPC surface, as the status route calls it. */
+interface ProviderRpc {
+  list(): Promise<readonly { providerId: string; type: string }[]>;
+}

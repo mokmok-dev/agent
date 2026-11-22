@@ -8,6 +8,7 @@ bindings = [
   { name = "SESSIONS", class_name = "SessionDurableObject" },
   { name = "THREAD_INDEX", class_name = "ThreadIndexDurableObject" },
   { name = "LINEAR_OAUTH", class_name = "LinearOAuthDurableObject" },
+  { name = "PROVIDERS", class_name = "ProviderCredentialDurableObject" },
 ]
 
 # Every log and every trace, kept where the dashboard can query them. A webhook
@@ -39,6 +40,10 @@ new_sqlite_classes = ["SessionDurableObject", "ThreadIndexDurableObject"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["LinearOAuthDurableObject"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["ProviderCredentialDurableObject"]
 
 # The sandbox target runs an agent in a Container attached to the session
 # object, which needs the Workers Paid plan.
