@@ -39,16 +39,17 @@ class Host implements StorageHost {
 /** A token endpoint that answers one pair, and records what it was asked. */
 function endpoint(): { request: TokenRequest; forms: string[] } {
   const forms: string[] = [];
+  const body: TokenResponse = {
+    access_token: "at-1",
+    refresh_token: "rt-1",
+    expires_in: 86_400,
+    scope: "read write",
+  };
   return {
     forms,
     request: async (_url, form) => {
       forms.push(form);
-      return {
-        access_token: "at-1",
-        refresh_token: "rt-1",
-        expires_in: 86_400,
-        scope: "read write",
-      } satisfies TokenResponse;
+      return { kind: "body", body };
     },
   };
 }

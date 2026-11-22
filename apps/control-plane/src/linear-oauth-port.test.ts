@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { LinearCredential } from "./linear-oauth-do.ts";
+import type { AccessToken, Completed, LinearCredential, LoginRefused } from "./linear-oauth-do.ts";
 import { finishLogin, loginStatus, startLogin, type LinearOAuthPort } from "./linear-oauth-port.ts";
 import { oauthConfigOf, oauthConfigured } from "./routes.ts";
 import { envWith, OAUTH } from "./test-env.ts";
@@ -9,9 +9,9 @@ class FakePort implements LinearOAuthPort {
   started = 0;
   readonly paramses: Record<string, string>[] = [];
   readonly stored: string[] = [];
-  answer: LinearCredential | Error;
+  answer: LinearCredential | LoginRefused;
 
-  constructor(answer: LinearCredential | Error) {
+  constructor(answer: LinearCredential | LoginRefused) {
     this.answer = answer;
   }
 
@@ -20,14 +20,17 @@ class FakePort implements LinearOAuthPort {
     this.stored.push(state);
   }
 
-  async complete(params: Record<string, string>, _now: number): Promise<LinearCredential> {
+  async complete(params: Record<string, string>, _now: number): Promise<Completed> {
     this.paramses.push(params);
-    if (this.answer instanceof Error) throw this.answer;
-    return this.answer;
+    return "kind" in this.answer ? this.answer : { kind: "completed", credential: this.answer };
   }
 
   async status(): Promise<LinearCredential | undefined> {
-    return this.answer instanceof Error ? undefined : this.answer;
+    return "kind" in this.answer ? undefined : this.answer;
+  }
+
+  async accessToken(): Promise<AccessToken | undefined> {
+    return "kind" in this.answer ? undefined : { kind: "token", token: this.answer.accessToken };
   }
 }
 
@@ -143,9 +146,8 @@ describe("the status route", () => {
     const port: LinearOAuthPort = {
       start: async () => undefined,
       status: async () => undefined,
-      complete: async () => {
-        throw new Error("not called");
-      },
+      accessToken: async () => undefined,
+      complete: async () => ({ kind: "rejected", status: 400, message: "not called" }),
     };
     const response = await loginStatus(port, 0);
     expect(response.status).toBe(404);
@@ -199,7 +201,11 @@ describe("finishing the login", () => {
   });
 
   test("a callback refusal is a 400, whatever the thrown error's own fields", async () => {
-    const port = new FakePort(new Error("linear callback state does not match"));
+    const port = new FakePort({
+      kind: "rejected",
+      status: 400,
+      message: "linear callback state does not match",
+    });
     const response = await finishLogin(port, {}, 10);
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({
@@ -208,17 +214,27 @@ describe("finishing the login", () => {
   });
 
   test("a bad token response is a 502, because Linear answered something unusable", async () => {
-    const port = new FakePort(new Error("linear token response has no refresh token"));
+    const port = new FakePort({
+      kind: "bad-response",
+      message: "linear token response has no refresh token",
+    });
     expect((await finishLogin(port, {}, 0)).status).toBe(502);
   });
 
   test("an unreachable token endpoint is a 502", async () => {
-    const port = new FakePort(new Error("linear token endpoint unreachable: offline"));
+    const port = new FakePort({
+      kind: "unreachable",
+      message: "linear token endpoint unreachable: offline",
+    });
     expect((await finishLogin(port, {}, 0)).status).toBe(502);
   });
 
   test("an unrecognized failure is a 400, because the object only refuses callbacks", async () => {
-    const response = await finishLogin(new FakePort(new Error("boom")), {}, 0);
+    const response = await finishLogin(
+      new FakePort({ kind: "rejected", status: 400, message: "boom" }),
+      {},
+      0,
+    );
     expect(response.status).toBe(400);
   });
 
@@ -226,9 +242,8 @@ describe("finishing the login", () => {
     const port: LinearOAuthPort = {
       start: async () => undefined,
       status: async () => undefined,
-      complete: async () => {
-        throw "plain string";
-      },
+      accessToken: async () => undefined,
+      complete: async () => ({ kind: "unreachable", message: "plain string" }),
     };
     const response = await finishLogin(port, {}, 0);
     expect(await response.json()).toEqual({ error: { message: "plain string" } });

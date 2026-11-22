@@ -8,10 +8,10 @@ import { linearReplies, postActivity } from "./linear-reply.ts";
 function oauth(credential: LinearCredential | undefined): LinearOAuthPort {
   return {
     start: async () => undefined,
-    complete: async () => {
-      throw new Error("not used");
-    },
+    complete: async () => ({ kind: "rejected", status: 400, message: "not used" }),
     status: async () => credential,
+    accessToken: async () =>
+      credential === undefined ? undefined : { kind: "token", token: credential.accessToken },
   };
 }
 
@@ -134,5 +134,17 @@ describe("the default transport", () => {
     } finally {
       server.stop(true);
     }
+  });
+});
+
+describe("a token renewal that refused", () => {
+  test("the reply fails with the renewal's reason, so the turn can report it", async () => {
+    const replies = linearReplies({
+      start: async () => undefined,
+      complete: async () => ({ kind: "rejected", status: 400, message: "not used" }),
+      status: async () => credential,
+      accessToken: async () => ({ kind: "unreachable", message: "offline" }),
+    });
+    expect(await replies.answer("s", "hi", 0)).toEqual({ kind: "failed", error: "offline" });
   });
 });

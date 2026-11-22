@@ -6,7 +6,7 @@ import {
   parseDiscordInteraction,
   verifyDiscord,
 } from "./discord.ts";
-import { AdapterError, type RawRequest } from "./events.ts";
+import type { AdapterResult, RawRequest } from "./events.ts";
 
 const encoder = new TextEncoder();
 
@@ -42,14 +42,10 @@ async function signed(body: unknown, timestamp = "1700000000"): Promise<RawReque
   };
 }
 
-async function rejection(promise: Promise<unknown>): Promise<AdapterError> {
-  try {
-    await promise;
-  } catch (error) {
-    expect(error).toBeInstanceOf(AdapterError);
-    return error as AdapterError;
-  }
-  throw new Error("expected an AdapterError");
+/** The refusal an adapter returned, or a failure naming what it returned instead. */
+function refused(result: AdapterResult): { status: number; message: string } {
+  if (result.kind !== "refused") throw new Error("expected a refusal");
+  return { status: result.status, message: result.message };
 }
 
 const commandBody = (overrides: Record<string, unknown> = {}) => ({
@@ -64,23 +60,25 @@ const commandBody = (overrides: Record<string, unknown> = {}) => ({
 
 describe("verifyDiscord", () => {
   test("accepts a correctly signed interaction", async () => {
-    await verifyDiscord(await signed(commandBody()), { publicKey: publicKeyHex });
+    expect(await verifyDiscord(await signed(commandBody()), { publicKey: publicKeyHex })).toEqual({
+      kind: "verified",
+    });
   });
 
   test("rejects a missing signature header", async () => {
     const request = await signed(commandBody());
-    expect(
-      (await rejection(verifyDiscord({ ...request, headers: {} }, { publicKey: publicKeyHex })))
-        .status,
-    ).toBe(401);
+    expect(await verifyDiscord({ ...request, headers: {} }, { publicKey: publicKeyHex })).toEqual({
+      kind: "absent",
+      header: "x-signature-ed25519",
+    });
   });
 
   test("rejects a missing timestamp header", async () => {
     const request = await signed(commandBody());
     const headers = { "x-signature-ed25519": request.headers["x-signature-ed25519"] };
-    expect(
-      (await rejection(verifyDiscord({ ...request, headers }, { publicKey: publicKeyHex }))).status,
-    ).toBe(401);
+    expect((await verifyDiscord({ ...request, headers }, { publicKey: publicKeyHex })).kind).toBe(
+      "absent",
+    );
   });
 
   test("rejects a body changed after signing", async () => {
@@ -89,9 +87,7 @@ describe("verifyDiscord", () => {
       ...request,
       body: request.body.replace("write the tests", "delete the tests"),
     };
-    expect((await rejection(verifyDiscord(tampered, { publicKey: publicKeyHex }))).status).toBe(
-      401,
-    );
+    expect((await verifyDiscord(tampered, { publicKey: publicKeyHex })).kind).toBe("mismatch");
   });
 
   test("rejects a signature with another application key", async () => {
@@ -103,9 +99,9 @@ describe("verifyDiscord", () => {
     const otherHex = [...new Uint8Array(raw)]
       .map((byte) => byte.toString(16).padStart(2, "0"))
       .join("");
-    expect(
-      (await rejection(verifyDiscord(await signed(commandBody()), { publicKey: otherHex }))).status,
-    ).toBe(401);
+    expect((await verifyDiscord(await signed(commandBody()), { publicKey: otherHex })).kind).toBe(
+      "mismatch",
+    );
   });
 });
 
@@ -180,26 +176,32 @@ describe("parseDiscordInteraction", () => {
 
   test("rejects a payload that is not an interaction", () => {
     for (const body of [null, [], {}, { type: "x" }]) {
-      expect(() => parseDiscordInteraction(body)).toThrow(AdapterError);
+      expect(refused(parseDiscordInteraction(body)).status).toBe(400);
     }
   });
 
   test("rejects an interaction with no channel or id", () => {
-    expect(() => parseDiscordInteraction(commandBody({ channel: {} }))).toThrow(AdapterError);
-    expect(() => parseDiscordInteraction(commandBody({ id: undefined }))).toThrow(AdapterError);
+    expect(refused(parseDiscordInteraction(commandBody({ channel: {} }))).status).toBe(400);
+    expect(refused(parseDiscordInteraction(commandBody({ id: undefined }))).status).toBe(400);
   });
 
   test("rejects an interaction with no prompt text", () => {
-    expect(() => parseDiscordInteraction(commandBody({ data: {} }))).toThrow(AdapterError);
-    expect(() => parseDiscordInteraction(commandBody({ data: { options: [] } }))).toThrow(
-      AdapterError,
+    expect(refused(parseDiscordInteraction(commandBody({ data: {} }))).status).toBe(400);
+    expect(refused(parseDiscordInteraction(commandBody({ data: { options: [] } }))).status).toBe(
+      400,
     );
-    expect(() =>
-      parseDiscordInteraction(commandBody({ data: { options: [{ name: "other", value: "x" }] } })),
-    ).toThrow(AdapterError);
-    expect(() =>
-      parseDiscordInteraction(commandBody({ data: { options: [{ name: "prompt", value: 1 }] } })),
-    ).toThrow(AdapterError);
+    expect(
+      refused(
+        parseDiscordInteraction(
+          commandBody({ data: { options: [{ name: "other", value: "x" }] } }),
+        ),
+      ).status,
+    ).toBe(400);
+    expect(
+      refused(
+        parseDiscordInteraction(commandBody({ data: { options: [{ name: "prompt", value: 1 }] } })),
+      ).status,
+    ).toBe(400);
   });
 });
 
@@ -211,7 +213,7 @@ describe("adaptDiscord", () => {
 
   test("a signature failure is a 401 before parsing", async () => {
     const request = { ...(await signed(commandBody())), body: "{" };
-    expect((await rejection(adaptDiscord(request, { publicKey: publicKeyHex }))).status).toBe(401);
+    expect(refused(await adaptDiscord(request, { publicKey: publicKeyHex })).status).toBe(401);
   });
 
   test("a signed body that is not JSON is a 400", async () => {
@@ -230,7 +232,7 @@ describe("adaptDiscord", () => {
       headers: { "x-signature-ed25519": hex, "x-signature-timestamp": timestamp },
       body: text,
     };
-    expect((await rejection(adaptDiscord(request, { publicKey: publicKeyHex }))).status).toBe(400);
+    expect(refused(await adaptDiscord(request, { publicKey: publicKeyHex })).status).toBe(400);
   });
 
   test("the deferred acknowledgement is interaction type 5", async () => {

@@ -74,54 +74,54 @@ describe("building content", () => {
 
 describe("reading Linear's answer", () => {
   test("a success carries the activity id", () => {
-    expect(readActivityResult(accepted)).toEqual({ ok: true, activityId: "a-1" });
+    expect(readActivityResult(accepted)).toEqual({ kind: "sent", activityId: "a-1" });
   });
 
   test("a success without an id is still a success", () => {
     expect(readActivityResult({ data: { agentActivityCreate: { success: true } } })).toEqual({
-      ok: true,
+      kind: "sent",
       activityId: null,
     });
   });
 
   test("a GraphQL error carries its message", () => {
     expect(readActivityResult({ errors: [{ message: "bad scope" }] })).toEqual({
-      ok: false,
+      kind: "refused",
       error: "bad scope",
     });
   });
 
   test("a GraphQL error with no message still names the refusal", () => {
     expect(readActivityResult({ errors: [{}] })).toEqual({
-      ok: false,
+      kind: "refused",
       error: "linear rejected the request",
     });
   });
 
   test("an answer with no payload is a refusal", () => {
     expect(readActivityResult({ data: {} })).toEqual({
-      ok: false,
+      kind: "refused",
       error: "linear answered without an activity",
     });
   });
 
   test("a payload that says success false is Linear declining", () => {
     expect(readActivityResult({ data: { agentActivityCreate: { success: false } } })).toEqual({
-      ok: false,
+      kind: "refused",
       error: "linear declined the activity",
     });
   });
 
   test("an answer that is not an object is a refusal rather than a crash", () => {
     expect(readActivityResult(undefined)).toEqual({
-      ok: false,
+      kind: "refused",
       error: "linear answered without an activity",
     });
   });
 
   test("an answer that is a bare null is a refusal rather than a crash", () => {
     expect(readActivityResult(null)).toEqual({
-      ok: false,
+      kind: "refused",
       error: "linear answered without an activity",
     });
   });
@@ -129,21 +129,21 @@ describe("reading Linear's answer", () => {
   test("errors that are not an array read as no errors, so the payload decides", () => {
     expect(
       readActivityResult({ errors: "nope", data: { agentActivityCreate: { success: true } } }),
-    ).toEqual({ ok: true, activityId: null });
+    ).toEqual({ kind: "sent", activityId: null });
   });
 
   test("an empty errors array is not a refusal, so a successful answer with no errors passes", () => {
     expect(
       readActivityResult({ errors: [], data: { agentActivityCreate: { success: true } } }),
     ).toEqual({
-      ok: true,
+      kind: "sent",
       activityId: null,
     });
   });
 
   test("a null error entry is handled without a throw", () => {
     expect(readActivityResult({ errors: [null] })).toEqual({
-      ok: false,
+      kind: "refused",
       error: "linear rejected the request",
     });
   });
@@ -151,13 +151,13 @@ describe("reading Linear's answer", () => {
   test("a null activity is a success with no id, without a throw", () => {
     expect(
       readActivityResult({ data: { agentActivityCreate: { success: true, agentActivity: null } } }),
-    ).toEqual({ ok: true, activityId: null });
+    ).toEqual({ kind: "sent", activityId: null });
   });
 
   test("an activity without an object is a success with no id", () => {
     expect(
       readActivityResult({ data: { agentActivityCreate: { success: true, agentActivity: 5 } } }),
-    ).toEqual({ ok: true, activityId: null });
+    ).toEqual({ kind: "sent", activityId: null });
   });
 });
 
@@ -176,7 +176,7 @@ describe("sending", () => {
         return accepted;
       },
     );
-    expect(result).toEqual({ ok: true, activityId: "a-1" });
+    expect(result).toEqual({ kind: "sent", activityId: "a-1" });
     expect(seen[0]?.url).toBe("https://api.linear.app/graphql");
     expect(seen[0]?.auth).toBe("Bearer at-1");
     expect(seen[0]?.body.query).toContain("agentActivityCreate");
@@ -193,7 +193,10 @@ describe("sending", () => {
         throw new Error("offline");
       },
     );
-    expect(result).toEqual({ ok: false, error: expect.stringContaining("linear unreachable") });
+    expect(result).toEqual({
+      kind: "refused",
+      error: expect.stringContaining("linear unreachable"),
+    });
   });
 
   test("the request is a JSON POST, which is what the GraphQL endpoint reads", async () => {

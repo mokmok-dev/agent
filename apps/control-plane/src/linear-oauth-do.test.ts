@@ -5,7 +5,10 @@ import {
   expectedState,
   LinearOAuthObject,
   stateKey,
+  type AccessToken,
+  type Completed,
   type LinearCredential,
+  type LoginRefused,
 } from "./linear-oauth-do.ts";
 import type { StorageHost } from "./storage.ts";
 
@@ -47,6 +50,19 @@ class Host implements StorageHost {
   }
 }
 
+/** The token a renew produced, or a failure naming the refusal. */
+function tokenOf(answer: AccessToken | undefined): string {
+  if (answer === undefined) throw new Error("expected a credential");
+  if (answer.kind !== "token") throw new Error(`expected a token: `);
+  return answer.token;
+}
+
+/** The credential a login produced, or a failure naming the refusal. */
+function credentialOf(answer: Completed): LinearCredential {
+  if (answer.kind !== "completed") throw new Error(`expected a credential: ${answer.message}`);
+  return answer.credential;
+}
+
 const config = {
   clientId: "client-1",
   clientSecret: "secret-1",
@@ -66,14 +82,14 @@ function endpoint(answers: TokenResponse[]): { request: TokenRequest; forms: str
   const forms: string[] = [];
   const request: TokenRequest = async (_url, form) => {
     forms.push(form);
-    return answers.shift() ?? answer();
+    return { kind: "body", body: answers.shift() ?? answer() };
   };
   return { request, forms };
 }
 
 const object = (
   request: TokenRequest = endpoint([answer()]).request,
-  graphql: GraphqlRequest = async () => ({}),
+  graphql: GraphqlRequest = async () => ({ kind: "body", body: {} }),
 ) => {
   const host = new Host();
   return { host, oauth: new LinearOAuthObject(host, config, request, graphql) };
@@ -135,7 +151,7 @@ describe("completing a login", () => {
   test("exchanges the code and stores the pair", async () => {
     const { oauth } = object();
     await oauth.start("state-1");
-    const credential = await oauth.complete({ code: "c1", state: "state-1" }, 10);
+    const credential = credentialOf(await oauth.complete({ code: "c1", state: "state-1" }, 10));
     expect(credential).toMatchObject({
       accessToken: "at-1",
       refreshToken: "rt-1",
@@ -145,9 +161,12 @@ describe("completing a login", () => {
   });
 
   test("stores the app's id in the workspace, which Linear says to keep with the token", async () => {
-    const { host, oauth } = object(undefined, async () => ({ data: { viewer: { id: "app-1" } } }));
+    const { host, oauth } = object(undefined, async () => ({
+      kind: "body",
+      body: { data: { viewer: { id: "app-1" } } },
+    }));
     await oauth.start("s");
-    const credential = await oauth.complete({ code: "c", state: "s" }, 10);
+    const credential = credentialOf(await oauth.complete({ code: "c", state: "s" }, 10));
     expect(credential.organizationId).toBe("app-1");
     expect((await oauth.credential())?.organizationId).toBe("app-1");
     expect(host.values.size).toBe(1);
@@ -157,7 +176,7 @@ describe("completing a login", () => {
     const seen: { url: string; auth: string | undefined }[] = [];
     const { oauth } = object(undefined, async (url, init) => {
       seen.push({ url, auth: init.headers["authorization"] });
-      return { data: { viewer: { id: "app-1" } } };
+      return { kind: "body", body: { data: { viewer: { id: "app-1" } } } };
     });
     await oauth.start("s");
     await oauth.complete({ code: "c", state: "s" }, 10);
@@ -165,20 +184,23 @@ describe("completing a login", () => {
   });
 
   test("keeps the credential when the viewer lookup fails, because the token still works", async () => {
-    const { oauth } = object(undefined, async () => {
-      throw new Error("offline");
-    });
+    const { oauth } = object(undefined, async () => ({
+      kind: "unreachable",
+      message: "offline",
+    }));
     await oauth.start("s");
-    const credential = await oauth.complete({ code: "c", state: "s" }, 10);
+    const credential = credentialOf(await oauth.complete({ code: "c", state: "s" }, 10));
     expect(credential.accessToken).toBe("at-1");
     expect(credential.organizationId).toBeNull();
     expect(await oauth.credential()).toBeDefined();
   });
 
   test("keeps the credential when Linear answers without a viewer id", async () => {
-    const { oauth } = object(undefined, async () => ({ data: {} }));
+    const { oauth } = object(undefined, async () => ({ kind: "body", body: { data: {} } }));
     await oauth.start("s");
-    expect((await oauth.complete({ code: "c", state: "s" }, 10)).organizationId).toBeNull();
+    expect(
+      credentialOf(await oauth.complete({ code: "c", state: "s" }, 10)).organizationId,
+    ).toBeNull();
   });
 
   test("consumes the state, so a replayed callback is refused", async () => {
@@ -219,7 +241,7 @@ describe("using the credential", () => {
     const { oauth } = object(request);
     await oauth.start("s");
     await oauth.complete({ code: "c", state: "s" }, 0);
-    expect(await oauth.accessToken(1000)).toBe("at-1");
+    expect(tokenOf(await oauth.accessToken(1000))).toBe("at-1");
     expect(forms).toHaveLength(1);
   });
 
@@ -231,7 +253,7 @@ describe("using the credential", () => {
     const { oauth } = object(request);
     await oauth.start("s");
     await oauth.complete({ code: "c", state: "s" }, 0);
-    const token = await oauth.accessToken(86_400 * 1000);
+    const token = tokenOf(await oauth.accessToken(86_400 * 1000));
     expect(token).toBe("at-2");
     expect(new URLSearchParams(forms[1]).get("grant_type")).toBe("refresh_token");
     expect((await oauth.credential())?.refreshToken).toBe("rt-2");
@@ -292,7 +314,7 @@ describe("disconnecting", () => {
     const seen: string[] = [];
     const { oauth } = object(async (url) => {
       seen.push(url);
-      return {} as TokenResponse;
+      return { kind: "body", body: {} };
     });
     await oauth.disconnect();
     expect(seen).toEqual([]);
@@ -302,7 +324,7 @@ describe("disconnecting", () => {
     const forms: string[] = [];
     const { oauth } = object(async (_url, form) => {
       forms.push(form);
-      return answer();
+      return { kind: "body", body: answer() };
     });
     await oauth.start("s");
     await oauth.complete({ code: "c", state: "s" }, 0);
@@ -311,12 +333,39 @@ describe("disconnecting", () => {
   });
 });
 
-/** The refusal a call threw, so a test asserts on its message without a cast. */
-async function refusalOf(run: () => Promise<unknown>): Promise<Error> {
-  try {
-    await run();
-  } catch (error) {
-    return error instanceof Error ? error : new Error(String(error));
-  }
-  throw new Error("expected a refusal");
+/** The refusal a login returned, so a test asserts on its message. */
+async function refusalOf(run: () => Promise<Completed>): Promise<LoginRefused> {
+  const answer = await run();
+  if (answer.kind === "completed") throw new Error("expected a refusal");
+  return answer;
 }
+
+describe("a renewal that Linear refused", () => {
+  /** A transport whose first call succeeds and whose later calls are unreachable. */
+  const failsAfterLogin = (): TokenRequest => {
+    let calls = 0;
+    return async () => {
+      calls += 1;
+      return calls === 1
+        ? { kind: "body", body: answer() }
+        : { kind: "unreachable", message: "offline" };
+    };
+  };
+
+  test("a failed refresh is reported as the refusal, so the caller can answer it", async () => {
+    const { oauth } = object(failsAfterLogin());
+    await oauth.start("s");
+    await oauth.complete({ code: "c", state: "s" }, 0);
+    expect(await oauth.accessToken(86_400 * 1000)).toEqual({
+      kind: "unreachable",
+      message: "offline",
+    });
+  });
+
+  test("a failed forced refresh reports false rather than claiming success", async () => {
+    const { oauth } = object(failsAfterLogin());
+    await oauth.start("s");
+    await oauth.complete({ code: "c", state: "s" }, 0);
+    expect(await oauth.refresh(1)).toBe(false);
+  });
+});

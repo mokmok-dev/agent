@@ -12,6 +12,7 @@ import {
   needsRefresh,
   newState,
   parseViewer,
+  postForm,
   readCallback,
   refreshForm,
   REFRESH_SKEW_MS,
@@ -23,7 +24,7 @@ import {
   type LinearTokens,
   type TokenResponse,
 } from "./linear-oauth.ts";
-import { AdapterError } from "./events.ts";
+import type { CallbackOutcome, OAuthRefused, TokenOutcome, ViewerOutcome } from "./linear-oauth.ts";
 
 const config: LinearOAuthConfig = {
   clientId: "client-1",
@@ -130,58 +131,59 @@ describe("the callback", () => {
 
   test("reads a code and a matching state", () => {
     expect(readCallback(params({ code: "c1", state: "s1" }), "s1")).toEqual({
-      code: "c1",
-      state: "s1",
+      kind: "callback",
+      params: { code: "c1", state: "s1" },
     });
   });
 
   test("a callback whose state matches nothing, even when none was issued, is refused", () => {
-    expect(
-      caught(() => readCallback(params({ code: "c1", state: "forged" }), "")).message,
-    ).toContain("does not match");
+    expect(refusal(readCallback(params({ code: "c1", state: "forged" }), "")).message).toContain(
+      "does not match",
+    );
   });
 
   test("a state that equals the expected one is accepted whatever its shape", () => {
-    expect(readCallback(params({ code: "c1", state: "x y/z" }), "x y/z").state).toBe("x y/z");
+    const answer = readCallback(params({ code: "c1", state: "x y/z" }), "x y/z");
+    expect(answer.kind === "callback" && answer.params.state).toBe("x y/z");
   });
 
   test("refuses a provider error with Linear's own reason", () => {
-    const error = caught(() => readCallback(params({ error: "access_denied" }), "s1"));
-    expect(error).toBeInstanceOf(AdapterError);
+    const error = refusal(readCallback(params({ error: "access_denied" }), "s1"));
+    expect(error.kind).toBe("rejected");
     expect(error.message).toContain("access_denied");
-    expect(error.status).toBe(400);
+    expect(error.kind === "rejected" && error.status).toBe(400);
   });
 
   test("refuses a missing code", () => {
-    expect(caught(() => readCallback(params({ state: "s1" }), "s1")).message).toContain("no code");
+    expect(refusal(readCallback(params({ state: "s1" }), "s1")).message).toContain("no code");
   });
 
   test("refuses an empty code", () => {
-    expect(caught(() => readCallback(params({ code: "", state: "s1" }), "s1")).message).toContain(
+    expect(refusal(readCallback(params({ code: "", state: "s1" }), "s1")).message).toContain(
       "no code",
     );
   });
 
   test("refuses a missing state", () => {
-    expect(caught(() => readCallback(params({ code: "c1" }), "s1")).message).toContain("no state");
+    expect(refusal(readCallback(params({ code: "c1" }), "s1")).message).toContain("no state");
   });
 
   test("refuses a state that differs from the one issued", () => {
-    expect(
-      caught(() => readCallback(params({ code: "c1", state: "other" }), "s1")).message,
-    ).toContain("does not match");
+    expect(refusal(readCallback(params({ code: "c1", state: "other" }), "s1")).message).toContain(
+      "does not match",
+    );
   });
 
   test("a stray callback with an empty state is refused before the comparison", () => {
-    expect(caught(() => readCallback(params({ code: "c1", state: "" }), "")).message).toContain(
+    expect(refusal(readCallback(params({ code: "c1", state: "" }), "")).message).toContain(
       "no state",
     );
   });
 
   test("refuses a callback whose state matches nothing, even when none was issued", () => {
-    expect(
-      caught(() => readCallback(params({ code: "c1", state: "forged" }), "")).message,
-    ).toContain("does not match");
+    expect(refusal(readCallback(params({ code: "c1", state: "forged" }), "")).message).toContain(
+      "does not match",
+    );
   });
 });
 
@@ -207,46 +209,49 @@ describe("the token forms", () => {
 describe("reading a token response", () => {
   test("keeps the pair, the lifetime, and the issue time", () => {
     expect(tokensOf(tokenResponse(), 1000)).toEqual({
-      accessToken: "at-1",
-      refreshToken: "rt-1",
-      expiresIn: 86_400,
-      issuedAt: 1000,
-      scope: "read write",
+      kind: "tokens",
+      tokens: {
+        accessToken: "at-1",
+        refreshToken: "rt-1",
+        expiresIn: 86_400,
+        issuedAt: 1000,
+        scope: "read write",
+      },
     });
   });
 
   test("accepts the older array scope", () => {
-    expect(tokensOf(tokenResponse({ scope: ["read", "write"] }), 0).scope).toBe("read write");
+    expect(tokens(tokensOf(tokenResponse({ scope: ["read", "write"] }), 0)).scope).toBe(
+      "read write",
+    );
   });
 
   test("a missing scope reads as empty", () => {
-    expect(tokensOf({ access_token: "a", refresh_token: "r" }, 0).scope).toBe("");
+    expect(tokens(tokensOf({ access_token: "a", refresh_token: "r" }, 0)).scope).toBe("");
   });
 
   test("a missing lifetime takes Linear's 24-hour default", () => {
-    expect(tokensOf({ access_token: "a", refresh_token: "r" }, 0).expiresIn).toBe(86_400);
+    expect(tokens(tokensOf({ access_token: "a", refresh_token: "r" }, 0)).expiresIn).toBe(86_400);
   });
 
   test("refuses a response that reports an error, quoting Linear", () => {
-    const error = caught(() =>
+    const error = refusal(
       tokensOf({ error: "invalid_grant", error_description: "code expired" }, 0),
     );
-    expect(error.status).toBe(502);
+    expect(error.kind).toBe("bad-response");
     expect(error.message).toContain("code expired");
   });
 
   test("an error with no description still names the code", () => {
-    expect(caught(() => tokensOf({ error: "invalid_client" }, 0)).message).toContain(
-      "invalid_client",
-    );
+    expect(refusal(tokensOf({ error: "invalid_client" }, 0)).message).toContain("invalid_client");
   });
 
   test("refuses a response without an access token", () => {
-    expect(caught(() => tokensOf({ refresh_token: "r" }, 0)).message).toContain("no access token");
+    expect(refusal(tokensOf({ refresh_token: "r" }, 0)).message).toContain("no access token");
   });
 
   test("refuses a response without a refresh token, which would die in a day", () => {
-    expect(caught(() => tokensOf({ access_token: "a" }, 0)).message).toContain("no refresh token");
+    expect(refusal(tokensOf({ access_token: "a" }, 0)).message).toContain("no refresh token");
   });
 });
 
@@ -282,39 +287,56 @@ describe("refresh timing", () => {
 describe("the network calls", () => {
   test("an exchange posts the form to the token endpoint and returns the pair", async () => {
     const calls: { url: string; form: string }[] = [];
-    const tokens = await exchangeCode(config, "c1", 5, async (url, form) => {
+    const answer = await exchangeCode(config, "c1", 5, async (url, form) => {
       calls.push({ url, form });
-      return tokenResponse();
+      return { kind: "body", body: tokenResponse() };
     });
     expect(calls[0]?.url).toBe("https://api.linear.app/oauth/token");
     expect(new URLSearchParams(calls[0]?.form).get("grant_type")).toBe("authorization_code");
-    expect(tokens.accessToken).toBe("at-1");
+    expect(tokens(answer).accessToken).toBe("at-1");
   });
 
   test("a refresh posts the refresh grant and returns the new pair", async () => {
     let seen = "";
-    const tokens = await refreshTokens(config, "rt-1", 5, async (_url, form) => {
+    const answer = await refreshTokens(config, "rt-1", 5, async (_url, form) => {
       seen = form;
-      return tokenResponse({ access_token: "at-2", refresh_token: "rt-2" });
+      return { kind: "body", body: tokenResponse({ access_token: "at-2", refresh_token: "rt-2" }) };
     });
     expect(new URLSearchParams(seen).get("grant_type")).toBe("refresh_token");
-    expect(tokens.refreshToken).toBe("rt-2");
+    expect(tokens(answer).refreshToken).toBe("rt-2");
+  });
+
+  test("a transport refusal is passed through, so a caller sees the transport's reason", async () => {
+    const answer = await refreshTokens(config, "rt-1", 5, async () => ({
+      kind: "unreachable",
+      message: "offline",
+    }));
+    expect(refusal(answer)).toEqual({ kind: "unreachable", message: "offline" });
   });
 });
 
-function caught(run: () => unknown): AdapterError {
-  try {
-    run();
-  } catch (error) {
-    if (error instanceof AdapterError) return error;
-    throw error;
+/** The tokens a call read, or a failure naming the refusal. */
+function tokens(answer: TokenOutcome): LinearTokens {
+  if (answer.kind !== "tokens") throw new Error(`expected tokens: `);
+  return answer.tokens;
+}
+
+/** The refusal a call returned, or a failure naming what it returned instead. */
+function refusal(
+  answer: OAuthRefused | CallbackOutcome | TokenOutcome | ViewerOutcome,
+): OAuthRefused {
+  if (answer.kind === "callback" || answer.kind === "tokens" || answer.kind === "viewer") {
+    throw new Error(`expected a refusal, got `);
   }
-  throw new Error("expected a refusal");
+  return answer;
 }
 
 describe("the viewer lookup", () => {
   test("reads the id Linear returns", () => {
-    expect(parseViewer({ data: { viewer: { id: "app-1" } } })).toEqual({ id: "app-1" });
+    expect(parseViewer({ data: { viewer: { id: "app-1" } } })).toEqual({
+      kind: "viewer",
+      viewer: { id: "app-1" },
+    });
   });
 
   test("an empty or missing id reads as no viewer", () => {
@@ -324,18 +346,18 @@ describe("the viewer lookup", () => {
       { data: { viewer: {} } },
       { data: { viewer: { id: "" } } },
     ]) {
-      expect(parseViewer(body)).toBeUndefined();
+      expect(parseViewer(body).kind).toBe("bad-response");
     }
-    expect(parseViewer(undefined)).toBeUndefined();
+    expect(parseViewer(undefined).kind).toBe("bad-response");
   });
 
   test("a call carries the token and the query", async () => {
     const seen: { url: string; headers: Record<string, string>; body: string }[] = [];
     const viewer = await fetchViewer("at-9", async (url, init) => {
       seen.push({ url, headers: init.headers, body: init.body });
-      return { data: { viewer: { id: "app-9" } } };
+      return { kind: "body", body: { data: { viewer: { id: "app-9" } } } };
     });
-    expect(viewer).toEqual({ id: "app-9" });
+    expect(viewer).toEqual({ kind: "viewer", viewer: { id: "app-9" } });
     expect(seen[0]?.url).toBe("https://api.linear.app/graphql");
     expect(seen[0]?.headers["authorization"]).toBe("Bearer at-9");
     expect(seen[0]?.body).toContain("viewer");
@@ -343,10 +365,8 @@ describe("the viewer lookup", () => {
 
   test("a failed call reads as no viewer, so a stored token is not called broken", async () => {
     expect(
-      await fetchViewer("at", async () => {
-        throw new Error("offline");
-      }),
-    ).toBeUndefined();
+      await fetchViewer("at", async () => ({ kind: "unreachable", message: "offline" })),
+    ).toEqual({ kind: "unreachable", message: "offline" });
   });
 });
 
@@ -359,7 +379,7 @@ describe("the viewer request's shape", () => {
         type: init.headers["content-type"] ?? "",
         query: JSON.parse(init.body).query,
       });
-      return { data: { viewer: { id: "a" } } };
+      return { kind: "body", body: { data: { viewer: { id: "a" } } } };
     });
     expect(seen).toEqual([
       { method: "POST", type: "application/json", query: "{ viewer { id name } }" },
@@ -368,7 +388,91 @@ describe("the viewer request's shape", () => {
 
   test("a response with no data reads as no viewer", async () => {
     expect(
-      await fetchViewer("at-1", async () => ({ errors: [{ message: "bad" }] })),
-    ).toBeUndefined();
+      await fetchViewer("at-1", async () => ({
+        kind: "body",
+        body: { errors: [{ message: "bad" }] },
+      })),
+    ).toEqual({ kind: "bad-response", message: "linear answered without a viewer" });
+  });
+});
+
+describe("a token answer that names its own error", () => {
+  test("an HTTP error with a JSON error body is passed through, so the caller quotes Linear", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+      },
+    });
+    try {
+      const answer = await postForm(`http://127.0.0.1:${server.port}/token`, "x=1");
+      expect(answer).toEqual({ kind: "body", body: { error: "invalid_grant" } });
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("a body that is the wrong shape for tokens", () => {
+  test("a missing access token names the field", () => {
+    expect(tokensOf({ refresh_token: "r" }, 0)).toEqual({
+      kind: "bad-response",
+      message: "linear token response has no access token",
+    });
+  });
+
+  test("a missing refresh token names the field, because the pair cannot be renewed", () => {
+    expect(tokensOf({ access_token: "a" }, 0)).toEqual({
+      kind: "bad-response",
+      message: "linear token response has no refresh token",
+    });
+  });
+});
+
+describe("an HTTP status at the edge of the success range", () => {
+  test("a 300 is a failure, because Linear only redirects on a mistake", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response(JSON.stringify({ access_token: "a", refresh_token: "r" }), {
+          status: 300,
+        });
+      },
+    });
+    try {
+      expect(await postForm(`http://127.0.0.1:${server.port}/token`, "x=1")).toEqual({
+        kind: "bad-response",
+        message: "linear token endpoint answered 300",
+      });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a 200 is a success even with no JSON error field", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response(JSON.stringify({ access_token: "a" }), { status: 200 });
+      },
+    });
+    try {
+      expect(await postForm(`http://127.0.0.1:${server.port}/token`, "x=1")).toEqual({
+        kind: "body",
+        body: { access_token: "a" },
+      });
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("an exchange that the transport refused", () => {
+  test("the transport's refusal is passed through, so the caller sees its reason", async () => {
+    const answer = await exchangeCode(config, "c1", 0, async () => ({
+      kind: "unreachable",
+      message: "offline",
+    }));
+    expect(answer).toEqual({ kind: "unreachable", message: "offline" });
   });
 });

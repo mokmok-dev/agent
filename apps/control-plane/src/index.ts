@@ -5,6 +5,7 @@ import { objectStorage } from "./platform-storage.ts";
 import { SessionObject } from "./session-do.ts";
 import { ThreadIndexObject } from "./thread-index-do.ts";
 import { oauthConfigOf } from "./routes.ts";
+import type { AccessToken, Completed } from "./linear-oauth-do.ts";
 import { fetch as handle, type Env } from "./worker.ts";
 
 /**
@@ -96,11 +97,11 @@ export class LinearOAuthDurableObject extends DurableObject<Env> {
     return this.#object.credential();
   }
 
-  complete(params: Record<string, string>, now: number): Promise<LinearCredential> {
+  complete(params: Record<string, string>, now: number): Promise<Completed> {
     return this.#object.complete(params, now);
   }
 
-  accessToken(now: number): Promise<string | undefined> {
+  accessToken(now: number): Promise<AccessToken | undefined> {
     return this.#object.accessToken(now);
   }
 

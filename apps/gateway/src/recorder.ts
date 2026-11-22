@@ -7,7 +7,8 @@ export class AgentRecorder {
   inbound: Inbound | undefined;
 
   send(text: string): void {
-    this.sent.push(decodeMessage(text));
+    const decoded = decodeMessage(text);
+    if (decoded.kind === "read") this.sent.push(decoded.message);
   }
 
   outbound(): Extract<RpcMessage, { kind: "request" | "notification" }>[] {

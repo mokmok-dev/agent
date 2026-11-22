@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { adaptLinear, parseLinearEvent, verifyLinear } from "./linear.ts";
-import { AdapterError, type RawRequest } from "./events.ts";
+import type { AdapterResult, RawRequest } from "./events.ts";
+import type { Signature, Verified } from "./signature.ts";
 import { hmacHex } from "./signature.ts";
 
 const config = { webhookSecret: "linear-secret" };
@@ -9,19 +10,26 @@ async function signed(body: unknown): Promise<RawRequest> {
   const text = JSON.stringify(body);
   return {
     method: "POST",
-    headers: { "linear-signature": await hmacHex(config.webhookSecret, text, "sha256") },
+    headers: { "linear-signature": signedHex(await hmacHex(config.webhookSecret, text, "sha256")) },
     body: text,
   };
 }
 
-async function rejection(promise: Promise<unknown>): Promise<AdapterError> {
-  try {
-    await promise;
-  } catch (error) {
-    expect(error).toBeInstanceOf(AdapterError);
-    return error as AdapterError;
-  }
-  throw new Error("expected an AdapterError");
+/** The hex a signature produced, or a failure naming the refusal. */
+function signedHex(result: Signature): string {
+  if (result.kind !== "signed") throw new Error("expected a signature");
+  return result.hex;
+}
+
+/** The status a verification refusal answers with, or 200 when it accepted. */
+function verificationStatus(answer: Verified): number {
+  return answer.kind === "verified" ? 200 : 401;
+}
+
+/** The refusal an adapter returned, or a failure naming what it returned instead. */
+function refused(result: AdapterResult): { status: number; message: string } {
+  if (result.kind !== "refused") throw new Error("expected a refusal");
+  return { status: result.status, message: result.message };
 }
 
 const sessionBody = (overrides: Record<string, unknown> = {}) => ({
@@ -43,19 +51,20 @@ describe("verifyLinear", () => {
 
   test("rejects a missing signature header", async () => {
     const request = await signed(sessionBody());
-    expect((await rejection(verifyLinear({ ...request, headers: {} }, config))).status).toBe(401);
+    expect(verificationStatus(await verifyLinear({ ...request, headers: {} }, config))).toBe(401);
   });
 
   test("rejects a tampered body", async () => {
     const request = await signed(sessionBody());
     const tampered = { ...request, body: request.body.replace("add retries", "remove retries") };
-    expect((await rejection(verifyLinear(tampered, config))).status).toBe(401);
+    expect(verificationStatus(await verifyLinear(tampered, config))).toBe(401);
   });
 
   test("rejects a signature from another secret", async () => {
     expect(
-      (await rejection(verifyLinear(await signed(sessionBody()), { webhookSecret: "other" })))
-        .status,
+      verificationStatus(
+        await verifyLinear(await signed(sessionBody()), { webhookSecret: "other" }),
+      ),
     ).toBe(401);
   });
 });
@@ -123,10 +132,14 @@ describe("parseLinearEvent", () => {
   });
 
   test("rejects a payload that is not an object or has no session", () => {
-    expect(() => parseLinearEvent(null)).toThrow(AdapterError);
-    expect(() => parseLinearEvent([])).toThrow(AdapterError);
-    expect(() => parseLinearEvent({ type: "AgentSessionEvent" })).toThrow(AdapterError);
-    expect(() => parseLinearEvent(sessionBody({ agentSession: {} }))).toThrow(AdapterError);
+    for (const body of [
+      null,
+      [],
+      { type: "AgentSessionEvent" },
+      sessionBody({ agentSession: {} }),
+    ]) {
+      expect(refused(parseLinearEvent(body)).status).toBe(400);
+    }
   });
 
   test("a prompted event has no issue, so the session is the thread", () => {
@@ -171,16 +184,18 @@ describe("adaptLinear", () => {
 
   test("a signature failure is a 401 before parsing", async () => {
     const request = { ...(await signed(sessionBody())), body: "nope" };
-    expect((await rejection(adaptLinear(request, config))).status).toBe(401);
+    expect(refused(await adaptLinear(request, config)).status).toBe(401);
   });
 
   test("a signed body that is not JSON is a 400", async () => {
     const text = "nope";
     const request = {
       method: "POST",
-      headers: { "linear-signature": await hmacHex(config.webhookSecret, text, "sha256") },
+      headers: {
+        "linear-signature": signedHex(await hmacHex(config.webhookSecret, text, "sha256")),
+      },
       body: text,
     };
-    expect((await rejection(adaptLinear(request, config))).status).toBe(400);
+    expect(refused(await adaptLinear(request, config)).status).toBe(400);
   });
 });

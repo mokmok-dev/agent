@@ -1,14 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { adaptSlack, parseSlackEvent, SLACK_MAX_SKEW_SECONDS, verifySlack } from "./slack.ts";
 import { stripMention } from "./slack-schema.ts";
-import { AdapterError, type RawRequest } from "./events.ts";
+import type { AdapterResult, RawRequest } from "./events.ts";
+import type { Signature, Verified } from "./signature.ts";
 import { signSha256 } from "./signature.ts";
 
 const config = { signingSecret: "shhh", botUserId: "UBOT" };
 
 async function signedRequest(body: unknown, at = 1_700_000_000): Promise<RawRequest> {
   const text = JSON.stringify(body);
-  const signature = `v0=${await signSha256(config.signingSecret, `v0:${at}:${text}`)}`;
+  const signature = `v0=${signedHex(await signSha256(config.signingSecret, `v0:${at}:${text}`))}`;
   return {
     method: "POST",
     headers: { "x-slack-request-timestamp": String(at), "x-slack-signature": signature },
@@ -16,14 +17,21 @@ async function signedRequest(body: unknown, at = 1_700_000_000): Promise<RawRequ
   };
 }
 
-async function rejection(promise: Promise<unknown>): Promise<AdapterError> {
-  try {
-    await promise;
-  } catch (error) {
-    expect(error).toBeInstanceOf(AdapterError);
-    return error as AdapterError;
-  }
-  throw new Error("expected an AdapterError");
+/** The hex a signature produced, or a failure naming the refusal. */
+function signedHex(result: Signature): string {
+  if (result.kind !== "signed") throw new Error("expected a signature");
+  return result.hex;
+}
+
+/** The status a verification refusal answers with, or 200 when it accepted. */
+function verificationStatus(answer: Verified): number {
+  return answer.kind === "verified" ? 200 : 401;
+}
+
+/** The refusal an adapter returned, or a failure naming what it returned instead. */
+function refused(result: AdapterResult): { status: number; message: string } {
+  if (result.kind !== "refused") throw new Error("expected a refusal");
+  return { status: result.status, message: result.message };
 }
 
 const mentionBody = (overrides: Record<string, unknown> = {}) => ({
@@ -63,24 +71,22 @@ describe("verifySlack", () => {
   test("rejects a request one second past the window", async () => {
     const now = 1_700_000_000;
     const stale = await signedRequest(mentionBody(), now - SLACK_MAX_SKEW_SECONDS - 1);
-    expect((await rejection(verifySlack(stale, config, now))).status).toBe(401);
+    expect(verificationStatus(await verifySlack(stale, config, now))).toBe(401);
   });
 
   test("rejects a missing timestamp or signature", async () => {
     const request = await signedRequest(mentionBody());
     expect(
-      (await rejection(verifySlack({ ...request, headers: {} }, config, 1_700_000_000))).status,
+      verificationStatus(await verifySlack({ ...request, headers: {} }, config, 1_700_000_000)),
     ).toBe(401);
     expect(
-      (
-        await rejection(
-          verifySlack(
-            { ...request, headers: { "x-slack-request-timestamp": "1700000000" } },
-            config,
-            1_700_000_000,
-          ),
-        )
-      ).status,
+      verificationStatus(
+        await verifySlack(
+          { ...request, headers: { "x-slack-request-timestamp": "1700000000" } },
+          config,
+          1_700_000_000,
+        ),
+      ),
     ).toBe(401);
   });
 
@@ -90,7 +96,7 @@ describe("verifySlack", () => {
       ...request,
       headers: { ...request.headers, "x-slack-request-timestamp": "soon" },
     };
-    expect((await rejection(verifySlack(broken, config, 1_700_000_000))).status).toBe(401);
+    expect(verificationStatus(await verifySlack(broken, config, 1_700_000_000))).toBe(401);
   });
 
   test("rejects a tampered body", async () => {
@@ -99,14 +105,15 @@ describe("verifySlack", () => {
       ...request,
       body: request.body.replace("fix the build", "delete everything"),
     };
-    expect((await rejection(verifySlack(tampered, config, 1_700_000_000))).status).toBe(401);
+    expect(verificationStatus(await verifySlack(tampered, config, 1_700_000_000))).toBe(401);
   });
 
   test("rejects a signature made with another secret", async () => {
     const request = await signedRequest(mentionBody());
     expect(
-      (await rejection(verifySlack(request, { ...config, signingSecret: "other" }, 1_700_000_000)))
-        .status,
+      verificationStatus(
+        await verifySlack(request, { ...config, signingSecret: "other" }, 1_700_000_000),
+      ),
     ).toBe(401);
   });
 });
@@ -246,16 +253,14 @@ describe("parseSlackEvent", () => {
       { type: "event_callback" },
       { type: "event_callback", event: {} },
     ]) {
-      expect(() => parseSlackEvent(body, config)).toThrow(AdapterError);
+      expect(refused(parseSlackEvent(body, config)).status).toBe(400);
     }
   });
 
   test("rejects an event with no team, channel, or timestamp", () => {
-    expect(() => parseSlackEvent(mentionBody({ team: undefined }), config)).toThrow(AdapterError);
-    expect(() => parseSlackEvent(mentionBody({ channel: undefined }), config)).toThrow(
-      AdapterError,
-    );
-    expect(() => parseSlackEvent(mentionBody({ ts: undefined }), config)).toThrow(AdapterError);
+    for (const override of [{ team: undefined }, { channel: undefined }, { ts: undefined }]) {
+      expect(refused(parseSlackEvent(mentionBody(override), config)).status).toBe(400);
+    }
   });
 
   test("a non-string text becomes an empty prompt rather than a crash", () => {
@@ -290,26 +295,26 @@ describe("adaptSlack", () => {
   test("a bad signature fails before the body is parsed", async () => {
     const now = 1_700_000_000;
     const request = { ...(await signedRequest(mentionBody(), now)), body: "not json" };
-    expect((await rejection(adaptSlack(request, config, now))).status).toBe(401);
+    expect(refused(await adaptSlack(request, config, now)).status).toBe(401);
   });
 
   test("a signed body that is not JSON is a 400", async () => {
     const now = 1_700_000_000;
     const text = "not json";
-    const signature = `v0=${await signSha256(config.signingSecret, `v0:${now}:${text}`)}`;
+    const signature = `v0=${signedHex(await signSha256(config.signingSecret, `v0:${now}:${text}`))}`;
     const request = {
       method: "POST",
       headers: { "x-slack-request-timestamp": String(now), "x-slack-signature": signature },
       body: text,
     };
-    expect((await rejection(adaptSlack(request, config, now))).status).toBe(400);
+    expect(refused(await adaptSlack(request, config, now)).status).toBe(400);
   });
 });
 
 describe("more slack edges", () => {
   test("a thread reply with no timestamp is a 400", () => {
     const body = { event: { type: "message", team: "T", channel: "C", thread_ts: "1", user: "U" } };
-    expect(failureText(() => parseSlackEvent(body, config))).toBe("Slack message has no timestamp");
+    expect(failureText(parseSlackEvent(body, config))).toBe("Slack message has no timestamp");
   });
 
   test("a cancel without an event id falls back to the thread", () => {
@@ -351,12 +356,7 @@ describe("more slack edges", () => {
   });
 });
 
-function failureText(run: () => unknown): string {
-  try {
-    run();
-  } catch (error) {
-    expect(error).toBeInstanceOf(AdapterError);
-    return (error as AdapterError).message;
-  }
-  throw new Error("expected an AdapterError");
+/** The message a refusal carries, so a test asserts on the diagnostic. */
+function failureText(result: AdapterResult): string {
+  return refused(result).message;
 }

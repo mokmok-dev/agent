@@ -7,7 +7,6 @@ import {
   optional,
   str,
   tagged,
-  type RpcMessage,
 } from "@agent/protocol";
 import type { GatewayEvent } from "./bridge.ts";
 
@@ -68,19 +67,17 @@ export const decodeEdgeFrame = tagged<EdgeFrame>("type", {
       toolCallId: str,
       optionId: optional(lenient(str)),
     })(value);
-    return { ...frame, optionId: frame.optionId ?? null };
+    if (frame.kind === "rejected") return frame;
+    return { kind: "decoded", value: { ...frame.value, optionId: frame.value.optionId ?? null } };
   },
 });
 
 /** A control-plane frame as a command. A malformed frame is `undefined`. */
 export function parseEdgeFrame(text: string): EdgeFrame | undefined {
-  let message: RpcMessage;
-  try {
-    message = decodeMessage(text);
-  } catch {
-    return undefined;
-  }
-  return lenient(decodeEdgeFrame)((message as { params?: unknown }).params);
+  const message = decodeMessage(text);
+  if (message.kind === "rejected") return undefined;
+  const decoded = lenient(decodeEdgeFrame)((message.message as { params?: unknown }).params);
+  return decoded.kind === "decoded" ? decoded.value : undefined;
 }
 
 export function encodeEvent(event: GatewayEvent): string {

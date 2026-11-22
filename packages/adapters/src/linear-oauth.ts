@@ -1,5 +1,20 @@
-import { AdapterError } from "./events.ts";
-import { buffer, toHex } from "./bytes.ts";
+/**
+ * Why a Linear OAuth step did not complete. `rejected` is a callback or a
+ * configuration this module will not accept; `unreachable` is a transport that
+ * failed; `bad-response` is an answer it cannot use.
+ */
+export type OAuthRefused =
+  | { kind: "rejected"; status: number; message: string }
+  | { kind: "unreachable"; message: string }
+  | { kind: "bad-response"; message: string };
+
+export type TokenOutcome = { kind: "tokens"; tokens: LinearTokens } | OAuthRefused;
+
+export type CallbackOutcome = { kind: "callback"; params: CallbackParams } | OAuthRefused;
+
+export type ViewerOutcome = { kind: "viewer"; viewer: Viewer } | OAuthRefused;
+
+export type Revoked = { kind: "revoked"; revoked: boolean } | OAuthRefused;
 
 /**
  * Linear's OAuth 2.0 authorization-code flow. Three rules matter here and each
@@ -10,6 +25,9 @@ import { buffer, toHex } from "./bytes.ts";
  * - The token request is a form body, which is what Linear reads.
  * - An access token lives 24 hours and a refresh token 30 days, so the stored
  *   credentials keep `expires_in` and are refreshed before use.
+ *
+ * Every function returns a `Result`. The network transport is the only place a
+ * throw can start, so it is the only place that catches one.
  */
 
 export const AUTHORIZE_URL = "https://linear.app/oauth/authorize";
@@ -71,7 +89,7 @@ export function authorizeUrl(config: LinearOAuthConfig, state: string): string {
 export function newState(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
-  return toHex(buffer(bytes));
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 export type CallbackParams = { code: string; state: string };
@@ -95,19 +113,16 @@ export function callbackOf(query: URLSearchParams): Record<string, string> {
 export function readCallback(
   params: Record<string, string>,
   expectedState: string,
-): CallbackParams {
+): CallbackOutcome {
+  const rejected = (message: string): OAuthRefused => ({ kind: "rejected", status: 400, message });
   const error = params["error"];
-  if (error !== undefined) {
-    throw new AdapterError(400, `linear refused the authorization: ${error}`);
-  }
+  if (error !== undefined) return rejected(`linear refused the authorization: ${error}`);
   const code = params["code"];
-  if (code === undefined || code === "") throw new AdapterError(400, "linear callback has no code");
+  if (code === undefined || code === "") return rejected("linear callback has no code");
   const state = params["state"];
-  if (state === undefined || state === "") {
-    throw new AdapterError(400, "linear callback has no state");
-  }
-  if (state !== expectedState) throw new AdapterError(400, "linear callback state does not match");
-  return { code, state };
+  if (state === undefined || state === "") return rejected("linear callback has no state");
+  if (state !== expectedState) return rejected("linear callback state does not match");
+  return { kind: "callback", params: { code, state } };
 }
 
 /** The form body a token request needs. Linear reads `application/x-www-form-urlencoded`. */
@@ -150,25 +165,28 @@ export type TokenResponse = {
  * error. A response without a refresh token cannot be renewed, so it is refused
  * rather than stored as a credential that dies in a day.
  */
-export function tokensOf(response: TokenResponse, now: number): LinearTokens {
+export function tokensOf(response: TokenResponse, now: number): TokenOutcome {
   if (response.error !== undefined) {
     const detail = response.error_description ?? response.error;
-    throw new AdapterError(502, `linear token request failed: ${detail}`);
+    return { kind: "bad-response", message: `linear token request failed: ${detail}` };
   }
   const accessToken = response.access_token;
   const refreshToken = response.refresh_token;
   if (accessToken === undefined) {
-    throw new AdapterError(502, "linear token response has no access token");
+    return { kind: "bad-response", message: "linear token response has no access token" };
   }
   if (refreshToken === undefined) {
-    throw new AdapterError(502, "linear token response has no refresh token");
+    return { kind: "bad-response", message: "linear token response has no refresh token" };
   }
   return {
-    accessToken,
-    refreshToken,
-    expiresIn: response.expires_in ?? 86_400,
-    issuedAt: now,
-    scope: scopeOf(response.scope),
+    kind: "tokens",
+    tokens: {
+      accessToken,
+      refreshToken,
+      expiresIn: response.expires_in ?? 86_400,
+      issuedAt: now,
+      scope: scopeOf(response.scope),
+    },
   };
 }
 
@@ -193,7 +211,10 @@ export function bearer(tokens: LinearTokens): Record<string, string> {
   return { authorization: `Bearer ${tokens.accessToken}` };
 }
 
-export type TokenRequest = (url: string, form: string) => Promise<TokenResponse>;
+export type TokenRequest = (url: string, form: string) => Promise<TokenBody>;
+
+/** A token endpoint's answer, before it is read as tokens. */
+export type TokenBody = { kind: "body"; body: TokenResponse } | OAuthRefused;
 
 /** Trade an authorization code for tokens over the network. */
 export async function exchangeCode(
@@ -201,8 +222,9 @@ export async function exchangeCode(
   code: string,
   now: number,
   request: TokenRequest = postForm,
-): Promise<LinearTokens> {
-  return tokensOf(await request(TOKEN_URL, exchangeForm(config, code)), now);
+): Promise<TokenOutcome> {
+  const answer = await request(TOKEN_URL, exchangeForm(config, code));
+  return answer.kind === "body" ? tokensOf(answer.body, now) : answer;
 }
 
 /** Refresh a token pair over the network. */
@@ -211,49 +233,60 @@ export async function refreshTokens(
   refreshToken: string,
   now: number,
   request: TokenRequest = postForm,
-): Promise<LinearTokens> {
-  return tokensOf(await request(TOKEN_URL, refreshForm(config, refreshToken)), now);
+): Promise<TokenOutcome> {
+  const answer = await request(TOKEN_URL, refreshForm(config, refreshToken));
+  return answer.kind === "body" ? tokensOf(answer.body, now) : answer;
 }
 
 /**
  * The default transport. Linear answers a JSON body, and a non-JSON body or a
  * network failure is a refusal rather than an exception escaping the handler.
+ * This is the one place in the adapters that catches a throw.
  */
-export async function postForm(url: string, form: string): Promise<TokenResponse> {
-  let response: Response;
+export async function postForm(url: string, form: string): Promise<TokenBody> {
+  const text = await postText(url, form);
+  return text.kind === "text" ? parseTokenBody(text.text, text.status) : text;
+}
+
+type PostedText = { kind: "text"; text: string; status: number } | OAuthRefused;
+
+async function postText(url: string, form: string): Promise<PostedText> {
   try {
-    response = await fetch(url, {
+    const response = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: form,
     });
+    return { kind: "text", text: await response.text(), status: response.status };
   } catch (error) {
-    throw new AdapterError(502, `linear token endpoint unreachable: ${String(error)}`);
+    return { kind: "unreachable", message: `linear token endpoint unreachable: ${String(error)}` };
   }
-  const text = await response.text();
+}
+
+function parseTokenBody(text: string, status: number): TokenBody {
   let body: TokenResponse;
   try {
     body = JSON.parse(text) as TokenResponse;
   } catch {
-    throw new AdapterError(502, `linear token endpoint answered ${response.status}`);
+    return { kind: "bad-response", message: `linear token endpoint answered ${status}` };
   }
-  if (!response.ok && body.error === undefined) {
-    throw new AdapterError(502, `linear token endpoint answered ${response.status}`);
+  if (status < 200 || status >= 300) {
+    return body.error === undefined
+      ? { kind: "bad-response", message: `linear token endpoint answered ${status}` }
+      : { kind: "body", body };
   }
-  return body;
+  return { kind: "body", body };
 }
 
 /** Revoke a token, best effort: a failure is reported, not thrown. */
 export async function revokeToken(
   token: string,
   request: TokenRequest = postForm,
-): Promise<boolean> {
-  try {
-    const body = await request(REVOKE_URL, tokenForm({ token }));
-    return body.error === undefined;
-  } catch {
-    return false;
-  }
+): Promise<Revoked> {
+  const answer = await request(REVOKE_URL, tokenForm({ token }));
+  return answer.kind === "body"
+    ? { kind: "revoked", revoked: answer.body.error === undefined }
+    : answer;
 }
 
 export const GRAPHQL_URL = "https://api.linear.app/graphql";
@@ -262,7 +295,10 @@ export const GRAPHQL_URL = "https://api.linear.app/graphql";
 export type GraphqlRequest = (
   url: string,
   init: { method: string; headers: Record<string, string>; body: string },
-) => Promise<unknown>;
+) => Promise<GraphqlBody>;
+
+/** A GraphQL answer, before it is read as a value. */
+export type GraphqlBody = { kind: "body"; body: unknown } | OAuthRefused;
 
 export type Viewer = { id: string };
 
@@ -270,38 +306,45 @@ export type Viewer = { id: string };
  * The app's id in the workspace that authorized it. Linear documents this as the
  * value to store with the token, because it is unique per workspace.
  */
-export function parseViewer(body: unknown): Viewer | undefined {
+export function parseViewer(body: unknown): ViewerOutcome {
   const viewer = (body as { data?: { viewer?: { id?: unknown } } } | undefined)?.data?.viewer;
   const id = viewer?.id;
-  return typeof id === "string" && id !== "" ? { id } : undefined;
+  return typeof id === "string" && id !== ""
+    ? { kind: "viewer", viewer: { id } }
+    : { kind: "bad-response", message: "linear answered without a viewer" };
 }
 
 /**
- * Ask Linear which app user the token belongs to. A failure returns
- * `undefined`, because a login that already stored a usable token should not be
- * reported as failed for want of an id.
+ * Ask Linear which app user the token belongs to. A failure is a refusal the
+ * caller may ignore, because a login that already stored a usable token should
+ * not be reported as failed for want of an id.
  */
 export async function fetchViewer(
   accessToken: string,
   request: GraphqlRequest = postGraphql,
-): Promise<Viewer | undefined> {
-  try {
-    const body = await request(GRAPHQL_URL, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ query: "{ viewer { id name } }" }),
-    });
-    return parseViewer(body);
-  } catch {
-    return undefined;
-  }
+): Promise<ViewerOutcome> {
+  const answer = await request(GRAPHQL_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify({ query: "{ viewer { id name } }" }),
+  });
+  return answer.kind === "body" ? parseViewer(answer.body) : answer;
 }
 
-/** The default GraphQL transport. */
+/** The default GraphQL transport. A network failure or a non-JSON body is a refusal. */
 export async function postGraphql(
   url: string,
   init: { method: string; headers: Record<string, string>; body: string },
-): Promise<unknown> {
-  const response = await fetch(url, init);
-  return response.json();
+): Promise<GraphqlBody> {
+  try {
+    const response = await fetch(url, init);
+    const text = await response.text();
+    try {
+      return { kind: "body", body: JSON.parse(text) as unknown };
+    } catch {
+      return { kind: "bad-response", message: `linear graphql answered ${response.status}` };
+    }
+  } catch (error) {
+    return { kind: "unreachable", message: `linear graphql unreachable: ${String(error)}` };
+  }
 }

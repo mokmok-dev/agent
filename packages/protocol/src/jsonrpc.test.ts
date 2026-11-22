@@ -9,6 +9,9 @@ import {
   parseMessage,
   ProtocolError,
   RpcErrorCode,
+  type MessageRejected,
+  type MessageResult,
+  type RpcMessage,
 } from "./jsonrpc.ts";
 
 const requestId = fc.oneof(
@@ -17,14 +20,22 @@ const requestId = fc.oneof(
 );
 const method = fc.string({ minLength: 1 });
 
-function thrown(fn: () => unknown): ProtocolError {
-  try {
-    fn();
-  } catch (error) {
-    expect(error).toBeInstanceOf(ProtocolError);
-    return error as ProtocolError;
-  }
-  throw new Error("expected a ProtocolError");
+/** The message a decode produced, or a failure naming the refusal. */
+function message(text: string): RpcMessage {
+  return read(decodeMessage(text));
+}
+
+function read(result: MessageResult): RpcMessage {
+  if (result.kind !== "read") throw new Error("expected a message");
+  expect(result.kind).toBe("read");
+  return result.message;
+}
+
+/** The refusal a decode produced, or a failure naming what it read instead. */
+function refusal(result: MessageResult): MessageRejected {
+  if (result.kind !== "rejected") throw new Error("expected a refusal");
+  expect(result.kind).toBe("rejected");
+  return result;
 }
 
 const asJson = (value: unknown): string => JSON.stringify(value) ?? "null";
@@ -33,14 +44,14 @@ describe("codec round trip", () => {
   test("requests and notifications carry their params unchanged", () => {
     fc.assert(
       fc.property(requestId, method, fc.jsonValue(), (id, name, params) => {
-        const request = decodeMessage(encodeRequest(id, name, params));
+        const request = message(encodeRequest(id, name, params));
         expect(request.kind).toBe("request");
         if (request.kind !== "request") return;
         expect(request.id).toBe(id);
         expect(request.method).toBe(name);
         expect(asJson(request.params)).toBe(asJson(params));
 
-        const notification = decodeMessage(encodeNotification(name, params));
+        const notification = message(encodeNotification(name, params));
         expect(notification.kind).toBe("notification");
         if (notification.kind !== "notification") return;
         expect(notification.method).toBe(name);
@@ -52,7 +63,7 @@ describe("codec round trip", () => {
   test("a result carries its payload unchanged", () => {
     fc.assert(
       fc.property(requestId, fc.jsonValue(), (id, payload) => {
-        const decoded = decodeMessage(encodeResult(id, payload));
+        const decoded = message(encodeResult(id, payload));
         expect(decoded.kind).toBe("result");
         if (decoded.kind !== "result") return;
         expect(decoded.id).toBe(id);
@@ -68,15 +79,13 @@ describe("codec round trip", () => {
         fc.integer(),
         fc.string({ minLength: 1 }),
         fc.jsonValue(),
-        (id, code, message, data) => {
-          const decoded = decodeMessage(
-            encodeErrorResponse(id, new ProtocolError(code, message, data)),
-          );
+        (id, code, text, data) => {
+          const decoded = message(encodeErrorResponse(id, new ProtocolError(code, text, data)));
           expect(decoded.kind).toBe("error");
           if (decoded.kind !== "error") return;
           expect(decoded.id).toBe(id);
           expect(decoded.error.code).toBe(code);
-          expect(decoded.error.message).toBe(message);
+          expect(decoded.error.message).toBe(text);
           expect(asJson(decoded.error.data)).toBe(asJson(data));
         },
       ),
@@ -84,7 +93,7 @@ describe("codec round trip", () => {
   });
 
   test("a ProtocolError without data omits the key", () => {
-    const decoded = decodeMessage(encodeErrorResponse(1, new ProtocolError(-1, "nope")));
+    const decoded = message(encodeErrorResponse(1, new ProtocolError(-1, "nope")));
     expect(decoded).toEqual({ kind: "error", id: 1, error: { code: -1, message: "nope" } });
     if (decoded.kind !== "error") return;
     expect(Object.keys(decoded.error)).toEqual(["code", "message"]);
@@ -97,7 +106,7 @@ describe("codec round trip", () => {
   });
 
   test("a record with a numeric code and a non-string message is an internal error", () => {
-    const decoded = decodeMessage(encodeErrorResponse(1, { code: 7, message: 42 }));
+    const decoded = message(encodeErrorResponse(1, { code: 7, message: 42 }));
     expect(decoded).toEqual({
       kind: "error",
       id: 1,
@@ -106,9 +115,7 @@ describe("codec round trip", () => {
   });
 
   test("a plain error object is passed through", () => {
-    const decoded = decodeMessage(
-      encodeErrorResponse("a", { code: 7, message: "bad", data: { x: 1 } }),
-    );
+    const decoded = message(encodeErrorResponse("a", { code: 7, message: "bad", data: { x: 1 } }));
     expect(decoded).toEqual({
       kind: "error",
       id: "a",
@@ -117,17 +124,17 @@ describe("codec round trip", () => {
   });
 
   test("a plain error object without data omits the key", () => {
-    const decoded = decodeMessage(encodeErrorResponse("a", { code: 7, message: "bad" }));
+    const decoded = message(encodeErrorResponse("a", { code: 7, message: "bad" }));
     expect(decoded).toEqual({ kind: "error", id: "a", error: { code: 7, message: "bad" } });
   });
 
   test("an Error becomes an internal error", () => {
-    const decoded = decodeMessage(encodeErrorResponse(3, new Error("boom")));
+    const decoded = message(encodeErrorResponse(3, new Error("boom")));
     expect(decoded).toEqual({ kind: "error", id: 3, error: { code: -32603, message: "boom" } });
   });
 
   test("a non-Error value becomes an internal error with its string form", () => {
-    const decoded = decodeMessage(encodeErrorResponse(3, "plain string"));
+    const decoded = message(encodeErrorResponse(3, "plain string"));
     expect(decoded).toEqual({
       kind: "error",
       id: 3,
@@ -136,7 +143,7 @@ describe("codec round trip", () => {
   });
 
   test("null params travel as null", () => {
-    expect(decodeMessage(encodeRequest(1, "ping", null))).toEqual({
+    expect(message(encodeRequest(1, "ping", null))).toEqual({
       kind: "request",
       id: 1,
       method: "ping",
@@ -145,7 +152,7 @@ describe("codec round trip", () => {
   });
 
   test("an undefined result travels as null", () => {
-    expect(decodeMessage(encodeResult(1, undefined))).toEqual({
+    expect(message(encodeResult(1, undefined))).toEqual({
       kind: "result",
       id: 1,
       result: null,
@@ -272,23 +279,25 @@ describe("rejections", () => {
     ],
   ];
 
-  test.each(cases)("%s is rejected with its diagnostic", (_label, run, code, message) => {
-    const error = thrown(run);
-    expect(error.code).toBe(code);
-    expect(error.message).toBe(message);
+  test.each(cases)("%s is rejected with its diagnostic", (_label, run, code, text) => {
+    const answer = refusal(run() as MessageResult);
+    expect(answer.code).toBe(code);
+    expect(answer.message).toBe(text);
   });
 
   test("an error payload without data omits the key", () => {
-    expect(parseMessage({ jsonrpc: "2.0", id: 1, error: { code: 1, message: "m" } })).toEqual({
-      kind: "error",
-      id: 1,
-      error: { code: 1, message: "m" },
-    });
+    expect(read(parseMessage({ jsonrpc: "2.0", id: 1, error: { code: 1, message: "m" } }))).toEqual(
+      {
+        kind: "error",
+        id: 1,
+        error: { code: 1, message: "m" },
+      },
+    );
   });
 
   test("an error payload keeps data", () => {
     expect(
-      parseMessage({ jsonrpc: "2.0", id: 1, error: { code: 1, message: "m", data: 5 } }),
+      read(parseMessage({ jsonrpc: "2.0", id: 1, error: { code: 1, message: "m", data: 5 } })),
     ).toEqual({
       kind: "error",
       id: 1,
@@ -296,9 +305,8 @@ describe("rejections", () => {
     });
   });
 
-  test("a parse error carries the bad text as data when given", () => {
-    const error = thrown(() => decodeMessage("{oops"));
-    expect(error.code).toBe(-32700);
+  test("a parse error names the JSON that could not be read", () => {
+    expect(refusal(decodeMessage("{oops")).code).toBe(-32700);
   });
 
   test("any malformed frame is rejected with a spec code", () => {

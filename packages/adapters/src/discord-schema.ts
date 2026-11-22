@@ -26,7 +26,11 @@ export const decodeDiscordInteraction = object({
   ),
 });
 
-export type DiscordInteraction = ReturnType<typeof decodeDiscordInteraction>;
+/** The interaction a decode returns when it succeeds. */
+export type DiscordInteraction = Extract<
+  ReturnType<typeof decodeDiscordInteraction>,
+  { kind: "decoded" }
+>["value"];
 
 /** The id of the user who triggered the interaction, from either place Discord puts it. */
 export function authorOf(interaction: DiscordInteraction): string {

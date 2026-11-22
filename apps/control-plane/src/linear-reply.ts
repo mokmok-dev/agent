@@ -38,14 +38,15 @@ export function linearReplies(
     content: ActivityContent,
     now: number,
   ): Promise<ReplyOutcome> => {
-    const credential = await oauth.status(now);
-    if (credential === undefined) return { kind: "skipped", reason: "no-credential" };
+    const access = await oauth.accessToken(now);
+    if (access === undefined) return { kind: "skipped", reason: "no-credential" };
+    if (access.kind !== "token") return { kind: "failed", error: access.message };
     const result = await sendActivity(
-      credential.accessToken,
+      access.token,
       { agentSessionId: sessionId, content },
       request,
     );
-    return result.ok
+    return result.kind === "sent"
       ? { kind: "sent", activityId: result.activityId }
       : { kind: "failed", error: result.error };
   };

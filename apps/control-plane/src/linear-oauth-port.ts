@@ -1,6 +1,6 @@
 import { newState, type LinearOAuthConfig } from "@agent/adapters";
 import { oauthConfigured, oauthStart, page, type LinearOAuthEnv } from "./routes.ts";
-import type { LinearCredential } from "./linear-oauth-do.ts";
+import type { AccessToken, Completed, LinearCredential, LoginRefused } from "./linear-oauth-do.ts";
 
 /**
  * What the Worker needs from the Linear authorization object. The Worker never
@@ -10,10 +10,12 @@ import type { LinearCredential } from "./linear-oauth-do.ts";
 export interface LinearOAuthPort {
   /** Store this state, so the callback can prove the flow started here. */
   start(state: string): Promise<void>;
-  /** Finish a login and return the stored credential. */
-  complete(params: Record<string, string>, now: number): Promise<LinearCredential>;
+  /** Finish a login: the stored credential, or the refusal that ended it. */
+  complete(params: Record<string, string>, now: number): Promise<Completed>;
   /** The stored credential, or undefined before the first login. */
   status(now: number): Promise<LinearCredential | undefined>;
+  /** A usable token, renewing it first when it is inside the skew. */
+  accessToken(now: number): Promise<AccessToken | undefined>;
 }
 
 /**
@@ -48,27 +50,23 @@ export async function startLogin(
   params: Record<string, string>,
   now: number,
 ): Promise<Response> {
-  try {
-    const credential = await port.complete(params, now);
-    return page("Linear connected", describe(credential));
-  } catch (error) {
-    // An error thrown across a Durable Object RPC arrives as a rebuilt error
-    // without its own fields, so the status is recovered from the message the
-    // adapters give each refusal.
-    const message = error instanceof Error ? error.message : String(error);
-    return Response.json({ error: { message } }, { status: statusOf(message) });
-  }
+  const answer = await port.complete(params, now);
+  if (answer.kind !== "completed") return refusalPage(answer);
+  return page("Linear connected", describe(answer.credential));
+}
+
+/** A login the object refused, answered with the status the refuser chose. */
+function refusalPage(refusal: LoginRefused): Response {
+  return Response.json({ error: { message: refusal.message } }, { status: statusOf(refusal) });
 }
 
 /**
- * The refusal's own status. A Durable Object RPC rebuilds a thrown error, so its
- * `status` field does not survive; the callbacks and the token endpoint are
- * client errors, which the message distinguishes from a bad response.
+ * The status a refusal answers with. A callback this object rejected carries
+ * its own 400; a Linear answer it could not use is a 502, because the fault is
+ * upstream. The union says which, so nothing is inferred from a message.
  */
-function statusOf(message: string): number {
-  return message.startsWith("linear token response") || message.startsWith("linear token endpoint")
-    ? 502
-    : 400;
+function statusOf(refusal: LoginRefused): number {
+  return refusal.kind === "rejected" ? refusal.status : 502;
 }
 
 function describe(credential: LinearCredential): string {

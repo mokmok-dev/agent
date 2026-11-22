@@ -25,7 +25,11 @@ export const decodeLinearEvent = object({
   body: optional(lenient(str)),
 });
 
-export type LinearEvent = ReturnType<typeof decodeLinearEvent>;
+/** The event a decode returns when it succeeds. */
+export type LinearEvent = Extract<
+  ReturnType<typeof decodeLinearEvent>,
+  { kind: "decoded" }
+>["value"];
 
 export function promptOf(event: LinearEvent): string | undefined {
   const candidates = [

@@ -5,9 +5,9 @@ import type {
   RawRequest,
   ThreadId,
 } from "./events.ts";
-import { AdapterError, decodeOr400 } from "./events.ts";
+import { decoded, jsonOf, refuse, refuseSignature } from "./events.ts";
 import { isCancelText } from "./commands.ts";
-import { constantTimeEqual, signSha256 } from "./signature.ts";
+import { constantTimeEqual, headerOf, signSha256, type Verified } from "./signature.ts";
 import {
   decodeSlackEnvelope,
   promptOf,
@@ -21,14 +21,6 @@ export const SLACK_MAX_SKEW_SECONDS = 300;
 
 export type SlackConfig = { signingSecret: string; botUserId: string };
 
-export function parseJson(request: RawRequest): unknown {
-  try {
-    return JSON.parse(request.body);
-  } catch {
-    throw new AdapterError(400, "body is not JSON");
-  }
-}
-
 /**
  * Verify a Slack request: a `v0` HMAC over `v0:<timestamp>:<body>`, and a
  * timestamp inside the skew window so a captured request cannot be replayed
@@ -38,32 +30,35 @@ export async function verifySlack(
   request: RawRequest,
   config: SlackConfig,
   nowSeconds: number,
-): Promise<void> {
-  const timestamp = request.headers["x-slack-request-timestamp"];
-  const signature = request.headers["x-slack-signature"];
-  if (timestamp === undefined) throw new AdapterError(401, "missing Slack timestamp header");
-  if (signature === undefined) throw new AdapterError(401, "missing Slack signature header");
-  const seconds = Number(timestamp);
-  if (!Number.isFinite(seconds)) throw new AdapterError(401, "invalid Slack timestamp");
-  if (Math.abs(nowSeconds - seconds) > SLACK_MAX_SKEW_SECONDS) {
-    throw new AdapterError(401, "Slack request is outside the allowed age");
-  }
-  const expected = `v0=${await signSha256(config.signingSecret, `v0:${timestamp}:${request.body}`)}`;
-  if (!constantTimeEqual(expected, signature)) throw new AdapterError(401, "invalid signature");
+): Promise<Verified> {
+  const stamp = headerOf(request, "x-slack-request-timestamp");
+  const signature = headerOf(request, "x-slack-signature");
+  if (stamp.kind !== "present") return stamp;
+  if (signature.kind !== "present") return signature;
+  const seconds = Number(stamp.value);
+  if (!Number.isFinite(seconds)) return { kind: "mismatch" };
+  if (Math.abs(nowSeconds - seconds) > SLACK_MAX_SKEW_SECONDS) return { kind: "mismatch" };
+  const expected = await signSha256(config.signingSecret, `v0:${stamp.value}:${request.body}`);
+  if (expected.kind !== "signed") return expected;
+  return constantTimeEqual(`v0=${expected.hex}`, signature.value)
+    ? { kind: "verified" }
+    : { kind: "mismatch" };
 }
 
 export function parseSlackEvent(body: unknown, config: SlackConfig): AdapterResult {
-  const envelope = decodeOr400(decodeSlackEnvelope, body);
-  if (envelope.type === "url_verification") {
-    if (envelope.challenge === undefined) throw new AdapterError(400, "missing Slack challenge");
-    return { kind: "challenge", response: envelope.challenge };
-  }
-  if (envelope.payload !== undefined)
-    return { kind: "ignored", reason: "Slack interactive payload" };
-  const event = envelope.event;
-  if (event === undefined) throw new AdapterError(400, "missing Slack event");
-  if (event.type === "app_mention") return mentionEvent(envelope, event, config);
-  return messageEvent(envelope, event, config);
+  return decoded(decodeSlackEnvelope(body), (envelope) => {
+    if (envelope.type === "url_verification") {
+      if (envelope.challenge === undefined) return refuse(400, "missing Slack challenge");
+      return { kind: "challenge", response: envelope.challenge };
+    }
+    if (envelope.payload !== undefined) {
+      return { kind: "ignored", reason: "Slack interactive payload" };
+    }
+    const event = envelope.event;
+    if (event === undefined) return refuse(400, "missing Slack event");
+    if (event.type === "app_mention") return mentionEvent(envelope, event, config);
+    return messageEvent(envelope, event, config);
+  });
 }
 
 function mentionEvent(
@@ -73,7 +68,7 @@ function mentionEvent(
 ): AdapterResult {
   const thread = threadOf(event);
   if (thread === undefined) {
-    throw new AdapterError(400, "Slack mention is missing team, channel, or timestamp");
+    return refuse(400, "Slack mention is missing team, channel, or timestamp");
   }
   if (event.user === config.botUserId) return { kind: "ignored", reason: "bot message" };
   return messageResult(envelope, thread, event, config);
@@ -88,12 +83,12 @@ function messageEvent(
     return { kind: "ignored", reason: `unsupported Slack event: ${event.type}` };
   }
   if (event.thread_ts === undefined) return { kind: "ignored", reason: "not a thread reply" };
-  if (event.ts === undefined) throw new AdapterError(400, "Slack message has no timestamp");
+  if (event.ts === undefined) return refuse(400, "Slack message has no timestamp");
   if (event.ts === event.thread_ts) return { kind: "ignored", reason: "thread parent" };
   if (event.user === config.botUserId) return { kind: "ignored", reason: "bot message" };
   const thread = threadOf(event);
   if (thread === undefined) {
-    throw new AdapterError(400, "Slack message is missing team, channel, or timestamp");
+    return refuse(400, "Slack message is missing team, channel, or timestamp");
   }
   return messageResult(envelope, thread, event, config);
 }
@@ -134,6 +129,7 @@ export async function adaptSlack(
   config: SlackConfig,
   nowSeconds: number,
 ): Promise<AdapterResult> {
-  await verifySlack(request, config, nowSeconds);
-  return parseSlackEvent(parseJson(request), config);
+  const verified = await verifySlack(request, config, nowSeconds);
+  if (verified.kind !== "verified") return refuseSignature(verified);
+  return decoded(jsonOf(request), (body) => parseSlackEvent(body, config));
 }

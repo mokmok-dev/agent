@@ -8,9 +8,25 @@ import {
   routeOf,
 } from "./routes.ts";
 import worker, { accept, deliveryBody, fetch, type Env } from "./worker.ts";
-import { AdapterError, type AdapterResult } from "@agent/adapters";
+import type { AdapterResult } from "@agent/adapters";
+
+/** The hex a signature produced, or a failure naming the refusal. */
+function signedHex(result: Signature): string {
+  if (result.kind !== "signed") throw new Error("expected a signature");
+  return result.hex;
+}
+
+/** The status a refusal carries, so a test does not have to narrow inline. */
+function refusedStatus(result: AdapterResult): number {
+  return result.kind === "refused" ? result.status : 0;
+}
+
+/** The message a refusal carries. */
+function refusedMessage(result: AdapterResult): string {
+  return result.kind === "refused" ? result.message : "";
+}
 import type { ThreadRef, Turn } from "@agent/store";
-import { signSha256 } from "@agent/adapters";
+import { signSha256, type Signature } from "@agent/adapters";
 import { envWith, OAUTH } from "./test-env.ts";
 
 const config = {
@@ -40,7 +56,7 @@ describe("the platform env", () => {
     );
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({
-      error: { message: "missing Slack timestamp header" },
+      error: { message: "missing x-slack-request-timestamp" },
     });
   });
 
@@ -54,7 +70,9 @@ describe("the platform env", () => {
       envWith(),
     );
     expect(response.status).toBe(401);
-    expect(await response.json()).toEqual({ error: { message: "missing Linear signature" } });
+    expect(await response.json()).toEqual({
+      error: { message: "missing linear-signature" },
+    });
   });
 });
 
@@ -95,7 +113,7 @@ describe("handleWebhook", () => {
     method: "POST",
     headers: {
       "x-slack-request-timestamp": String(at),
-      "x-slack-signature": `v0=${await signSha256("shhh", `v0:${at}:${JSON.stringify(body)}`)}`,
+      "x-slack-signature": `v0=${signedHex(await signSha256("shhh", `v0:${at}:${JSON.stringify(body)}`))}`,
     },
     body: JSON.stringify(body),
   });
@@ -123,24 +141,13 @@ describe("handleWebhook", () => {
   });
 
   test("refuses a method other than POST", async () => {
-    const error = await handleWebhook(
+    const result = await handleWebhook(
       "slack",
       { method: "GET", headers: {}, body: "" },
       providerConfigOf(config),
       0,
-    ).catch((reason: unknown) => reason);
-    expect(error).toBeInstanceOf(AdapterError);
-    expect((error as AdapterError).status).toBe(405);
-  });
-
-  test("a route with no adapter is a 404", async () => {
-    const error = await handleWebhook(
-      "health",
-      { method: "POST", headers: {}, body: "{}" },
-      providerConfigOf(config),
-      0,
-    ).catch((reason: unknown) => reason);
-    expect((error as AdapterError).status).toBe(404);
+    );
+    expect(result).toEqual({ kind: "refused", status: 405, message: "only POST is accepted" });
   });
 });
 
@@ -186,9 +193,8 @@ describe("responseFor", () => {
 });
 
 describe("errorResponse", () => {
-  test("an adapter error keeps its status", () => {
-    const response = errorResponse(new AdapterError(401, "bad signature"));
-    expect(response.status).toBe(401);
+  test("a thrown value is a 500, because an adapter never throws", () => {
+    expect(errorResponse(new Error("bad signature")).status).toBe(500);
   });
 
   test("an unknown error is a 500", () => {
@@ -228,7 +234,7 @@ describe("fetch", () => {
       method: "POST",
       headers: {
         "x-slack-request-timestamp": String(at),
-        "x-slack-signature": `v0=${await signSha256("shhh", `v0:${at}:${JSON.stringify(body)}`)}`,
+        "x-slack-signature": `v0=${signedHex(await signSha256("shhh", `v0:${at}:${JSON.stringify(body)}`))}`,
       },
       body: JSON.stringify(body),
     });
@@ -332,12 +338,15 @@ describe("fetch", () => {
           complete: async (params: Record<string, string>) => {
             seen.push(params);
             return {
-              accessToken: "at",
-              refreshToken: "rt",
-              expiresIn: 86_400,
-              issuedAt: 0,
-              scope: "read",
-              organizationId: "org-1",
+              kind: "completed",
+              credential: {
+                accessToken: "at",
+                refreshToken: "rt",
+                expiresIn: 86_400,
+                issuedAt: 0,
+                scope: "read",
+                organizationId: "org-1",
+              },
             };
           },
         }),
@@ -358,9 +367,11 @@ describe("fetch", () => {
       LINEAR_OAUTH: {
         getByName: () => ({
           start: async () => "",
-          complete: async () => {
-            throw Object.assign(new Error("linear callback state does not match"), { status: 400 });
-          },
+          complete: async () => ({
+            kind: "rejected",
+            status: 400,
+            message: "linear callback state does not match",
+          }),
         }),
       },
     });
@@ -623,23 +634,13 @@ describe("deliveryBody", () => {
 
 describe("diagnostics", () => {
   test("a non-POST method names the method", async () => {
-    const error = await handleWebhook(
+    const result = await handleWebhook(
       "slack",
       { method: "PUT", headers: {}, body: "" },
       providerConfigOf(config),
       0,
-    ).catch((reason: unknown) => reason);
-    expect((error as AdapterError).message).toBe("only POST is accepted");
-  });
-
-  test("a route with no adapter names the route", async () => {
-    const error = await handleWebhook(
-      "health",
-      { method: "POST", headers: {}, body: "{}" },
-      providerConfigOf(config),
-      0,
-    ).catch((reason: unknown) => reason);
-    expect((error as AdapterError).message).toBe("no adapter for this route");
+    );
+    expect(result.kind === "refused" && result.message).toBe("only POST is accepted");
   });
 
   test("a Discord delivery reaches the Discord adapter", async () => {
@@ -648,8 +649,8 @@ describe("diagnostics", () => {
       { method: "POST", headers: {}, body: "{}" },
       providerConfigOf(config),
       0,
-    ).catch((reason: unknown) => reason);
-    expect((result as AdapterError).status).toBe(401);
+    );
+    expect(refusedStatus(result)).toBe(401);
   });
 
   test("a Linear delivery reaches the Linear adapter", async () => {
@@ -658,13 +659,13 @@ describe("diagnostics", () => {
       { method: "POST", headers: {}, body: "{}" },
       providerConfigOf(config),
       0,
-    ).catch((reason: unknown) => reason);
-    expect((result as AdapterError).message).toBe("missing Linear signature");
+    );
+    expect(refusedMessage(result)).toBe("missing linear-signature");
   });
 
   test("an adapter error body carries the message", async () => {
-    const response = errorResponse(new AdapterError(403, "nope"));
-    expect(response.status).toBe(403);
+    const response = errorResponse(new Error("nope"));
+    expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: { message: "nope" } });
   });
 
@@ -672,5 +673,22 @@ describe("diagnostics", () => {
     const response = errorResponse(new TypeError("bad"));
     expect(await response.json()).toEqual({ error: { message: "bad" } });
     expect(await errorResponse("plain").json()).toEqual({ error: { message: "plain" } });
+  });
+});
+
+describe("each provider route reaches its own adapter", () => {
+  test("a Discord delivery is answered by the Discord adapter, not the Linear one", async () => {
+    const response = await fetch(
+      new Request("https://x/webhooks/discord", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      }),
+      envWith(),
+    );
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: { message: "missing x-signature-ed25519" },
+    });
   });
 });

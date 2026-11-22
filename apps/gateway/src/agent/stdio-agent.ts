@@ -64,7 +64,9 @@ function waiter(id: number): Promise<string | undefined> {
 }
 
 async function handleFrame(line: string): Promise<void> {
-  const message = decodeMessage(line);
+  const decoded = decodeMessage(line);
+  if (decoded.kind === "rejected") return;
+  const message = decoded.message;
   if (message.kind === "result") {
     if (typeof message.id === "number") {
       const resolve = waiters.get(message.id);

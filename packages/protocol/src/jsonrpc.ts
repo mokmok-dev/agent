@@ -53,9 +53,24 @@ export class ProtocolError extends Error {
   }
 }
 
-export function reject(reason: RejectionReason, data?: unknown): ProtocolError {
+/**
+ * A message this module will not read, and the code a peer expects. This is a
+ * JSON-RPC reply on the wire, so the code is the protocol's own, not an HTTP
+ * status.
+ */
+export type MessageRejected = {
+  kind: "rejected";
+  code: number;
+  message: string;
+};
+
+export type MessageRead = { kind: "read"; message: RpcMessage };
+
+export type MessageResult = MessageRead | MessageRejected;
+
+function refused(reason: RejectionReason): MessageRejected {
   const code = reason === "InvalidJson" ? RpcErrorCode.ParseError : RpcErrorCode.InvalidRequest;
-  return new ProtocolError(code, Rejection[reason], data);
+  return { kind: "rejected", code, message: Rejection[reason] };
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -102,50 +117,68 @@ export function encodeErrorResponse(id: RequestId, error: unknown): string {
   return JSON.stringify({ jsonrpc: "2.0", id, error: encodeError(error) });
 }
 
-export function decodeMessage(text: string): RpcMessage {
+export function decodeMessage(text: string): MessageResult {
   let value: unknown;
   try {
-    value = JSON.parse(text);
+    value = JSON.parse(text) as unknown;
   } catch {
-    throw reject("InvalidJson");
+    return refused("InvalidJson");
   }
   return parseMessage(value);
 }
 
-function parseErrorShape(value: unknown): RpcErrorShape {
+type ErrorShapeRead = { kind: "read"; shape: RpcErrorShape } | MessageRejected;
+
+function parseErrorShape(value: unknown): ErrorShapeRead {
   if (!isRecord(value) || typeof value.code !== "number" || typeof value.message !== "string") {
-    throw reject("ErrorShape");
+    return refused("ErrorShape");
   }
-  return withData({ code: value.code, message: value.message }, value.data);
+  return {
+    kind: "read",
+    shape: withData({ code: value.code, message: value.message }, value.data),
+  };
 }
 
-export function parseMessage(value: unknown): RpcMessage {
-  if (!isRecord(value)) throw reject("NotAnObject");
-  if (value.jsonrpc !== "2.0") throw reject("WrongVersion");
+export function parseMessage(value: unknown): MessageResult {
+  if (!isRecord(value)) return refused("NotAnObject");
+  if (value.jsonrpc !== "2.0") return refused("WrongVersion");
   const hasId = "id" in value;
-  if (hasId && !isRequestId(value.id)) throw reject("BadId");
+  if (hasId && !isRequestId(value.id)) return refused("BadId");
 
   const method = value.method;
   const hasResult = "result" in value;
   const hasError = "error" in value;
   const isCall = typeof method === "string" && method.length > 0;
 
-  if (isCall && (hasResult || hasError)) throw reject("MethodAndResult");
-  if (hasResult && hasError) throw reject("ResultAndError");
-  if (hasResult && !hasId) throw reject("ResultWithoutId");
-  if (hasError && !hasId) throw reject("ErrorWithoutId");
+  if (isCall && (hasResult || hasError)) return refused("MethodAndResult");
+  if (hasResult && hasError) return refused("ResultAndError");
+  if (hasResult && !hasId) return refused("ResultWithoutId");
+  if (hasError && !hasId) return refused("ErrorWithoutId");
 
   const params = value.params ?? null;
   if (isCall) {
-    return hasId
-      ? { kind: "request", id: value.id as RequestId, method: method as string, params }
-      : { kind: "notification", method: method as string, params };
+    return {
+      kind: "read",
+      message: hasId
+        ? { kind: "request", id: value.id as RequestId, method: method as string, params }
+        : { kind: "notification", method: method as string, params },
+    };
   }
-  if (hasResult) return { kind: "result", id: value.id as RequestId, result: value.result };
+  if (hasResult) {
+    return {
+      kind: "read",
+      message: { kind: "result", id: value.id as RequestId, result: value.result },
+    };
+  }
   if (hasError) {
-    return { kind: "error", id: value.id as RequestId, error: parseErrorShape(value.error) };
+    const error = parseErrorShape(value.error);
+    if (error.kind === "rejected") return error;
+    return {
+      kind: "read",
+      message: { kind: "error", id: value.id as RequestId, error: error.shape },
+    };
   }
-  throw reject("NeitherMethodNorResult");
+  return refused("NeitherMethodNorResult");
 }
 
 export { isRecord, isRequestId };

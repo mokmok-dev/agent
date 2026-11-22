@@ -3,8 +3,8 @@ import {
   adaptDiscord,
   adaptLinear,
   adaptSlack,
-  AdapterError,
   authorizeUrl,
+  refuse,
   type LinearOAuthConfig,
 } from "@agent/adapters";
 
@@ -95,16 +95,15 @@ export async function rawRequestOf(request: Request): Promise<Raw> {
 }
 
 export async function handleWebhook(
-  provider: Route["kind"],
+  provider: "slack" | "discord" | "linear",
   request: Raw,
   config: ProviderConfig,
   nowSeconds: number,
 ): Promise<AdapterResult> {
-  if (request.method !== "POST") throw new AdapterError(405, "only POST is accepted");
+  if (request.method !== "POST") return refuse(405, "only POST is accepted");
   if (provider === "slack") return adaptSlack(request, config.slack, nowSeconds);
   if (provider === "discord") return adaptDiscord(request, config.discord);
-  if (provider === "linear") return adaptLinear(request, config.linear);
-  throw new AdapterError(404, "no adapter for this route");
+  return adaptLinear(request, config.linear);
 }
 
 /**
@@ -128,6 +127,8 @@ export function responseFor(result: AdapterResult): { status: number; body: unkn
       return { status: 202, body: { ok: true, eventId: result.event.eventId } };
     case "ignored":
       return { status: 200, body: { ok: true, ignored: result.reason } };
+    case "refused":
+      return { status: result.status, body: { error: { message: result.message } } };
   }
 }
 
@@ -135,10 +136,12 @@ function isPong(response: string): boolean {
   return response === "pong";
 }
 
+/**
+ * The answer for a fault in this repository. An adapter never reaches here,
+ * because a body it cannot read is a `refused` result; this covers a bug, so it
+ * is the only place a thrown value becomes a response.
+ */
 export function errorResponse(error: unknown): Response {
-  if (error instanceof AdapterError) {
-    return Response.json({ error: { message: error.message } }, { status: error.status });
-  }
   const message = error instanceof Error ? error.message : String(error);
   return Response.json({ error: { message } }, { status: 500 });
 }

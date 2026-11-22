@@ -5,10 +5,9 @@ import type {
   RawRequest,
   ThreadId,
 } from "./events.ts";
-import { AdapterError, decodeOr400 } from "./events.ts";
+import { decoded, jsonOf, refuse, refuseSignature } from "./events.ts";
 import { isCancelText } from "./commands.ts";
-import { parseJson } from "./slack.ts";
-import { verifyEd25519 } from "./signature.ts";
+import { headerOf, verifyEd25519, type Verified } from "./signature.ts";
 import {
   authorOf,
   channelOf,
@@ -28,62 +27,65 @@ export type DiscordConfig = { publicKey: string };
 
 /**
  * Verify a Discord interaction: an Ed25519 signature over the timestamp and
- * the raw body, keyed by the application's public key.
+ * the raw body, keyed by the application's public key. A refusal names the
+ * header or the signature that failed.
  */
-export async function verifyDiscord(request: RawRequest, config: DiscordConfig): Promise<void> {
-  const signature = request.headers["x-signature-ed25519"];
-  const timestamp = request.headers["x-signature-timestamp"];
-  if (signature === undefined) throw new AdapterError(401, "missing Discord signature");
-  if (timestamp === undefined) throw new AdapterError(401, "missing Discord timestamp");
-  await verifyEd25519(config.publicKey, signature, `${timestamp}${request.body}`);
+export async function verifyDiscord(request: RawRequest, config: DiscordConfig): Promise<Verified> {
+  const signature = headerOf(request, "x-signature-ed25519");
+  if (signature.kind !== "present") return signature;
+  const timestamp = headerOf(request, "x-signature-timestamp");
+  if (timestamp.kind !== "present") return timestamp;
+  return verifyEd25519(config.publicKey, signature.value, `${timestamp.value}${request.body}`);
 }
 
 export function parseDiscordInteraction(body: unknown): AdapterResult {
-  const interaction = decodeOr400(decodeDiscordInteraction, body);
-  if (interaction.type === DiscordInteractionType.Ping)
-    return { kind: "challenge", response: "pong" };
+  return decoded(decodeDiscordInteraction(body), (interaction) => {
+    if (interaction.type === DiscordInteractionType.Ping) {
+      return { kind: "challenge", response: "pong" };
+    }
+    const text = promptOf(interaction);
+    if (text === undefined) return refuse(400, "Discord interaction has no prompt");
+    const eventId = interaction.id;
+    if (eventId === undefined) return refuse(400, "Discord interaction has no id");
+    const channelId = channelOf(interaction);
+    if (channelId === undefined) return refuse(400, "Discord interaction has no channel");
+    const thread = {
+      workspaceId: guildOf(interaction),
+      channelId,
+      threadId: channelId,
+    } satisfies ThreadId;
 
-  const text = promptOf(interaction);
-  if (text === undefined) throw new AdapterError(400, "Discord interaction has no prompt");
-  const eventId = interaction.id;
-  if (eventId === undefined) throw new AdapterError(400, "Discord interaction has no id");
-  const channelId = channelOf(interaction);
-  if (channelId === undefined) throw new AdapterError(400, "Discord interaction has no channel");
-  const thread = {
-    workspaceId: guildOf(interaction),
-    channelId,
-    threadId: channelId,
-  } satisfies ThreadId;
-
-  if (isCancelText(text)) {
-    const cancel: InboundCancel = {
-      kind: "cancel",
+    if (isCancelText(text)) {
+      const cancel: InboundCancel = {
+        kind: "cancel",
+        provider: "discord",
+        eventId,
+        thread,
+        authorId: authorOf(interaction),
+      };
+      return { kind: "event", event: cancel };
+    }
+    const message: InboundMessage = {
+      kind: "message",
       provider: "discord",
       eventId,
       thread,
       authorId: authorOf(interaction),
+      text,
+      replyTo: { channelId, threadId: channelId },
+      stage: "message",
     };
-    return { kind: "event", event: cancel };
-  }
-  const message: InboundMessage = {
-    kind: "message",
-    provider: "discord",
-    eventId,
-    thread,
-    authorId: authorOf(interaction),
-    text,
-    replyTo: { channelId, threadId: channelId },
-    stage: "message",
-  };
-  return { kind: "event", event: message };
+    return { kind: "event", event: message };
+  });
 }
 
 export async function adaptDiscord(
   request: RawRequest,
   config: DiscordConfig,
 ): Promise<AdapterResult> {
-  await verifyDiscord(request, config);
-  return parseDiscordInteraction(parseJson(request));
+  const verified = await verifyDiscord(request, config);
+  if (verified.kind !== "verified") return refuseSignature(verified);
+  return decoded(jsonOf(request), parseDiscordInteraction);
 }
 
 /** The deferred acknowledgement Discord expects for an interaction that will take time. */

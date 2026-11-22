@@ -1,9 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { postForm, postGraphql, revokeToken, type TokenResponse } from "./linear-oauth.ts";
-import { AdapterError } from "./events.ts";
+import {
+  postForm,
+  postGraphql,
+  revokeToken,
+  type GraphqlBody,
+  type OAuthRefused,
+  type TokenBody,
+  type TokenResponse,
+} from "./linear-oauth.ts";
 
 /** Serve one scripted answer per path, so the transport is exercised over HTTP. */
-function serve(answers: Record<string, { status: number; body: string }>): Promise<{
+async function serve(answers: Record<string, { status: number; body: string }>): Promise<{
   url: string;
   close: () => void;
 }> {
@@ -15,11 +22,22 @@ function serve(answers: Record<string, { status: number; body: string }>): Promi
       return new Response(answer.body, { status: answer.status });
     },
   });
-  return Promise.resolve({
-    url: `http://127.0.0.1:${server.port}`,
-    close: () => server.stop(true),
-  });
+  return { url: `http://127.0.0.1:${server.port}`, close: () => server.stop(true) };
 }
+
+/** The refusal a transport returned, or a failure naming what it returned instead. */
+function refusal(answer: TokenBody | GraphqlBody | OAuthRefused): OAuthRefused {
+  if (answer.kind === "body") throw new Error("expected a refusal");
+  return answer;
+}
+
+/** The body a transport read, or a failure naming the refusal. */
+function body(answer: TokenBody): TokenResponse {
+  if (answer.kind !== "body") throw new Error(`expected a body: ${answer.message}`);
+  return answer.body;
+}
+
+const answeredWith = (response: TokenResponse): TokenBody => ({ kind: "body", body: response });
 
 describe("the token transport", () => {
   test("posts a form body and reads the JSON answer", async () => {
@@ -33,8 +51,8 @@ describe("the token transport", () => {
       },
     });
     try {
-      const body = await postForm(`http://127.0.0.1:${server.port}/oauth/token`, "grant_type=x");
-      expect(body.access_token).toBe("at");
+      const answer = await postForm(`http://127.0.0.1:${server.port}/oauth/token`, "grant_type=x");
+      expect(body(answer).access_token).toBe("at");
       expect(seen[0]).toBe("POST application/x-www-form-urlencoded");
       expect(seen[1]).toBe("grant_type=x");
     } finally {
@@ -47,7 +65,7 @@ describe("the token transport", () => {
       "/token": { status: 400, body: JSON.stringify({ error: "invalid_grant" }) },
     });
     try {
-      expect((await postForm(`${url}/token`, "x=1")).error).toBe("invalid_grant");
+      expect(body(await postForm(`${url}/token`, "x=1")).error).toBe("invalid_grant");
     } finally {
       close();
     }
@@ -56,9 +74,9 @@ describe("the token transport", () => {
   test("a non-JSON answer is a refusal that names the status", async () => {
     const { url, close } = await serve({ "/token": { status: 502, body: "<html>bad gateway" } });
     try {
-      const error = await refused(() => postForm(`${url}/token`, "x=1"));
-      expect(error.status).toBe(502);
-      expect(error.message).toContain("502");
+      const answer = refusal(await postForm(`${url}/token`, "x=1"));
+      expect(answer.kind).toBe("bad-response");
+      expect(answer.message).toContain("502");
     } finally {
       close();
     }
@@ -69,18 +87,19 @@ describe("the token transport", () => {
       "/token": { status: 500, body: JSON.stringify({ unexpected: true }) },
     });
     try {
-      const error = await refused(() => postForm(`${url}/token`, "x=1"));
-      expect(error.status).toBe(502);
-      expect(error.message).toBe("linear token endpoint answered 500");
+      expect(refusal(await postForm(`${url}/token`, "x=1"))).toEqual({
+        kind: "bad-response",
+        message: "linear token endpoint answered 500",
+      });
     } finally {
       close();
     }
   });
 
   test("an unreachable endpoint is a refusal, not a thrown transport error", async () => {
-    const error = await refused(() => postForm("http://127.0.0.1:1/oauth/token", "x=1"));
-    expect(error.status).toBe(502);
-    expect(error.message).toContain("unreachable");
+    const answer = refusal(await postForm("http://127.0.0.1:1/oauth/token", "x=1"));
+    expect(answer.kind).toBe("unreachable");
+    expect(answer.message).toContain("unreachable");
   });
 });
 
@@ -89,39 +108,36 @@ describe("revocation", () => {
     const forms: string[] = [];
     await revokeToken("at-1", async (_url, form) => {
       forms.push(form);
-      return {} as TokenResponse;
+      return answeredWith({});
     });
     expect(new URLSearchParams(forms[0]).get("token")).toBe("at-1");
   });
 
   test("reports success when Linear accepts the token", async () => {
-    expect(await revokeToken("at-1", async () => ({ ok: true }) as TokenResponse)).toBe(true);
+    expect(await revokeToken("at-1", async () => answeredWith({}))).toEqual({
+      kind: "revoked",
+      revoked: true,
+    });
   });
 
   test("reports failure when Linear answers an error", async () => {
-    expect(
-      await revokeToken("at-1", async () => ({ error: "invalid_token" }) as TokenResponse),
-    ).toBe(false);
+    expect(await revokeToken("at-1", async () => answeredWith({ error: "invalid_token" }))).toEqual(
+      {
+        kind: "revoked",
+        revoked: false,
+      },
+    );
   });
 
-  test("reports failure when the endpoint is unreachable, so disconnect still completes", async () => {
+  test("an unreachable endpoint is the refusal the transport returned", async () => {
     expect(
-      await revokeToken("at-1", async () => {
-        throw new Error("offline");
-      }),
-    ).toBe(false);
+      await revokeToken("at-1", async () => ({
+        kind: "unreachable",
+        message: "linear token endpoint unreachable: offline",
+      })),
+    ).toEqual({ kind: "unreachable", message: "linear token endpoint unreachable: offline" });
   });
 });
-
-async function refused(run: () => Promise<unknown>): Promise<AdapterError> {
-  try {
-    await run();
-  } catch (error) {
-    if (error instanceof AdapterError) return error;
-    throw error;
-  }
-  throw new Error("expected a refusal");
-}
 
 describe("the GraphQL transport", () => {
   test("posts the body and reads the JSON answer", async () => {
@@ -134,15 +150,40 @@ describe("the GraphQL transport", () => {
       },
     });
     try {
-      const body = await postGraphql(`http://127.0.0.1:${server.port}/graphql`, {
+      const answer = await postGraphql(`http://127.0.0.1:${server.port}/graphql`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: '{"query":"{viewer{id}}"}',
       });
-      expect(body).toEqual({ data: { viewer: { id: "app-1" } } });
+      if (answer.kind !== "body") throw new Error("expected a body");
+      expect(answer.body).toEqual({ data: { viewer: { id: "app-1" } } });
       expect(seen[0]).toBe('POST {"query":"{viewer{id}}"}');
     } finally {
       server.stop(true);
     }
+  });
+
+  test("a non-JSON answer is a refusal, so a caller sees a reason rather than a crash", async () => {
+    const { url, close } = await serve({ "/graphql": { status: 502, body: "<html>" } });
+    try {
+      expect(
+        refusal(
+          await postGraphql(`${url}/graphql`, {
+            method: "POST",
+            headers: {},
+            body: "{}",
+          }),
+        ),
+      ).toEqual({ kind: "bad-response", message: "linear graphql answered 502" });
+    } finally {
+      close();
+    }
+  });
+
+  test("an unreachable endpoint is a refusal", async () => {
+    const answer = refusal(
+      await postGraphql("http://127.0.0.1:1/graphql", { method: "POST", headers: {}, body: "{}" }),
+    );
+    expect(answer.kind).toBe("unreachable");
   });
 });

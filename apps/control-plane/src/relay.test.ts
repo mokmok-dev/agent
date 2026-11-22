@@ -84,7 +84,10 @@ describe("the control plane to session relay", () => {
       LINEAR_OAUTH: {
         getByName: (name: string) => {
           names.push(name);
-          return { status: async () => undefined };
+          return {
+            status: async () => undefined,
+            accessToken: async () => undefined,
+          };
         },
       },
     });
@@ -101,7 +104,10 @@ describe("the control plane to session relay", () => {
       LINEAR_OAUTH: {
         getByName: (name: string) => {
           names.push(name);
-          return { status: async () => undefined };
+          return {
+            status: async () => undefined,
+            accessToken: async () => undefined,
+          };
         },
       },
     });

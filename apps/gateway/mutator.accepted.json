@@ -1,1 +1,14 @@
-{}
+{
+  "11gm15d2f1w": {
+    "reason": "Both branches of parseEdgeFrame return undefined, so which one runs cannot change what a caller sees; the tests pin both inputs to undefined.",
+    "where": "src/edge.ts:78:24 \"rejected\" -> \"\""
+  },
+  "15zx7pvv98p": {
+    "reason": "Both branches of parseEdgeFrame return undefined, so which one runs cannot change what a caller sees; the tests pin both inputs to undefined.",
+    "where": "src/edge.ts:78:7 message.kind === \"rejected\" -> false"
+  },
+  "2daqln5z7o5": {
+    "reason": "Both branches of parseEdgeFrame return undefined, so which one runs cannot change what a caller sees; the tests pin both inputs to undefined.",
+    "where": "src/edge.ts:80:10 decoded.kind === \"decoded\" -> true"
+  }
+}

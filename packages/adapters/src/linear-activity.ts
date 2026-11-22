@@ -63,7 +63,16 @@ export function activityVariables(input: AgentActivityInput): {
   return { input };
 }
 
-export type ActivityResult = { ok: true; activityId: string | null } | { ok: false; error: string };
+export type ActivityResult =
+  { kind: "sent"; activityId: string | null } | { kind: "refused"; error: string };
+
+function sent(activityId: string | null): ActivityResult {
+  return { kind: "sent", activityId };
+}
+
+function refused(error: string): ActivityResult {
+  return { kind: "refused", error };
+}
 
 /**
  * Read Linear's answer. A `success: false` and a GraphQL error are both
@@ -78,15 +87,15 @@ export function readActivityResult(body: unknown): ActivityResult {
   const errors = root.errors;
   if (Array.isArray(errors) && errors.length > 0) {
     const first = (errors[0] as { message?: unknown } | null)?.message;
-    return { ok: false, error: typeof first === "string" ? first : "linear rejected the request" };
+    return refused(typeof first === "string" ? first : "linear rejected the request");
   }
   const data = root.data;
   const payload = data === undefined ? undefined : data.agentActivityCreate;
-  if (payload === undefined) return { ok: false, error: "linear answered without an activity" };
-  if (payload.success !== true) return { ok: false, error: "linear declined the activity" };
+  if (payload === undefined) return refused("linear answered without an activity");
+  if (payload.success !== true) return refused("linear declined the activity");
   const activity = payload.agentActivity as { id?: unknown } | null | undefined;
-  if (activity === null || activity === undefined) return { ok: true, activityId: null };
-  return { ok: true, activityId: typeof activity.id === "string" ? activity.id : null };
+  if (activity === null || activity === undefined) return sent(null);
+  return sent(typeof activity.id === "string" ? activity.id : null);
 }
 
 /** A GraphQL call carrying a bearer token. */
@@ -115,7 +124,7 @@ export async function sendActivity(
       }),
     });
   } catch (error) {
-    return { ok: false, error: `linear unreachable: ${String(error)}` };
+    return refused(`linear unreachable: ${String(error)}`);
   }
   return readActivityResult(body);
 }

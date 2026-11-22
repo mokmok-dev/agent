@@ -24,7 +24,11 @@ export const decodeSlackEnvelope = object({
   payload: optional(lenient(record)),
 });
 
-export type SlackEnvelope = ReturnType<typeof decodeSlackEnvelope>;
+/** The envelope a decode returns when it succeeds. */
+export type SlackEnvelope = Extract<
+  ReturnType<typeof decodeSlackEnvelope>,
+  { kind: "decoded" }
+>["value"];
 
 export type SlackMessage = NonNullable<SlackEnvelope["event"]>;
 

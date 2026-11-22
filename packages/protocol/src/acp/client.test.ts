@@ -19,12 +19,14 @@ import {
   isStopReason,
 } from "./types.ts";
 import { decodeMessage, ProtocolError, RpcErrorCode, type RpcMessage } from "../jsonrpc.ts";
+import type { Decoded } from "../decode.ts";
 
 class Recorder {
   readonly sent: RpcMessage[] = [];
 
   send(text: string): void {
-    this.sent.push(decodeMessage(text));
+    const decoded = decodeMessage(text);
+    if (decoded.kind === "read") this.sent.push(decoded.message);
   }
 
   last(): RpcMessage {
@@ -34,15 +36,17 @@ class Recorder {
   }
 }
 
-const rejected = (fn: () => unknown): ProtocolError => {
-  try {
-    fn();
-  } catch (error) {
-    expect(error).toBeInstanceOf(ProtocolError);
-    return error as ProtocolError;
-  }
-  throw new Error("expected a ProtocolError");
-};
+/** The refusal a decoder returned, as the protocol error the client raises for it. */
+function rejection<T>(decoded: Decoded<T>): ProtocolError {
+  if (decoded.kind !== "rejected") throw new Error("expected a refusal");
+  expect(decoded.kind).toBe("rejected");
+  return new ProtocolError(RpcErrorCode.InvalidRequest, decoded.message);
+}
+
+function value<T>(decoded: Decoded<T>): T {
+  if (decoded.kind !== "decoded") throw new Error("expected a value");
+  return decoded.value;
+}
 
 describe("initialize", () => {
   test("sends ACP v1 with text-only capabilities", async () => {
@@ -551,8 +555,8 @@ describe("agent requests", () => {
       kind: "error",
       id: 15,
       error: {
-        code: RpcErrorCode.InvalidRequest,
-        message: "error needs a numeric code and a message",
+        code: RpcErrorCode.InvalidParams,
+        message: "value has the wrong shape",
       },
     });
   });
@@ -560,23 +564,30 @@ describe("agent requests", () => {
 
 describe("decoders", () => {
   test("content blocks parse their variants", () => {
-    expect(decodeContentBlock({ type: "text", text: "a" })).toEqual({ type: "text", text: "a" });
-    expect(decodeContentBlock({ type: "resource_link", uri: "file:///x", name: "x" })).toEqual({
+    expect(value(decodeContentBlock({ type: "text", text: "a" }))).toEqual({
+      type: "text",
+      text: "a",
+    });
+    expect(
+      value(decodeContentBlock({ type: "resource_link", uri: "file:///x", name: "x" })),
+    ).toEqual({
       type: "resource_link",
       uri: "file:///x",
       name: "x",
     });
     expect(
-      decodeContentBlock({
-        type: "resource",
-        resource: { uri: "file:///y", text: "body", mimeType: "text/plain" },
-      }),
+      value(
+        decodeContentBlock({
+          type: "resource",
+          resource: { uri: "file:///y", text: "body", mimeType: "text/plain" },
+        }),
+      ),
     ).toEqual({
       type: "resource",
       resource: { uri: "file:///y", text: "body", mimeType: "text/plain" },
     });
     expect(
-      decodeContentBlock({ type: "resource", resource: { uri: "file:///z", blob: "AAA" } }),
+      value(decodeContentBlock({ type: "resource", resource: { uri: "file:///z", blob: "AAA" } })),
     ).toEqual({
       type: "resource",
       resource: { uri: "file:///z", blob: "AAA" },
@@ -584,14 +595,12 @@ describe("decoders", () => {
   });
 
   test("an unknown content block is rejected", () => {
-    expect(rejected(() => decodeContentBlock({ type: "image", data: "x" })).code).toBe(
+    expect(rejection(decodeContentBlock({ type: "image", data: "x" })).code).toBe(
       RpcErrorCode.InvalidRequest,
     );
-    expect(rejected(() => decodeContentBlock("nope")).code).toBe(RpcErrorCode.InvalidRequest);
-    expect(rejected(() => decodeContentBlock({ type: "text" })).code).toBe(
-      RpcErrorCode.InvalidRequest,
-    );
-    expect(rejected(() => decodeContentBlock({ type: "resource", resource: {} })).code).toBe(
+    expect(rejection(decodeContentBlock("nope")).code).toBe(RpcErrorCode.InvalidRequest);
+    expect(rejection(decodeContentBlock({ type: "text" })).code).toBe(RpcErrorCode.InvalidRequest);
+    expect(rejection(decodeContentBlock({ type: "resource", resource: {} })).code).toBe(
       RpcErrorCode.InvalidRequest,
     );
   });
@@ -599,7 +608,7 @@ describe("decoders", () => {
   test("every stop reason is recognised and nothing else is", () => {
     for (const reason of STOP_REASONS) {
       expect(isStopReason(reason)).toBe(true);
-      expect(decodePromptResult({ stopReason: reason })).toEqual({ stopReason: reason });
+      expect(value(decodePromptResult({ stopReason: reason }))).toEqual({ stopReason: reason });
     }
     fc.assert(
       fc.property(fc.string(), (value) => {
@@ -610,38 +619,46 @@ describe("decoders", () => {
   });
 
   test("a prompt result without a valid stop reason is rejected", () => {
-    expect(rejected(() => decodePromptResult({ stopReason: "because" })).code).toBe(
+    expect(rejection(decodePromptResult({ stopReason: "because" })).code).toBe(
       RpcErrorCode.InvalidRequest,
     );
-    expect(rejected(() => decodePromptResult({})).code).toBe(RpcErrorCode.InvalidRequest);
+    expect(rejection(decodePromptResult({})).code).toBe(RpcErrorCode.InvalidRequest);
   });
 
   test("initialize results keep the fields the product reads", () => {
-    expect(decodeInitializeResult({ protocolVersion: 1 })).toEqual({ protocolVersion: 1 });
+    expect(value(decodeInitializeResult({ protocolVersion: 1 }))).toEqual({ protocolVersion: 1 });
     expect(
-      decodeInitializeResult({
-        protocolVersion: 1,
-        agentCapabilities: { loadSession: true, promptCapabilities: { image: true } },
-        authMethods: [{ id: "login", name: "Log in", description: null }],
-      }),
+      value(
+        decodeInitializeResult({
+          protocolVersion: 1,
+          agentCapabilities: { loadSession: true, promptCapabilities: { image: true } },
+          authMethods: [{ id: "login", name: "Log in", description: null }],
+        }),
+      ),
     ).toEqual({
       protocolVersion: 1,
       agentCapabilities: { loadSession: true, promptCapabilities: { image: true } },
       authMethods: [{ id: "login", name: "Log in", description: null }],
     });
-    expect(rejected(() => decodeInitializeResult({}))).toBeInstanceOf(ProtocolError);
+    expect(rejection(decodeInitializeResult({})).code).toBe(RpcErrorCode.InvalidRequest);
   });
 
   test("new session results keep modes and drop malformed ones", () => {
-    expect(decodeNewSessionResult({ sessionId: "s" })).toEqual({ sessionId: "s" });
+    expect(value(decodeNewSessionResult({ sessionId: "s" }))).toEqual({ sessionId: "s" });
     expect(
-      decodeNewSessionResult({
-        sessionId: "s",
-        modes: {
-          currentModeId: "ask",
-          availableModes: [{ id: "ask", name: "Ask" }, { id: "code", name: "Code" }, { bad: true }],
-        },
-      }),
+      value(
+        decodeNewSessionResult({
+          sessionId: "s",
+          modes: {
+            currentModeId: "ask",
+            availableModes: [
+              { id: "ask", name: "Ask" },
+              { id: "code", name: "Code" },
+              { bad: true },
+            ],
+          },
+        }),
+      ),
     ).toEqual({
       sessionId: "s",
       modes: {
@@ -652,66 +669,78 @@ describe("decoders", () => {
         ],
       },
     });
-    expect(decodeNewSessionResult({ sessionId: "s", modes: { currentModeId: "ask" } })).toEqual({
+    expect(
+      value(decodeNewSessionResult({ sessionId: "s", modes: { currentModeId: "ask" } })),
+    ).toEqual({
       sessionId: "s",
     });
   });
 
   test("optional request fields are dropped when absent and kept when present", () => {
-    expect(decodeReadTextFileParams({ sessionId: "s", path: "/x" })).toEqual({
+    expect(value(decodeReadTextFileParams({ sessionId: "s", path: "/x" }))).toEqual({
       sessionId: "s",
       path: "/x",
     });
-    expect(decodeReadTextFileParams({ sessionId: "s", path: "/x", line: 3, limit: 9 })).toEqual({
+    expect(
+      value(decodeReadTextFileParams({ sessionId: "s", path: "/x", line: 3, limit: 9 })),
+    ).toEqual({
       sessionId: "s",
       path: "/x",
       line: 3,
       limit: 9,
     });
     expect(
-      decodeCreateTerminalParams({
-        sessionId: "s",
-        command: "ls",
-        args: ["-l"],
-        cwd: "/w",
-        outputByteLimit: 100,
-      }),
+      value(
+        decodeCreateTerminalParams({
+          sessionId: "s",
+          command: "ls",
+          args: ["-l"],
+          cwd: "/w",
+          outputByteLimit: 100,
+        }),
+      ),
     ).toEqual({ sessionId: "s", command: "ls", args: ["-l"], cwd: "/w", outputByteLimit: 100 });
-    expect(decodeCreateTerminalParams({ sessionId: "s", command: "ls" })).toEqual({
+    expect(value(decodeCreateTerminalParams({ sessionId: "s", command: "ls" }))).toEqual({
       sessionId: "s",
       command: "ls",
     });
   });
 
   test("terminal output parses an exit status and its absence", () => {
-    expect(decodeTerminalOutputResult({ output: "x", truncated: false })).toEqual({
+    expect(value(decodeTerminalOutputResult({ output: "x", truncated: false }))).toEqual({
       output: "x",
       truncated: false,
     });
     expect(
-      decodeTerminalOutputResult({
-        output: "x",
-        truncated: true,
-        exitStatus: { exitCode: null, signal: "SIGKILL" },
-      }),
+      value(
+        decodeTerminalOutputResult({
+          output: "x",
+          truncated: true,
+          exitStatus: { exitCode: null, signal: "SIGKILL" },
+        }),
+      ),
     ).toEqual({ output: "x", truncated: true, exitStatus: { exitCode: null, signal: "SIGKILL" } });
-    expect(rejected(() => decodeTerminalOutputResult({ output: "x" })).code).toBe(
+    expect(rejection(decodeTerminalOutputResult({ output: "x" })).code).toBe(
       RpcErrorCode.InvalidRequest,
     );
   });
 
   test("tool call updates keep only the fields they carry", () => {
     expect(
-      decodeSessionUpdate({ sessionUpdate: "tool_call_update", toolCall: { toolCallId: "t" } }),
+      value(
+        decodeSessionUpdate({ sessionUpdate: "tool_call_update", toolCall: { toolCallId: "t" } }),
+      ),
     ).toEqual({
       sessionUpdate: "tool_call_update",
       toolCall: { toolCallId: "t" },
     });
     expect(
-      decodeSessionUpdate({
-        sessionUpdate: "tool_call_update",
-        toolCall: { toolCallId: "t", title: null, kind: null, status: null },
-      }),
+      value(
+        decodeSessionUpdate({
+          sessionUpdate: "tool_call_update",
+          toolCall: { toolCallId: "t", title: null, kind: null, status: null },
+        }),
+      ),
     ).toEqual({
       sessionUpdate: "tool_call_update",
       toolCall: { toolCallId: "t", title: null, kind: null, status: null },
@@ -719,11 +748,13 @@ describe("decoders", () => {
   });
 
   test("session info updates keep null fields", () => {
-    expect(decodeSessionUpdate({ sessionUpdate: "session_info_update" })).toEqual({
+    expect(value(decodeSessionUpdate({ sessionUpdate: "session_info_update" }))).toEqual({
       sessionUpdate: "session_info_update",
     });
     expect(
-      decodeSessionUpdate({ sessionUpdate: "session_info_update", title: null, updatedAt: null }),
+      value(
+        decodeSessionUpdate({ sessionUpdate: "session_info_update", title: null, updatedAt: null }),
+      ),
     ).toEqual({
       sessionUpdate: "session_info_update",
       title: null,
@@ -733,19 +764,21 @@ describe("decoders", () => {
 
   test("a tool call without a valid status drops the status", () => {
     expect(
-      decodeSessionUpdate({
-        sessionUpdate: "tool_call",
-        toolCall: { toolCallId: "t", title: "x", status: "bogus" },
-      }),
+      value(
+        decodeSessionUpdate({
+          sessionUpdate: "tool_call",
+          toolCall: { toolCallId: "t", title: "x", status: "bogus" },
+        }),
+      ),
     ).toEqual({ sessionUpdate: "tool_call", toolCall: { toolCallId: "t", title: "x" } });
   });
 
   test("permission options must use a known kind", () => {
+    expect(rejection(decodeRequestPermissionParams({ sessionId: "s", options: [] })).code).toBe(
+      RpcErrorCode.InvalidRequest,
+    );
     expect(
-      rejected(() => decodeRequestPermissionParams({ sessionId: "s", options: [] })).code,
-    ).toBe(RpcErrorCode.InvalidRequest);
-    expect(
-      rejected(() =>
+      rejection(
         decodeRequestPermissionParams({
           sessionId: "s",
           toolCall: { toolCallId: "t" },
@@ -756,10 +789,10 @@ describe("decoders", () => {
   });
 
   test("terminal refs need both ids", () => {
-    expect(rejected(() => decodeTerminalRefParams({ sessionId: "s" })).code).toBe(
+    expect(rejection(decodeTerminalRefParams({ sessionId: "s" })).code).toBe(
       RpcErrorCode.InvalidRequest,
     );
-    expect(decodeTerminalRefParams({ sessionId: "s", terminalId: "t" })).toEqual({
+    expect(value(decodeTerminalRefParams({ sessionId: "s", terminalId: "t" }))).toEqual({
       sessionId: "s",
       terminalId: "t",
     });
@@ -780,7 +813,7 @@ describe("decoders", () => {
       { sessionUpdate: "usage_update", used: "x" },
     ];
     for (const value of malformed) {
-      expect(rejected(() => decodeSessionUpdate(value)).code).toBe(RpcErrorCode.InvalidRequest);
+      expect(rejection(decodeSessionUpdate(value)).code).toBe(RpcErrorCode.InvalidRequest);
     }
   });
 });
@@ -837,9 +870,10 @@ describe("wire shape", () => {
       channel: recorder,
       handlers: { onSessionUpdate: (u) => seen.push(u) },
     });
+    // A frame with no update is dropped: the union means nothing throws.
     expect(() =>
       client.receive(JSON.stringify({ jsonrpc: "2.0", method: ClientMethod.SessionUpdate })),
-    ).toThrow();
+    ).not.toThrow();
     expect(seen).toEqual([]);
   });
 
@@ -934,11 +968,13 @@ describe("diagnostics and defaults", () => {
     const client = new AcpClient({ channel: recorder });
     void client.request("noop", {});
     expect(
-      decodeCreateTerminalParams({
-        sessionId: "s",
-        command: "ls",
-        env: [{ name: "A", value: "1" }],
-      }),
+      value(
+        decodeCreateTerminalParams({
+          sessionId: "s",
+          command: "ls",
+          env: [{ name: "A", value: "1" }],
+        }),
+      ),
     ).toEqual({ sessionId: "s", command: "ls", env: [{ name: "A", value: "1" }] });
   });
 });
@@ -957,7 +993,7 @@ describe("notification routing", () => {
     });
     expect(() =>
       client.receive(JSON.stringify({ jsonrpc: "2.0", method: ClientMethod.SessionUpdate })),
-    ).toThrow();
+    ).not.toThrow();
     expect(called).toBe(0);
   });
 
@@ -976,7 +1012,7 @@ describe("notification routing", () => {
       client.receive(
         JSON.stringify({ jsonrpc: "2.0", method: ClientMethod.SessionUpdate, params: "x" }),
       ),
-    ).toThrow();
+    ).not.toThrow();
     expect(called).toBe(0);
   });
 
@@ -1003,17 +1039,87 @@ describe("notification routing", () => {
 });
 
 describe("a notification without params", () => {
-  test("null params reach the decoder as absent and fail as a protocol error", () => {
+  test("null params read as absent, so the update is dropped and nothing throws", () => {
     const recorder = new Recorder();
-    const client = new AcpClient({ channel: recorder, handlers: { onSessionUpdate: () => {} } });
-    try {
+    const seen: unknown[] = [];
+    const client = new AcpClient({
+      channel: recorder,
+      handlers: { onSessionUpdate: (update) => seen.push(update) },
+    });
+    expect(() =>
       client.receive(
         JSON.stringify({ jsonrpc: "2.0", method: ClientMethod.SessionUpdate, params: null }),
-      );
-      throw new Error("expected a rejection");
-    } catch (error) {
-      expect(error).toBeInstanceOf(ProtocolError);
-      expect((error as ProtocolError).code).toBe(RpcErrorCode.InvalidRequest);
-    }
+      ),
+    ).not.toThrow();
+    expect(seen).toEqual([]);
+  });
+});
+
+describe("the exact decode branch", () => {
+  test("a decoded result carries its value, not its wrapper", () => {
+    expect(value(decodePromptResult({ stopReason: "end_turn" }))).toEqual({
+      stopReason: "end_turn",
+    });
+  });
+
+  test("a malformed frame is dropped before the switch, so nothing is sent back", () => {
+    const recorder = new Recorder();
+    const client = new AcpClient({ channel: recorder });
+    expect(() => client.receive("not json")).not.toThrow();
+    expect(recorder.sent).toEqual([]);
+  });
+
+  test("an update with no handler is dropped without a throw", () => {
+    const client = new AcpClient({ channel: new Recorder() });
+    expect(() =>
+      client.receive(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: ClientMethod.SessionUpdate,
+          params: { update: {} },
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  test("a handler receives the update the decoder accepted", () => {
+    const seen: unknown[] = [];
+    const client = new AcpClient({
+      channel: new Recorder(),
+      handlers: { onSessionUpdate: (update) => seen.push(update) },
+    });
+    client.receive(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: ClientMethod.SessionUpdate,
+        params: {
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "hi" },
+          },
+        },
+      }),
+    );
+    expect(seen).toEqual([
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hi" } },
+    ]);
+  });
+});
+
+describe("a frame that is not a message reaches no handler", () => {
+  test("a malformed frame sends nothing and leaves no pending request", async () => {
+    const recorder = new Recorder();
+    const client = new AcpClient({ channel: recorder });
+    client.receive("{oops");
+    await Bun.sleep(0);
+    expect(recorder.sent).toEqual([]);
+    expect(client.pendingCount).toBe(0);
+  });
+
+  test("a well-formed frame with an unknown method still settles nothing", () => {
+    const recorder = new Recorder();
+    const client = new AcpClient({ channel: recorder });
+    client.receive(JSON.stringify({ jsonrpc: "2.0", id: 99, result: 1 }));
+    expect(recorder.sent).toEqual([]);
   });
 });

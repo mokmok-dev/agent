@@ -1,40 +1,60 @@
-import { isRecord, reject } from "./jsonrpc.ts";
+import { isRecord } from "./jsonrpc.ts";
 
 /**
- * A decoder reads one untrusted value and returns the typed model. It throws
- * `ProtocolError` (`InvalidRequest`) on anything it cannot read, so callers
- * never see a partially valid object.
+ * A decoder reads one untrusted value and returns the typed model, or says the
+ * shape is wrong. It never throws, so a caller at a boundary cannot forget to
+ * handle a bad body.
+ *
+ * `Reason` carries the field-level detail when a caller wants to log it; the
+ * status is the same 400 for every decode refusal, because the problem is
+ * always the body.
  */
-export type Decoder<T> = (value: unknown) => T;
+export type Rejected = { kind: "rejected"; status: number; message: string };
 
-const fail: Decoder<never> = () => {
-  throw reject("ErrorShape");
-};
+export type Decoded<T> = { kind: "decoded"; value: T } | Rejected;
 
-export const str: Decoder<string> = (value) => (typeof value === "string" ? value : fail(value));
+export type Decoder<T> = (value: unknown) => Decoded<T>;
+
+const invalid = (): Rejected => ({
+  kind: "rejected",
+  status: 400,
+  message: "value has the wrong shape",
+});
+
+export const str: Decoder<string> = (value) =>
+  typeof value === "string" ? { kind: "decoded", value } : invalid();
 
 export const num: Decoder<number> = (value) =>
-  Number.isFinite(value) ? (value as number) : fail(value);
+  typeof value === "number" && Number.isFinite(value) ? { kind: "decoded", value } : invalid();
 
-export const bool: Decoder<boolean> = (value) => (typeof value === "boolean" ? value : fail(value));
+export const bool: Decoder<boolean> = (value) =>
+  typeof value === "boolean" ? { kind: "decoded", value } : invalid();
 
 export function oneOf<const T extends readonly string[]>(...values: T): Decoder<T[number]> {
   return (value) =>
-    (values as readonly string[]).includes(value as string) ? (value as T[number]) : fail(value);
+    typeof value === "string" && (values as readonly string[]).includes(value)
+      ? { kind: "decoded", value: value as T[number] }
+      : invalid();
 }
 
 export function optional<T>(decoder: Decoder<T>): Decoder<T | undefined> {
-  return (value) => (value === undefined ? undefined : decoder(value));
+  return (value) => (value === undefined ? { kind: "decoded", value: undefined } : decoder(value));
 }
 
 export function nullable<T>(decoder: Decoder<T>): Decoder<T | null> {
-  return (value) => (value === null ? null : decoder(value));
+  return (value) => (value === null ? { kind: "decoded", value: null } : decoder(value));
 }
 
 export function array<T>(decoder: Decoder<T>): Decoder<T[]> {
   return (value) => {
-    if (!Array.isArray(value)) throw reject("ErrorShape");
-    return value.map(decoder);
+    if (!Array.isArray(value)) return invalid();
+    const out: T[] = [];
+    for (const item of value) {
+      const decoded = decoder(item);
+      if (decoded.kind === "rejected") return decoded;
+      out.push(decoded.value);
+    }
+    return { kind: "decoded", value: out };
   };
 }
 
@@ -61,13 +81,14 @@ export type Shape<S extends Record<string, Decoder<unknown>>> = {
  */
 export function object<S extends Record<string, Decoder<unknown>>>(shape: S): Decoder<Shape<S>> {
   return (value) => {
-    if (!isRecord(value)) throw reject("ErrorShape");
+    if (!isRecord(value)) return invalid();
     const out: Record<string, unknown> = {};
     for (const [key, decode] of Object.entries(shape)) {
       const decoded = (decode as Decoder<unknown>)(value[key]);
-      if (decoded !== undefined) out[key] = decoded;
+      if (decoded.kind === "rejected") return decoded;
+      if (decoded.value !== undefined) out[key] = decoded.value;
     }
-    return out as Shape<S>;
+    return { kind: "decoded", value: out as Shape<S> };
   };
 }
 
@@ -77,40 +98,42 @@ export function tagged<R>(
 ): Decoder<R> {
   const byTag = new Map(Object.entries(variants));
   return (value) => {
-    if (!isRecord(value)) throw reject("ErrorShape");
-    const variant = byTag.get(str(value[tag]));
-    if (!variant) throw reject("ErrorShape");
-    return variant(value) as R;
+    if (!isRecord(value)) return invalid();
+    const name = value[tag];
+    if (typeof name !== "string") return invalid();
+    const variant = byTag.get(name);
+    if (variant === undefined) return invalid();
+    return variant(value) as Decoded<R>;
   };
 }
 
-function discard<T>(run: () => T): T | undefined {
-  try {
-    return run();
-  } catch {
-    // The decoder rejected the value: the caller treats it as absent.
-  }
-}
-
+/** The value a decoder would reject, read as absent instead. */
 export function lenient<T>(decoder: Decoder<T>): Decoder<T | undefined> {
-  return (value) => discard(() => decoder(value));
+  return (value) => {
+    const decoded = decoder(value);
+    return decoded.kind === "decoded" ? decoded : { kind: "decoded", value: undefined };
+  };
 }
 
+/** The items a decoder accepts, dropping the ones it rejects. */
 export function arrayLenient<T>(decoder: Decoder<T>): Decoder<T[]> {
   return (value) => {
-    if (!Array.isArray(value)) throw reject("ErrorShape");
+    if (!Array.isArray(value)) return invalid();
     const out: T[] = [];
     for (const item of value) {
-      const decoded = discard(() => decoder(item));
-      if (decoded !== undefined) out.push(decoded);
+      const decoded = decoder(item);
+      if (decoded.kind === "decoded") out.push(decoded.value);
     }
-    return out;
+    return { kind: "decoded", value: out };
   };
 }
 
-export const record: Decoder<Record<string, unknown>> = (value) => {
-  if (!isRecord(value)) throw reject("ErrorShape");
-  return value;
-};
+export const record: Decoder<Record<string, unknown>> = (value) =>
+  isRecord(value) ? { kind: "decoded", value } : invalid();
 
-export const raw: Decoder<unknown> = (value) => value;
+export const raw: Decoder<unknown> = (value) => ({ kind: "decoded", value });
+
+/** The value of a decode, or `undefined`; for a caller that treats absence as absent. */
+export function valueOf<T>(decoded: Decoded<T>): T | undefined {
+  return decoded.kind === "decoded" ? decoded.value : undefined;
+}

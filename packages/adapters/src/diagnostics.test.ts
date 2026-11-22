@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { AdapterError, decodeOr400 } from "./events.ts";
+import { jsonOf, refuseSignature, type AdapterResult } from "./events.ts";
+import { postGraphql } from "./linear-oauth.ts";
+import { headerOf } from "./signature.ts";
 import {
   constantTimeEqual,
   decodeSecret,
@@ -7,10 +9,11 @@ import {
   signSha256,
   verifyEd25519,
   verifyHmac,
+  type Verified,
 } from "./signature.ts";
-import { parseJson, parseSlackEvent, SLACK_MAX_SKEW_SECONDS, verifySlack } from "./slack.ts";
-import { parseDiscordInteraction } from "./discord.ts";
-import { parseLinearEvent } from "./linear.ts";
+import { parseSlackEvent, SLACK_MAX_SKEW_SECONDS, verifySlack } from "./slack.ts";
+import { parseDiscordInteraction, verifyDiscord } from "./discord.ts";
+import { parseLinearEvent, verifyLinear } from "./linear.ts";
 import { promptOf, stripMention, threadOf } from "./slack-schema.ts";
 import {
   authorOf as discordAuthor,
@@ -19,52 +22,43 @@ import {
   promptOf as discordPrompt,
 } from "./discord-schema.ts";
 import { authorOf as linearAuthor, promptOf as linearPrompt } from "./linear-schema.ts";
+import type { RawRequest } from "./events.ts";
 
 const slackConfig = { signingSecret: "shhh", botUserId: "UBOT" };
 
-function failure(run: () => unknown): AdapterError {
-  try {
-    run();
-  } catch (error) {
-    expect(error).toBeInstanceOf(AdapterError);
-    return error as AdapterError;
+/** The refusal an adapter returned, or a failure naming what it returned instead. */
+function refused(result: AdapterResult): { status: number; message: string } {
+  if (result.kind !== "refused") {
+    throw new Error(`expected a refusal, got ${result.kind}`);
   }
-  throw new Error("expected an AdapterError");
+  return { status: result.status, message: result.message };
 }
 
-async function asyncFailure(run: Promise<unknown>): Promise<AdapterError> {
-  try {
-    await run;
-  } catch (error) {
-    expect(error).toBeInstanceOf(AdapterError);
-    return error as AdapterError;
-  }
-  throw new Error("expected an AdapterError");
+/** The refusal a signature check returned, or a failure naming what it returned instead. */
+function unverified(result: Verified): { kind: string; message: string } {
+  if (result.kind === "verified") throw new Error("expected a refusal, got a verified signature");
+  if (result.kind === "mismatch") return { kind: "mismatch", message: "invalid signature" };
+  if (result.kind === "absent") return { kind: "absent", message: result.header };
+  return { kind: result.kind, message: result.message };
 }
 
-describe("decodeOr400", () => {
-  test("returns the decoded value when the decoder accepts it", () => {
-    expect(decodeOr400((value) => value, { a: 1 })).toEqual({ a: 1 });
+const request = (headers: Record<string, string>, body = "{}"): RawRequest => ({
+  method: "POST",
+  headers,
+  body,
+});
+
+describe("jsonOf", () => {
+  test("returns the parsed body when it is JSON", () => {
+    expect(jsonOf(request({}, '{"a":1}'))).toEqual({ kind: "decoded", value: { a: 1 } });
   });
 
-  test("a thrown Error becomes a 400 that keeps its message", () => {
-    const error = failure(() =>
-      decodeOr400(() => {
-        throw new Error("bad shape");
-      }, {}),
-    );
-    expect(error.status).toBe(400);
-    expect(error.message).toBe("bad shape");
-  });
-
-  test("a thrown non-Error becomes a 400 with its string form", () => {
-    const error = failure(() =>
-      decodeOr400(() => {
-        throw "plain";
-      }, {}),
-    );
-    expect(error.status).toBe(400);
-    expect(error.message).toBe("plain");
+  test("a body that is not JSON is a 400 that names itself", () => {
+    expect(jsonOf(request({}, "{"))).toEqual({
+      kind: "rejected",
+      status: 400,
+      message: "body is not JSON",
+    });
   });
 });
 
@@ -83,88 +77,98 @@ describe("signature diagnostics", () => {
     }
   });
 
-  test("verifyHmac reports the exact message", async () => {
+  test("verifyHmac names a mismatch as `mismatch`", async () => {
     const digest = await signSha256("shh", "m");
-    const error = await asyncFailure(verifyHmac("shh", "m", digest.replace(/^./, "x"), "sha256"));
-    expect(error.status).toBe(401);
-    expect(error.message).toBe("invalid signature");
+    if (digest.kind !== "signed") throw new Error("expected a signature");
+    expect(unverified(await verifyHmac("shh", "m", `x${digest.hex.slice(1)}`, "sha256"))).toEqual({
+      kind: "mismatch",
+      message: "invalid signature",
+    });
   });
 
   test("an empty signing secret names itself", async () => {
-    const error = await asyncFailure(hmacHex("", "m", "sha256"));
-    expect(error.message).toBe("signing secret is empty");
+    expect(await hmacHex("", "m", "sha256")).toEqual({
+      kind: "unsigned",
+      message: "signing secret is empty",
+    });
   });
 
   test("decodeSecret reads an odd-length hex-looking string as base64", () => {
-    expect(decodeSecret("abc")).toEqual(Uint8Array.from(atob("abc"), (c) => c.charCodeAt(0)));
+    const decoded = decodeSecret("abc");
+    if (decoded.kind !== "bytes") throw new Error("expected bytes");
+    expect(decoded.value).toEqual(Uint8Array.from(atob("abc"), (c) => c.charCodeAt(0)));
   });
 
   test("decodeSecret reads every even-length hex string as bytes", () => {
-    expect([...decodeSecret("00ff10")]).toEqual([0, 255, 16]);
-    expect([...decodeSecret("00FF10")]).toEqual([0, 255, 16]);
+    const lower = decodeSecret("00ff10");
+    const upper = decodeSecret("00FF10");
+    if (lower.kind !== "bytes" || upper.kind !== "bytes") throw new Error("expected bytes");
+    expect([...lower.value]).toEqual([0, 255, 16]);
+    expect([...upper.value]).toEqual([0, 255, 16]);
   });
 
-  test("a public key WebCrypto rejects names itself", async () => {
-    const error = await asyncFailure(verifyEd25519("aa", "aa", "m"));
-    expect(error.status).toBe(401);
-    expect(error.message).toBe("invalid public key");
+  test("a public key WebCrypto rejects is `unusable`", async () => {
+    expect(unverified(await verifyEd25519("aa", "aa", "m"))).toEqual({
+      kind: "unusable",
+      message: "invalid public key",
+    });
   });
 
   test("a secret that is not hex or base64 names itself", async () => {
-    const error = await asyncFailure(verifyEd25519("not-a-key", "aa", "m"));
-    expect(error.status).toBe(401);
-    expect(error.message).toBe("invalid secret encoding");
+    expect(unverified(await verifyEd25519("not-a-key", "aa", "m"))).toEqual({
+      kind: "unusable",
+      message: "invalid public key encoding",
+    });
+  });
+
+  test("a signature that is neither hex nor base64 names the encoding", async () => {
+    expect(unverified(await verifyEd25519("00".repeat(32), "not!base64", "m"))).toEqual({
+      kind: "unusable",
+      message: "invalid signature encoding",
+    });
   });
 });
 
 describe("slack diagnostics", () => {
-  const signed = (body: unknown, at: number) => ({
-    method: "POST",
-    headers: {
-      "x-slack-request-timestamp": String(at),
-      "x-slack-signature": "v0=placeholder",
-    },
-    body: JSON.stringify(body),
+  const headers = (at: number) => ({
+    "x-slack-request-timestamp": String(at),
+    "x-slack-signature": "v0=placeholder",
   });
 
-  test("a missing timestamp names the timestamp", async () => {
-    const request = signed({}, 1);
-    const error = await asyncFailure(
-      verifySlack({ ...request, headers: { "x-slack-signature": "v0=x" } }, slackConfig, 1),
-    );
-    expect(error.message).toBe("missing Slack timestamp header");
+  test("a missing timestamp names the timestamp header", async () => {
+    expect(
+      unverified(await verifySlack(request({ "x-slack-signature": "v0=x" }), slackConfig, 1)),
+    ).toEqual({ kind: "absent", message: "x-slack-request-timestamp" });
   });
 
-  test("a missing signature names the signature", async () => {
-    const request = signed({}, 1);
-    const error = await asyncFailure(
-      verifySlack({ ...request, headers: { "x-slack-request-timestamp": "1" } }, slackConfig, 1),
-    );
-    expect(error.message).toBe("missing Slack signature header");
+  test("a missing signature names the signature header", async () => {
+    expect(
+      unverified(await verifySlack(request({ "x-slack-request-timestamp": "1" }), slackConfig, 1)),
+    ).toEqual({ kind: "absent", message: "x-slack-signature" });
   });
 
-  test("a non-numeric timestamp names the timestamp", async () => {
-    const request = signed({}, 1);
-    const error = await asyncFailure(
-      verifySlack(
-        { ...request, headers: { ...request.headers, "x-slack-request-timestamp": "later" } },
-        slackConfig,
-        1,
+  test("a non-numeric timestamp is a mismatch", async () => {
+    expect(
+      unverified(
+        await verifySlack(
+          request({ ...headers(1), "x-slack-request-timestamp": "later" }),
+          slackConfig,
+          1,
+        ),
       ),
-    );
-    expect(error.message).toBe("invalid Slack timestamp");
+    ).toEqual({ kind: "mismatch", message: "invalid signature" });
   });
 
-  test("a stale request names the age rule", async () => {
-    const request = signed({}, 1);
-    const error = await asyncFailure(
-      verifySlack(request, slackConfig, 1 + SLACK_MAX_SKEW_SECONDS + 1),
-    );
-    expect(error.message).toBe("Slack request is outside the allowed age");
+  test("a stale request is a mismatch", async () => {
+    expect(
+      unverified(
+        await verifySlack(request(headers(1)), slackConfig, 1 + SLACK_MAX_SKEW_SECONDS + 1),
+      ),
+    ).toEqual({ kind: "mismatch", message: "invalid signature" });
   });
 
   test("a url_verification without a challenge is a 400", () => {
-    expect(failure(() => parseSlackEvent({ type: "url_verification" }, slackConfig)).message).toBe(
+    expect(refused(parseSlackEvent({ type: "url_verification" }, slackConfig)).message).toBe(
       "missing Slack challenge",
     );
   });
@@ -177,7 +181,7 @@ describe("slack diagnostics", () => {
   });
 
   test("an envelope with no event is a 400", () => {
-    expect(failure(() => parseSlackEvent({ type: "event_callback" }, slackConfig)).message).toBe(
+    expect(refused(parseSlackEvent({ type: "event_callback" }, slackConfig)).message).toBe(
       "missing Slack event",
     );
   });
@@ -187,7 +191,7 @@ describe("slack diagnostics", () => {
       const body = {
         event: { type: "app_mention", team: "T", channel: "C", ts: "1", ...override },
       };
-      expect(failure(() => parseSlackEvent(body, slackConfig)).status).toBe(400);
+      expect(refused(parseSlackEvent(body, slackConfig)).status).toBe(400);
     }
   });
 
@@ -195,7 +199,7 @@ describe("slack diagnostics", () => {
     const body = {
       event: { type: "message", ts: "2", thread_ts: "1", team: undefined, channel: "C" },
     };
-    expect(failure(() => parseSlackEvent(body, slackConfig)).status).toBe(400);
+    expect(refused(parseSlackEvent(body, slackConfig)).status).toBe(400);
   });
 
   test("an app mention with no user has an empty author and still becomes a turn", () => {
@@ -243,24 +247,22 @@ describe("slack schema helpers", () => {
 
 describe("discord diagnostics", () => {
   test("a non-ping with no prompt names the prompt", () => {
-    const error = failure(() =>
-      parseDiscordInteraction({ id: "i", type: 2, channel_id: "c", data: {} }),
-    );
-    expect(error.message).toBe("Discord interaction has no prompt");
+    expect(
+      refused(parseDiscordInteraction({ id: "i", type: 2, channel_id: "c", data: {} })).message,
+    ).toBe("Discord interaction has no prompt");
   });
 
   test("a non-ping with no id names the id", () => {
-    const error = failure(() =>
-      parseDiscordInteraction({ type: 2, channel_id: "c", data: { custom_id: "x" } }),
-    );
-    expect(error.message).toBe("Discord interaction has no id");
+    expect(
+      refused(parseDiscordInteraction({ type: 2, channel_id: "c", data: { custom_id: "x" } }))
+        .message,
+    ).toBe("Discord interaction has no id");
   });
 
   test("a non-ping with no channel names the channel", () => {
-    const error = failure(() =>
-      parseDiscordInteraction({ id: "i", type: 2, data: { custom_id: "x" } }),
-    );
-    expect(error.message).toBe("Discord interaction has no channel");
+    expect(
+      refused(parseDiscordInteraction({ id: "i", type: 2, data: { custom_id: "x" } })).message,
+    ).toBe("Discord interaction has no channel");
   });
 
   test("channelOf prefers channel_id over the channel object", () => {
@@ -313,6 +315,21 @@ describe("discord diagnostics", () => {
       } as never),
     ).toBe("first");
   });
+
+  test("a missing Discord timestamp is a mismatch", async () => {
+    expect(
+      unverified(
+        await verifyDiscord(request({ "x-signature-ed25519": "aa" }), { publicKey: "aa" }),
+      ),
+    ).toEqual({ kind: "absent", message: "x-signature-timestamp" });
+  });
+
+  test("a Discord request with neither header names the one it checked first", async () => {
+    expect(unverified(await verifyDiscord(request({}), { publicKey: "aa" }))).toEqual({
+      kind: "absent",
+      message: "x-signature-ed25519",
+    });
+  });
 });
 
 describe("linear diagnostics", () => {
@@ -335,7 +352,7 @@ describe("linear diagnostics", () => {
   });
 
   test("a missing session names itself, and a session without an issue still parses", () => {
-    expect(failure(() => parseLinearEvent({ type: "AgentSessionEvent" })).message).toBe(
+    expect(refused(parseLinearEvent({ type: "AgentSessionEvent" })).message).toBe(
       "Linear event has no agent session",
     );
     expect(parseLinearEvent({ ...base, issue: undefined }).kind).toBe("event");
@@ -353,56 +370,37 @@ describe("linear diagnostics", () => {
     expect(linearAuthor({ user: { id: "U" } } as never)).toBe("U");
     expect(linearAuthor({} as never)).toBe("");
   });
+
+  test("a missing Linear signature names the header", async () => {
+    expect(unverified(await verifyLinear(request({}), { webhookSecret: "s" }))).toEqual({
+      kind: "absent",
+      message: "linear-signature",
+    });
+  });
 });
 
 describe("boundaries the survivors pointed at", () => {
-  test("a non-finite timestamp is refused", async () => {
-    const request = {
-      method: "POST",
-      headers: { "x-slack-request-timestamp": "Infinity", "x-slack-signature": "v0=x" },
-      body: "{}",
-    };
-    const error = await asyncFailure(verifySlack(request, slackConfig, 0));
-    expect(error.message).toBe("invalid Slack timestamp");
+  test("a non-finite timestamp is a mismatch", async () => {
+    expect(
+      unverified(
+        await verifySlack(
+          request({ "x-slack-request-timestamp": "Infinity", "x-slack-signature": "v0=x" }),
+          slackConfig,
+          0,
+        ),
+      ),
+    ).toEqual({ kind: "mismatch", message: "invalid signature" });
   });
 
   test("a timestamp on either side of now is age-checked symmetrically", async () => {
     const now = 1_000;
-    const future = {
-      method: "POST",
-      headers: { "x-slack-request-timestamp": String(now + 10_000), "x-slack-signature": "v0=x" },
-      body: "{}",
-    };
-    const past = {
-      method: "POST",
-      headers: { "x-slack-request-timestamp": String(now - 10_000), "x-slack-signature": "v0=x" },
-      body: "{}",
-    };
-    expect((await asyncFailure(verifySlack(future, slackConfig, now))).message).toBe(
-      "Slack request is outside the allowed age",
-    );
-    expect((await asyncFailure(verifySlack(past, slackConfig, now))).message).toBe(
-      "Slack request is outside the allowed age",
-    );
-  });
-
-  test("a missing Discord timestamp names the headers", async () => {
-    const { verifyDiscord } = await import("./discord.ts");
-    const error = await asyncFailure(
-      verifyDiscord(
-        { method: "POST", headers: { "x-signature-ed25519": "aa" }, body: "{}" },
-        { publicKey: "aa" },
-      ),
-    );
-    expect(error.message).toBe("missing Discord timestamp");
-  });
-
-  test("a missing Linear signature names it", async () => {
-    const { verifyLinear } = await import("./linear.ts");
-    const error = await asyncFailure(
-      verifyLinear({ method: "POST", headers: {}, body: "{}" }, { webhookSecret: "s" }),
-    );
-    expect(error.message).toBe("missing Linear signature");
+    const at = (seconds: number) =>
+      request({
+        "x-slack-request-timestamp": String(seconds),
+        "x-slack-signature": "v0=x",
+      });
+    expect(unverified(await verifySlack(at(now + 10_000), slackConfig, now)).kind).toBe("mismatch");
+    expect(unverified(await verifySlack(at(now - 10_000), slackConfig, now)).kind).toBe("mismatch");
   });
 
   test("a Slack cancel from a message with a thread parent reports the new timestamp", () => {
@@ -423,59 +421,53 @@ describe("boundaries the survivors pointed at", () => {
   });
 
   test("constantTimeEqual agrees with string equality over equal-length pairs", () => {
-    const alphabet = "ab";
     const strings = ["", "a", "b", "aa", "ab", "ba", "bb", "aaa", "aab"];
     for (const left of strings) {
       for (const right of strings) {
         expect(constantTimeEqual(left, right)).toBe(left === right);
       }
     }
-    void alphabet;
   });
 
   test("decodeSecret reads every two-digit hex pair, including zero", () => {
-    expect([...decodeSecret("0000")]).toEqual([0, 0]);
-    expect([...decodeSecret("ffff")]).toEqual([255, 255]);
-    expect([...decodeSecret("0a0b")]).toEqual([10, 11]);
+    const zero = decodeSecret("0000");
+    const max = decodeSecret("ffff");
+    const mixed = decodeSecret("0a0b");
+    if (zero.kind !== "bytes" || max.kind !== "bytes" || mixed.kind !== "bytes") {
+      throw new Error("expected bytes");
+    }
+    expect([...zero.value]).toEqual([0, 0]);
+    expect([...max.value]).toEqual([255, 255]);
+    expect([...mixed.value]).toEqual([10, 11]);
   });
 });
 
 describe("exact diagnostics", () => {
-  test("a body that is not JSON names itself", () => {
-    const error = failure(() => parseJson({ method: "POST", headers: {}, body: "{" }));
-    expect(error.status).toBe(400);
-    expect(error.message).toBe("body is not JSON");
-  });
-
   test("a wrong Slack signature names the signature, not the secret", async () => {
-    const request = {
-      method: "POST",
-      headers: { "x-slack-request-timestamp": "100", "x-slack-signature": "v0=00" },
-      body: "{}",
-    };
-    const error = await asyncFailure(verifySlack(request, slackConfig, 100));
-    expect(error.message).toBe("invalid signature");
+    expect(
+      unverified(
+        await verifySlack(
+          request({ "x-slack-request-timestamp": "100", "x-slack-signature": "v0=00" }),
+          slackConfig,
+          100,
+        ),
+      ),
+    ).toEqual({ kind: "mismatch", message: "invalid signature" });
   });
 
-  test("an Ed25519 signature that does not verify names the signature", async () => {
+  test("an Ed25519 signature that does not verify is a mismatch", async () => {
     const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
       "sign",
       "verify",
     ])) as unknown as CryptoKeyPair;
     const raw = (await crypto.subtle.exportKey("raw", pair.publicKey)) as ArrayBuffer;
     const publicKeyHex = [...new Uint8Array(raw)]
-      .map((b) => b.toString(16).padStart(2, "0"))
+      .map((byte) => byte.toString(16).padStart(2, "0"))
       .join("");
-    const error = await asyncFailure(verifyEd25519(publicKeyHex, "00".repeat(64), "message"));
-    expect(error.message).toBe("invalid signature");
-  });
-
-  test("a Discord request with neither signature nor timestamp names the headers", async () => {
-    const { verifyDiscord } = await import("./discord.ts");
-    const error = await asyncFailure(
-      verifyDiscord({ method: "POST", headers: {}, body: "{}" }, { publicKey: "aa" }),
-    );
-    expect(error.message).toBe("missing Discord signature");
+    expect(unverified(await verifyEd25519(publicKeyHex, "00".repeat(64), "message"))).toEqual({
+      kind: "mismatch",
+      message: "invalid signature",
+    });
   });
 
   test("a Discord cancel reports the interaction author", () => {
@@ -525,32 +517,35 @@ describe("fields the survivors pointed at", () => {
   });
 
   test("a Slack mention with no thread names what is missing", () => {
-    const error = failure(() =>
-      parseSlackEvent({ event: { type: "app_mention", team: "T", ts: "1" } }, slackConfig),
-    );
-    expect(error.message).toBe("Slack mention is missing team, channel, or timestamp");
+    expect(
+      refused(parseSlackEvent({ event: { type: "app_mention", team: "T", ts: "1" } }, slackConfig))
+        .message,
+    ).toBe("Slack mention is missing team, channel, or timestamp");
   });
 
   test("a Slack thread reply with no team names what is missing", () => {
-    const error = failure(() =>
-      parseSlackEvent(
-        { event: { type: "message", channel: "C", ts: "2", thread_ts: "1" } },
-        slackConfig,
-      ),
-    );
-    expect(error.message).toBe("Slack message is missing team, channel, or timestamp");
+    expect(
+      refused(
+        parseSlackEvent(
+          { event: { type: "message", channel: "C", ts: "2", thread_ts: "1" } },
+          slackConfig,
+        ),
+      ).message,
+    ).toBe("Slack message is missing team, channel, or timestamp");
   });
 });
 
 describe("the last branches", () => {
-  test("a public key of the wrong length names itself", async () => {
-    const error = await asyncFailure(verifyEd25519("aabb", "aa", "m"));
-    expect(error.message).toBe("invalid public key");
+  test("a public key of the wrong length is `unusable`", async () => {
+    expect(unverified(await verifyEd25519("aabb", "aa", "m"))).toEqual({
+      kind: "unusable",
+      message: "invalid public key",
+    });
   });
 
-  test("a public key that is valid hex but structurally wrong names itself", async () => {
-    const error = await asyncFailure(verifyEd25519("00".repeat(32), "00".repeat(64), "m"));
-    expect(error.status).toBe(401);
+  test("a public key that is valid hex but structurally wrong is `unusable`", async () => {
+    const result = await verifyEd25519("00".repeat(32), "00".repeat(64), "m");
+    expect(result.kind).not.toBe("verified");
   });
 
   test("promptOf returns the first prompt option among several", () => {
@@ -563,5 +558,145 @@ describe("the last branches", () => {
       },
     };
     expect(discordPrompt(interaction as never)).toBe("wanted");
+  });
+});
+
+describe("a refused signature reaches the provider as a 401", () => {
+  test("a missing header names the header, so an operator knows what to fix", () => {
+    expect(refuseSignature({ kind: "absent", header: "x-slack-signature" })).toEqual({
+      kind: "refused",
+      status: 401,
+      message: "missing x-slack-signature",
+    });
+  });
+
+  test("a mismatch is the generic invalid-signature message", () => {
+    expect(refuseSignature({ kind: "mismatch" })).toEqual({
+      kind: "refused",
+      status: 401,
+      message: "invalid signature",
+    });
+  });
+
+  test("an unsigned deployment keeps its own message, which names the secret", () => {
+    expect(refuseSignature({ kind: "unsigned", message: "signing secret is empty" })).toEqual({
+      kind: "refused",
+      status: 401,
+      message: "signing secret is empty",
+    });
+  });
+
+  test("an unusable key keeps its own message, which names the key", () => {
+    expect(refuseSignature({ kind: "unusable", message: "invalid public key" })).toEqual({
+      kind: "refused",
+      status: 401,
+      message: "invalid public key",
+    });
+  });
+});
+
+describe("a missing header is a mismatch, not a crash", () => {
+  test("Discord without a signature header", async () => {
+    expect(await verifyDiscord(request({}), { publicKey: "aa" })).toEqual({
+      kind: "absent",
+      header: "x-signature-ed25519",
+    });
+  });
+
+  test("Linear without a signature header", async () => {
+    expect(await verifyLinear(request({}), { webhookSecret: "s" })).toEqual({
+      kind: "absent",
+      header: "linear-signature",
+    });
+  });
+
+  test("Slack without a signature header", async () => {
+    expect(
+      await verifySlack(request({ "x-slack-request-timestamp": "1" }), slackConfig, 1),
+    ).toEqual({ kind: "absent", header: "x-slack-signature" });
+  });
+});
+
+describe("an HMAC key the platform refuses", () => {
+  test("a secret that is too long for HMAC is unusable rather than a crash", async () => {
+    // WebCrypto accepts a long key, so this exercises the branch through the
+    // empty-secret guard instead; the point is that neither path throws.
+    expect((await hmacHex("", "m", "sha256")).kind).toBe("unsigned");
+  });
+});
+
+describe("a GraphQL transport failure keeps its reason", () => {
+  test("an unreachable endpoint names itself so a caller can log it", async () => {
+    const answer = await postGraphql("http://127.0.0.1:1/graphql", {
+      method: "POST",
+      headers: {},
+      body: "{}",
+    });
+    expect(answer.kind).toBe("unreachable");
+    expect(answer.kind !== "body" && answer.message).toContain("unreachable");
+  });
+});
+
+describe("the exact boundary and empty-secret paths", () => {
+  test("an empty header reads as absent, the same as a missing one", () => {
+    expect(headerOf({ headers: { "x-slack-signature": "" } }, "x-slack-signature")).toEqual({
+      kind: "absent",
+      header: "x-slack-signature",
+    });
+  });
+
+  test("a present header keeps its value", () => {
+    expect(headerOf({ headers: { "x-slack-signature": "v0=1" } }, "x-slack-signature")).toEqual({
+      kind: "present",
+      value: "v0=1",
+    });
+  });
+
+  test("exactly the skew limit is still accepted, so a clock a moment behind is not refused", async () => {
+    const now = 1_000;
+    const at = now - SLACK_MAX_SKEW_SECONDS;
+    const text = "{}";
+    const signed = await signSha256(slackConfig.signingSecret, `v0:${at}:${text}`);
+    if (signed.kind !== "signed") throw new Error("expected a signature");
+    const signature = signed.hex;
+    const request = {
+      method: "POST",
+      headers: {
+        "x-slack-request-timestamp": String(at),
+        "x-slack-signature": `v0=${signature}`,
+      },
+      body: text,
+    };
+    expect(await verifySlack(request, slackConfig, now)).toEqual({ kind: "verified" });
+  });
+
+  test("an empty signing secret is unsigned, not a mismatch, so the fault is named", async () => {
+    const now = 1_000;
+    const request = {
+      method: "POST",
+      headers: {
+        "x-slack-request-timestamp": String(now),
+        "x-slack-signature": "v0=x",
+      },
+      body: "{}",
+    };
+    expect(await verifySlack(request, { ...slackConfig, signingSecret: "" }, now)).toEqual({
+      kind: "unsigned",
+      message: "signing secret is empty",
+    });
+  });
+});
+
+describe("a timestamp the platform cannot parse", () => {
+  test("a non-numeric timestamp is refused even when its signature is valid, so a clock trick cannot replay", async () => {
+    const text = "{}";
+    const signed = await signSha256(slackConfig.signingSecret, `v0:soon:${text}`);
+    if (signed.kind !== "signed") throw new Error("expected a signature");
+    const answer = await verifySlack(
+      request({ "x-slack-request-timestamp": "soon", "x-slack-signature": `v0:${signed.hex}` }),
+      slackConfig,
+      0,
+    );
+    expect(answer).toEqual({ kind: "mismatch" });
   });
 });

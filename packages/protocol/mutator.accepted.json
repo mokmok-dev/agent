@@ -1,0 +1,42 @@
+{
+  "18zc3jxh77h": {
+    "reason": "The primitive guard and the finiteness check both refuse a non-number, so either alone gives the same answer.",
+    "where": "src/acp/client.ts:218:26 \"rejected\" -> \"\""
+  },
+  "1eqzjnddw88": {
+    "reason": "The primitive guard and the finiteness check both refuse a non-number, so either alone gives the same answer.",
+    "where": "src/jsonrpc.ts:137:11 \"read\" -> \"\""
+  },
+  "1stkmqgals3": {
+    "reason": "A tagged variant's name is read through a string-keyed map, so a non-string name is absent from the map and refused either way.",
+    "where": "src/decode.ts:28:3 typeof value === \"number\" -> true"
+  },
+  "20ij1uac6rn": {
+    "reason": "A tagged variant's name is read through a string-keyed map, so a non-string name is absent from the map and refused either way.",
+    "where": "src/decode.ts:35:5 typeof value === \"string\" -> true"
+  },
+  "21wxe0urr5a": {
+    "reason": "The message reader returns a discriminated union whose only other case is the refusal, so both branches agree on a valid message.",
+    "where": "src/acp/client.ts:283:7 decoded.kind === \"decoded\" -> true"
+  },
+  "2f6xhocrweg": {
+    "reason": "The message reader returns a discriminated union whose only other case is the refusal, so both branches agree on a valid message.",
+    "where": "src/decode.ts:138:10 decoded.kind === \"decoded\" -> true"
+  },
+  "83npbwrax9": {
+    "reason": "The message reader returns a discriminated union whose only other case is the refusal, so both branches agree on a valid message.",
+    "where": "src/decode.ts:103:9 typeof name !== \"string\" -> false"
+  },
+  "8fs8meugqj": {
+    "reason": "A dropped frame and a frame with no matching handler both reach no code, because the notification path checks the method and the handler before it decodes anything.",
+    "where": "src/acp/client.ts:250:9 !handler -> false"
+  },
+  "eydv4fn3t0": {
+    "reason": "A dropped frame and a frame with no matching handler both reach no code, because the notification path checks the method and the handler before it decodes anything.",
+    "where": "src/acp/client.ts:218:9 decoded.kind === \"rejected\" -> false"
+  },
+  "tz5jdnalad": {
+    "reason": "A dropped frame and a frame with no matching handler both reach no code, because the notification path checks the method and the handler before it decodes anything.",
+    "where": "src/acp/client.ts:249:9 method !== ClientMethod.SessionUpdate -> false"
+  }
+}

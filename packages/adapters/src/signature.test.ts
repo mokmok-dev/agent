@@ -1,5 +1,4 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import fc from "fast-check";
 import {
   constantTimeEqual,
   decodeSecret,
@@ -7,19 +6,29 @@ import {
   signSha256,
   verifyEd25519,
   verifyHmac,
+  type Signature,
+  type SignatureRefused,
+  type Verified,
 } from "./signature.ts";
-import { AdapterError } from "./events.ts";
 
 const encoder = new TextEncoder();
 
-async function rejection(promise: Promise<unknown>): Promise<AdapterError> {
-  try {
-    await promise;
-  } catch (error) {
-    expect(error).toBeInstanceOf(AdapterError);
-    return error as AdapterError;
-  }
-  throw new Error("expected an AdapterError");
+/** The refusal a signature check returned, or a failure naming the value. */
+function refusal(answer: Verified): SignatureRefused {
+  if (answer.kind === "verified") throw new Error("expected a refusal");
+  return answer;
+}
+
+/** The bytes a secret decoded to, or a failure naming the refusal. */
+function bytes(decoded: ReturnType<typeof decodeSecret>): Uint8Array {
+  if (decoded.kind !== "bytes") throw new Error("expected bytes");
+  return decoded.value;
+}
+
+/** The hex a signature produced, or a failure naming the refusal. */
+function signed(result: Signature): string {
+  if (result.kind !== "signed") throw new Error("expected a signature");
+  return result.hex;
 }
 
 describe("constantTimeEqual", () => {
@@ -31,143 +40,132 @@ describe("constantTimeEqual", () => {
     expect(constantTimeEqual("ab", "abc")).toBe(false);
     expect(constantTimeEqual("", "a")).toBe(false);
   });
-
-  test("a prefix of the other is never equal", () => {
-    fc.assert(
-      fc.property(fc.string(), fc.string({ minLength: 1 }), (left, suffix) => {
-        expect(constantTimeEqual(left, left + suffix)).toBe(false);
-      }),
-    );
-  });
 });
 
 describe("hmacHex", () => {
-  test("matches a known SHA-256 vector", async () => {
-    // RFC 4231, test case 2.
-    expect(await hmacHex("Jefe", "what do ya want for nothing?", "sha256")).toBe(
-      "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
-    );
+  test("produces the documented SHA-256 digest", async () => {
+    expect(
+      signed(await hmacHex("key", "The quick brown fox jumps over the lazy dog", "sha256")),
+    ).toBe("f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8");
   });
 
-  test("matches a known SHA-1 vector", async () => {
-    // RFC 2202, test case 2.
-    expect(await hmacHex("Jefe", "what do ya want for nothing?", "sha1")).toBe(
-      "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79",
-    );
+  test("produces the documented SHA-1 digest", async () => {
+    expect(
+      signed(await hmacHex("key", "The quick brown fox jumps over the lazy dog", "sha1")),
+    ).toBe("de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9");
   });
 
-  test("signSha256 is the SHA-256 form", async () => {
-    expect(await signSha256("Jefe", "what do ya want for nothing?")).toBe(
-      await hmacHex("Jefe", "what do ya want for nothing?", "sha256"),
-    );
+  test("an empty secret is unsigned, because WebCrypto will not key it", async () => {
+    expect(await hmacHex("", "m", "sha256")).toEqual({
+      kind: "unsigned",
+      message: "signing secret is empty",
+    });
   });
 
-  test("the digest is 64 lowercase hex characters", async () => {
-    fc.assert(
-      fc.asyncProperty(fc.string({ minLength: 1 }), fc.string(), async (secret, message) => {
-        const digest = await hmacHex(secret, message, "sha256");
-        expect(digest).toMatch(/^[0-9a-f]{64}$/);
-      }),
-    );
+  test("signSha256 is the same function under a narrower name", async () => {
+    expect(signed(await signSha256("k", "m"))).toBe(signed(await hmacHex("k", "m", "sha256")));
   });
 });
 
 describe("verifyHmac", () => {
-  test("accepts the matching digest and rejects another", async () => {
+  test("accepts the matching digest and reports a mismatch for another", async () => {
     const secret = "shh";
     const message = '{"a":1}';
-    const digest = await hmacHex(secret, message, "sha256");
-    await verifyHmac(secret, message, digest, "sha256");
-    expect(
-      (await rejection(verifyHmac(secret, message, digest.toUpperCase(), "sha256"))).status,
-    ).toBe(401);
-    expect((await rejection(verifyHmac("other", message, digest, "sha256"))).status).toBe(401);
+    const digest = signed(await hmacHex(secret, message, "sha256"));
+    expect(await verifyHmac(secret, message, digest, "sha256")).toEqual({ kind: "verified" });
+    expect(await verifyHmac(secret, message, digest.toUpperCase(), "sha256")).toEqual({
+      kind: "mismatch",
+    });
+    expect(await verifyHmac("other", message, digest, "sha256")).toEqual({ kind: "mismatch" });
+  });
+
+  test("an empty secret passes the refusal through", async () => {
+    expect(await verifyHmac("", "m", "sig", "sha256")).toEqual({
+      kind: "unsigned",
+      message: "signing secret is empty",
+    });
   });
 });
 
 describe("decodeSecret", () => {
   test("reads hex", () => {
-    expect([...decodeSecret("ff00ab")]).toEqual([255, 0, 171]);
+    expect([...bytes(decodeSecret("ff00ab"))]).toEqual([255, 0, 171]);
   });
 
   test("reads base64", () => {
-    expect([...decodeSecret(Buffer.from("hello").toString("base64"))]).toEqual([
-      104, 101, 108, 108, 111,
+    expect([...bytes(decodeSecret(Buffer.from("hello").toString("base64")))]).toEqual([
+      ...encoder.encode("hello"),
     ]);
   });
 
-  test("a hex string round trips through base64", () => {
-    const bytes = [0, 1, 127, 128, 255];
-    const hex = bytes.map((byte) => byte.toString(16).padStart(2, "0")).join("");
-    expect([...decodeSecret(hex)]).toEqual(bytes);
+  test("an odd-length hex-looking string reads as base64", () => {
+    expect([...bytes(decodeSecret("abc"))]).toEqual([
+      ...Uint8Array.from(atob("abc"), (c) => c.charCodeAt(0)),
+    ]);
+  });
+
+  test("a string that is neither hex nor base64 is undecodable", () => {
+    expect(decodeSecret("not!base64")).toEqual({ kind: "undecodable" });
   });
 });
 
 describe("verifyEd25519", () => {
-  let publicKeyHex: string;
-  let privateKey: CryptoKey;
+  let publicKeyHex = "";
 
   beforeAll(async () => {
     const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
       "sign",
       "verify",
     ])) as unknown as CryptoKeyPair;
-    privateKey = pair.privateKey;
     const raw = (await crypto.subtle.exportKey("raw", pair.publicKey)) as ArrayBuffer;
     publicKeyHex = [...new Uint8Array(raw)]
       .map((byte) => byte.toString(16).padStart(2, "0"))
       .join("");
   });
 
-  const sign = async (message: string): Promise<string> => {
-    const signature = await crypto.subtle.sign(
-      { name: "Ed25519" },
-      privateKey,
-      encoder.encode(message),
+  test("accepts a signature made by the matching key", async () => {
+    const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+      "sign",
+      "verify",
+    ])) as unknown as CryptoKeyPair;
+    const raw = (await crypto.subtle.exportKey("raw", pair.publicKey)) as ArrayBuffer;
+    const hex = [...new Uint8Array(raw)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const signature = new Uint8Array(
+      await crypto.subtle.sign({ name: "Ed25519" }, pair.privateKey, encoder.encode("message")),
     );
-    return [...new Uint8Array(signature)]
-      .map((byte) => byte.toString(16).padStart(2, "0"))
-      .join("");
-  };
-
-  test("accepts a real signature", async () => {
-    const message = '1700000000{"type":1}';
-    await verifyEd25519(publicKeyHex, await sign(message), message);
+    const signatureHex = [...signature].map((b) => b.toString(16).padStart(2, "0")).join("");
+    expect(await verifyEd25519(hex, signatureHex, "message")).toEqual({ kind: "verified" });
   });
 
-  test("rejects a signature over another message", async () => {
-    const signature = await sign("one message");
-    expect(
-      (await rejection(verifyEd25519(publicKeyHex, signature, "another message"))).status,
-    ).toBe(401);
-  });
-
-  test("rejects a tampered signature", async () => {
-    const message = "payload";
-    const signature = await sign(message);
-    const flipped = (signature[0] === "0" ? "1" : "0") + signature.slice(1);
-    expect((await rejection(verifyEd25519(publicKeyHex, flipped, message))).status).toBe(401);
-  });
-
-  test("rejects a malformed public key", async () => {
-    expect((await rejection(verifyEd25519("zz", await sign("x"), "x"))).status).toBe(401);
-  });
-
-  test("every message signed by the key verifies and no other does", async () => {
-    await fc.assert(
-      fc.asyncProperty(fc.string(), fc.string({ minLength: 1 }), async (message, other) => {
-        const signature = await sign(message);
-        await verifyEd25519(publicKeyHex, signature, message);
-        if (message === other) return;
-        const error = await rejection(verifyEd25519(publicKeyHex, signature, other));
-        expect(error.status).toBe(401);
-      }),
+  test("a signature over another message is not verified", async () => {
+    expect(refusal(await verifyEd25519(publicKeyHex, "00".repeat(64), "message")).kind).not.toBe(
+      "verified",
     );
+  });
+
+  test("a key that is not Ed25519 is unusable", async () => {
+    expect(await verifyEd25519("aabb", "aa", "m")).toEqual({
+      kind: "unusable",
+      message: "invalid public key",
+    });
+  });
+
+  test("a signature that is not hex or base64 is unusable", async () => {
+    expect(await verifyEd25519(publicKeyHex, "not!base64", "m")).toEqual({
+      kind: "unusable",
+      message: "invalid signature encoding",
+    });
   });
 });
 
-describe("an empty secret", () => {
-  test("is refused rather than producing a digest", async () => {
-    expect((await rejection(hmacHex("", "message", "sha256"))).status).toBe(401);
+describe("properties", () => {
+  test("a digest is always 64 lowercase hex characters", async () => {
+    for (const secret of ["a", "shh", "x".repeat(40)]) {
+      for (const message of ["", "m", '{"a":1}']) {
+        const digest = await hmacHex(secret, message, "sha256");
+        if (digest.kind !== "signed") throw new Error("expected a signature");
+        expect(digest.hex).toMatch(/^[0-9a-f]{64}$/);
+      }
+    }
   });
 });

@@ -101,7 +101,7 @@ describe("run", () => {
     await running;
     expect(events.at(-1)).toMatchObject({
       type: "turn.failed",
-      error: "-32600: error needs a numeric code and a message",
+      error: "-32603: value has the wrong shape",
     });
   });
 
@@ -321,7 +321,9 @@ describe("edge frames", () => {
 
   test("an event encodes as a gateway notification", () => {
     const text = encodeEvent({ type: "session.bound", sessionId: "s", acpSessionId: "a" });
-    expect(decodeMessage(text)).toEqual({
+    const decoded = decodeMessage(text);
+    if (decoded.kind === "rejected") throw new Error(decoded.message);
+    expect(decoded.message).toEqual({
       kind: "notification",
       method: "gateway/event",
       params: { type: "session.bound", sessionId: "s", acpSessionId: "a" },
@@ -438,5 +440,23 @@ describe("error messages", () => {
     expect(errorMessage("plain")).toBe("plain");
     expect(errorMessage(42)).toBe("42");
     expect(errorMessage(undefined)).toBe("undefined");
+  });
+});
+
+describe("a frame the edge cannot read", () => {
+  test("a body that is not JSON reads as no command", () => {
+    expect(parseEdgeFrame("not json")).toBeUndefined();
+  });
+
+  test("a JSON-RPC message with params that are not a frame reads as no command", () => {
+    expect(
+      parseEdgeFrame(JSON.stringify({ jsonrpc: "2.0", method: "x", params: { type: "nope" } })),
+    ).toBeUndefined();
+  });
+
+  test("a well-formed frame reads as its command", () => {
+    expect(
+      parseEdgeFrame(JSON.stringify({ jsonrpc: "2.0", method: "x", params: { type: "ping" } })),
+    ).toEqual({ type: "ping" });
   });
 });

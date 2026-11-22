@@ -8,9 +8,9 @@ import {
   ProtocolError,
   RpcErrorCode,
   type RequestId,
-  type RpcMessage,
 } from "../jsonrpc.ts";
 import { AgentMethod, ClientMethod, PROTOCOL_VERSION } from "./types.ts";
+
 import {
   decodeCreateTerminalParams,
   decodeInitializeResult,
@@ -39,6 +39,7 @@ import {
   type WaitForTerminalExitResult,
   type WriteTextFileParams,
 } from "./types.ts";
+import type { Decoded, Decoder } from "../decode.ts";
 
 export interface Channel {
   send(text: string): void;
@@ -76,10 +77,19 @@ const noHandler = (method: string): ProtocolError =>
   new ProtocolError(RpcErrorCode.MethodNotFound, `this client does not handle ${method}`);
 
 function routes(handlers: AgentRequestHandlers): Record<string, Route> {
+  /**
+   * A route decodes its params first. A body the decoder refuses becomes the
+   * JSON-RPC error the peer sees, so no handler ever receives a partial object.
+   */
   const route =
-    <T>(decode: (value: unknown) => T, then: (value: T) => Promise<unknown>): Route =>
-    (params) =>
-      then(decode(params));
+    <T>(decode: Decoder<T>, then: (value: T) => Promise<unknown>): Route =>
+    async (params) => {
+      const decoded = decode(params);
+      if (decoded.kind === "rejected") {
+        throw new ProtocolError(RpcErrorCode.InvalidParams, decoded.message);
+      }
+      return then(decoded.value);
+    };
 
   return {
     [ClientMethod.RequestPermission]: route(decodeRequestPermissionParams, (params) =>
@@ -104,7 +114,7 @@ function routes(handlers: AgentRequestHandlers): Record<string, Route> {
     ),
     [ClientMethod.TerminalOutput]: route(decodeTerminalRefParams, async (params) => {
       if (!handlers.terminalOutput) throw noHandler(ClientMethod.TerminalOutput);
-      return decodeTerminalOutputResult(await handlers.terminalOutput(params));
+      return unwrap(decodeTerminalOutputResult(await handlers.terminalOutput(params)));
     }),
     [ClientMethod.WaitForTerminalExit]: route(decodeTerminalRefParams, (params) =>
       handlers.waitForTerminalExit
@@ -173,15 +183,21 @@ export class AcpClient {
   }
 
   initialize(params: InitializeParams): Promise<InitializeResult> {
-    return this.request(AgentMethod.Initialize, params).then(decodeInitializeResult);
+    return this.request(AgentMethod.Initialize, params).then((result) =>
+      unwrap(decodeInitializeResult(result)),
+    );
   }
 
   newSession(params: NewSessionParams): Promise<NewSessionResult> {
-    return this.request(AgentMethod.NewSession, params).then(decodeNewSessionResult);
+    return this.request(AgentMethod.NewSession, params).then((result) =>
+      unwrap(decodeNewSessionResult(result)),
+    );
   }
 
   prompt(sessionId: string, prompt: ContentBlock[]): Promise<PromptResult> {
-    return this.request(AgentMethod.Prompt, { sessionId, prompt }).then(decodePromptResult);
+    return this.request(AgentMethod.Prompt, { sessionId, prompt }).then((result) =>
+      unwrap(decodePromptResult(result)),
+    );
   }
 
   /** `session/cancel` is a notification: the agent answers through the prompt response. */
@@ -198,12 +214,9 @@ export class AcpClient {
    * report it to, and one bad frame must not end the session.
    */
   receive(text: string): void {
-    let message: RpcMessage;
-    try {
-      message = decodeMessage(text);
-    } catch {
-      return;
-    }
+    const decoded = decodeMessage(text);
+    if (decoded.kind === "rejected") return;
+    const message = decoded.message;
     switch (message.kind) {
       case "result":
         this.#settle(message.id, (pending) => pending.resolve(message.result));
@@ -235,7 +248,8 @@ export class AcpClient {
     const handler = this.#handlers.onSessionUpdate;
     if (method !== ClientMethod.SessionUpdate) return;
     if (!handler) return;
-    handler(decodeSessionUpdate(isRecord(params) ? params.update : undefined));
+    const update = decodeSessionUpdate(isRecord(params) ? params.update : undefined);
+    if (update.kind === "decoded") handler(update.value);
   }
 
   async #answer(id: RequestId, method: string, params: unknown): Promise<void> {
@@ -258,4 +272,14 @@ function asProtocolError(error: unknown): ProtocolError {
     RpcErrorCode.InternalError,
     error instanceof Error ? error.message : String(error),
   );
+}
+
+/**
+ * A decoded result, or the protocol error the peer's malformed answer deserves.
+ * The client's promise is the seam a caller awaits, so a bad answer rejects it
+ * here rather than handing back a value nobody checked.
+ */
+function unwrap<T>(decoded: Decoded<T>): T {
+  if (decoded.kind === "decoded") return decoded.value;
+  throw new ProtocolError(RpcErrorCode.InternalError, decoded.message);
 }

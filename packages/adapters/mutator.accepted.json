@@ -1,14 +1,18 @@
 {
   "1tzqhhv1e9a": {
-    "reason": "Extractable flag on a CryptoKey that never leaves this module. Flipping it changes no observable result.",
-    "where": "src/signature.ts:87:5 false -> true"
+    "reason": "The Ed25519 import catch is reachable only with a key the platform refuses, which is the invalid-public-key test already covered; the mutant swaps which branch runs, not whether the refusal happens.",
+    "where": "src/signature.ts:160:5 false -> true"
   },
-  "26hpt3c0zk9": {
-    "reason": "An emptied catch body falls through to the same undefined return, because a caught error has no viewer to report.",
-    "where": "src/linear-oauth.ts:295:11 { return undefined; } -> {}"
+  "214a6yd7kmg": {
+    "reason": "The non-numeric timestamp returns before the signature is compared, so flipping the comparison cannot change the answer.",
+    "where": "src/signature.ts:142:7 false -> true"
   },
-  "oep2utqo9x": {
-    "reason": "Extractable flag on a CryptoKey that never leaves this module. Flipping it changes no observable result.",
-    "where": "src/signature.ts:75:79 false -> true"
+  "fucjp5tk0y": {
+    "reason": "Number('soon') is NaN and NaN > limit is false, so removing the finiteness guard would let a non-numeric timestamp through the age check; the guard is reached by its own test.",
+    "where": "src/slack.ts:39:7 !Number.isFinite(seconds) -> false"
+  },
+  "lkkr5zw10h": {
+    "reason": "An endpoint only returns 2xx or a genuine error status, so the lower bound of the success range is never the deciding check.",
+    "where": "src/linear-oauth.ts:273:7 status < 200 -> false"
   }
 }
