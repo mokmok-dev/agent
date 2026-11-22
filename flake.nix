@@ -69,7 +69,7 @@
               cp -r node_modules $out/node_modules
             '';
             outputHashMode = "recursive";
-            outputHash = "sha256-mU8/NQ/g2+ohmUa2ufHUP5YhXVinF82ApFxPErW3Opw=";
+            outputHash = "sha256-av/fROKSiU6q/xB2iHH36MQhvkdRd0pMe2E/EMmnEa4=";
           };
 
           # One derivation per check. `node_modules` and the workspace packages
