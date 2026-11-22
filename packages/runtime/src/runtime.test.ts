@@ -38,21 +38,16 @@ class FakeContainer implements SandboxContainer {
   }
 }
 
-/** One line in, one line out, then a clean exit, for whichever target hosts it. */
+/** One line in, the answering line out, for whichever target hosts the process. */
 async function roundTrip(target: RuntimeTarget): Promise<string[]> {
   const process = target.spawn("bun", [AGENT]);
   const out: string[] = [];
-  let exited = false;
-  process.once("exit", () => {
-    exited = true;
-  });
   process.stdout?.onLine((line) => out.push(line));
   process.stdin?.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" })}\n`);
   for (let attempt = 0; attempt < 100 && out.length === 0; attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   process.kill();
-  expect(exited || true).toBe(true);
   return out;
 }
 
