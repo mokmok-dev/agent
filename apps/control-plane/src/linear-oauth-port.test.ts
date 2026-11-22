@@ -130,17 +130,28 @@ describe("finishing the login", () => {
     expect(port.paramses[0]).toEqual(params);
   });
 
-  test("answers a refusal with its own status and message", async () => {
-    const refusal = Object.assign(new Error("state does not match"), { status: 400 });
-    const port = new FakePort(refusal);
+  test("a callback refusal is a 400, whatever the thrown error's own fields", async () => {
+    const port = new FakePort(new Error("linear callback state does not match"));
     const response = await finishLogin(port, {}, 10);
     expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: { message: "state does not match" } });
+    expect(await response.json()).toEqual({
+      error: { message: "linear callback state does not match" },
+    });
   });
 
-  test("a refusal with no status is a 500", async () => {
+  test("a bad token response is a 502, because Linear answered something unusable", async () => {
+    const port = new FakePort(new Error("linear token response has no refresh token"));
+    expect((await finishLogin(port, {}, 0)).status).toBe(502);
+  });
+
+  test("an unreachable token endpoint is a 502", async () => {
+    const port = new FakePort(new Error("linear token endpoint unreachable: offline"));
+    expect((await finishLogin(port, {}, 0)).status).toBe(502);
+  });
+
+  test("an unrecognized failure is a 400, because the object only refuses callbacks", async () => {
     const response = await finishLogin(new FakePort(new Error("boom")), {}, 0);
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(400);
   });
 
   test("a thrown non-error still answers with its text", async () => {

@@ -48,13 +48,23 @@ export async function finishLogin(
     const credential = await port.complete(params, now);
     return page("Linear connected", describe(credential));
   } catch (error) {
+    // An error thrown across a Durable Object RPC arrives as a rebuilt error
+    // without its own fields, so the status is recovered from the message the
+    // adapters give each refusal.
     const message = error instanceof Error ? error.message : String(error);
-    const status = (error as { status?: unknown }).status;
-    return Response.json(
-      { error: { message } },
-      { status: typeof status === "number" ? status : 500 },
-    );
+    return Response.json({ error: { message } }, { status: statusOf(message) });
   }
+}
+
+/**
+ * The refusal's own status. A Durable Object RPC rebuilds a thrown error, so its
+ * `status` field does not survive; the callbacks and the token endpoint are
+ * client errors, which the message distinguishes from a bad response.
+ */
+function statusOf(message: string): number {
+  return message.startsWith("linear token response") || message.startsWith("linear token endpoint")
+    ? 502
+    : 400;
 }
 
 function describe(credential: LinearCredential): string {
