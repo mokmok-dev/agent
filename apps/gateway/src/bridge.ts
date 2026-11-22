@@ -111,8 +111,10 @@ export class AcpBridge {
     if (turn === undefined) return;
     // The agent's words are what a Linear reply carries, so the chunks are
     // collected as they arrive and the text travels with the completed event.
-    if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
-      turn.text += update.content.text;
+    // The two checks are separate statements because each is its own question:
+    // is this a message at all, and does it carry text.
+    if (update.sessionUpdate === "agent_message_chunk") {
+      if (update.content.type === "text") turn.text += update.content.text;
     }
     this.#emit({ type: "turn.update", turnId: turn.turnId, sessionId: turn.sessionId, update });
   }

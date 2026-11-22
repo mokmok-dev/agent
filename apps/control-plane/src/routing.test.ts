@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_POLICY } from "@agent/capability";
+import { AGENTS, DEFAULT_POLICY } from "@agent/capability";
 import { routingPolicyOf, unknownAgents } from "./routing.ts";
 
 describe("the routing a deployment states", () => {
@@ -60,6 +60,60 @@ describe("the routing a deployment states", () => {
   test("an empty agent string falls back to the shipped default", () => {
     expect(routingPolicyOf({ AGENT_DEFAULT: "   " }).defaultAgent).toBe(
       DEFAULT_POLICY.defaultAgent,
+    );
+  });
+});
+
+describe("the exact parsing rules", () => {
+  test("a runtime list entry of only whitespace is dropped, not kept as a runtime", () => {
+    expect(routingPolicyOf({ AGENT_RUNTIMES: " , local-vm, " }).runtimePreference).toEqual([
+      "local-vm",
+    ]);
+  });
+
+  test("a runtime list with no separator is one entry", () => {
+    expect(routingPolicyOf({ AGENT_RUNTIMES: "local-vm" }).runtimePreference).toEqual(["local-vm"]);
+  });
+
+  test("an agent of only whitespace reads as unstated", () => {
+    expect(routingPolicyOf({ AGENT_DEFAULT: "   " }).defaultAgent).toBe(
+      DEFAULT_POLICY.defaultAgent,
+    );
+  });
+
+  test("an agent with surrounding whitespace is the agent, not a different name", () => {
+    expect(routingPolicyOf({ AGENT_DEFAULT: "\tcodex\n" }).defaultAgent).toBe("codex");
+  });
+
+  test("an unknown agent is not reported when the field is absent or blank", () => {
+    expect(unknownAgents({})).toEqual([]);
+    expect(unknownAgents({ AGENT_DEFAULT: "" })).toEqual([]);
+    expect(unknownAgents({ AGENT_DEFAULT: "  " })).toEqual([]);
+  });
+
+  test("an unknown agent with whitespace is reported trimmed", () => {
+    expect(unknownAgents({ AGENT_DEFAULT: " nope " })).toEqual(["nope"]);
+  });
+
+  test("every known agent is accepted as a default", () => {
+    for (const agent of AGENTS) {
+      expect(routingPolicyOf({ AGENT_DEFAULT: agent }).defaultAgent).toBe(agent);
+      expect(unknownAgents({ AGENT_DEFAULT: agent })).toEqual([]);
+    }
+  });
+
+  test("an available list is resolved separately from the preference", () => {
+    const policy = routingPolicyOf({
+      AGENT_RUNTIMES: "cloudflare-sandbox,local-vm",
+      AGENT_AVAILABLE_RUNTIMES: "local-vm",
+    });
+    expect(policy.runtimePreference).toEqual(["cloudflare-sandbox", "local-vm"]);
+    expect(policy.available).toEqual(["local-vm"]);
+  });
+
+  test("an available list of only unknown runtimes falls back", () => {
+    expect(routingPolicyOf({ AGENT_AVAILABLE_RUNTIMES: "nope" }).available).toEqual(
+      DEFAULT_POLICY.available,
     );
   });
 });

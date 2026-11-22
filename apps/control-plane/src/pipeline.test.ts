@@ -3,7 +3,7 @@ import { createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { onHello, onMessage } from "./gateway-connection.ts";
+import { frameText, onHello, onMessage } from "./gateway-connection.ts";
 import { effectOf, nextPrompt, reportOf } from "./gateway-plane.ts";
 import { SessionObject } from "./session-do.ts";
 import { ThreadIndexObject } from "./thread-index-do.ts";
@@ -23,6 +23,17 @@ import type { LinearOAuthPort } from "./linear-oauth-port.ts";
 
 const SECRET = "linear-test-secret";
 const SESSION = "linear:org-local:issue-local:sess-local";
+
+/**
+ * The whole step a connection produced. Asserting the shape, not one field,
+ * is what pins "nothing was sent and the connection kept its session".
+ */
+function ignoredStep(sessionId: string | undefined): {
+  send: string[];
+  connection: { sessionId: string | undefined };
+} {
+  return { send: [], connection: { sessionId } };
+}
 
 /** The deployment's Linear authorization, with a token that never expires. */
 function oauthPort(): LinearOAuthPort {
@@ -100,10 +111,12 @@ describe("a Linear mention routed to the local VM", () => {
       expect(response.status).toBe(202);
 
       const session = await sessionObjects().session(SESSION);
-      expect(session?.selection).toMatchObject({
+      // The whole route, so a wrong model or protocol cannot pass unnoticed.
+      expect(session?.selection).toEqual({
+        agent: "claude-code",
         runtime: "local-vm",
         protocol: "stdio",
-        agent: "claude-code",
+        model: { provider: "anthropic", modelId: "claude-opus-4-7" },
       });
 
       const turn = (await sessionObjects().turns(SESSION))[0];
@@ -150,7 +163,7 @@ describe("the gateway connection", () => {
     try {
       await controlPlane(signedSession(sessionEvent("write the note")), env);
       const step = await onHello(sessionObjects(), SESSION, 1_000);
-      expect(step.send).toHaveLength(1);
+      expect(step.connection).toEqual({ sessionId: SESSION });
       // The frame is a JSON-RPC notification, because the gateway parses every
       // message with the ACP codec; `params` is the command itself.
       const envelope = JSON.parse(step.send[0] ?? "{}") as {
@@ -158,7 +171,8 @@ describe("the gateway connection", () => {
         params: Record<string, unknown>;
       };
       expect(envelope.method).toBe("gateway/command");
-      expect(envelope.params).toMatchObject({
+      // The whole params object, so no field can be silently dropped.
+      expect(envelope.params).toEqual({
         type: "prompt",
         sessionId: SESSION,
         turnId: "t1",
@@ -179,6 +193,49 @@ describe("the gateway connection", () => {
     try {
       const step = await onHello(sessionObjects(), "no-such-session", 1);
       expect(step.send).toEqual([]);
+      // The connection still learns which session it asked for, so a later
+      // message is attributed to it rather than dropped.
+      expect(step.connection).toEqual({ sessionId: "no-such-session" });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a session with no queued turn still binds its connection to the id", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("already done")), env);
+      await onHello(sessionObjects(), SESSION, 1_000);
+      // Settle it, so the queue is empty but the session exists.
+      await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: { type: "turn.started", sessionId: SESSION, turnId: "t1" },
+        }),
+        1_001,
+      );
+      await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: {
+            type: "turn.completed",
+            sessionId: SESSION,
+            turnId: "t1",
+            stopReason: "end_turn",
+            text: "x",
+          },
+        }),
+        1_002,
+      );
+      const step = await onHello(sessionObjects(), SESSION, 1_003);
+      expect(step.send).toEqual([]);
+      expect(step.connection).toEqual({ sessionId: SESSION });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -426,5 +483,547 @@ describe("the payload the gateway sends", () => {
       turnId: "t2",
       text: "text",
     });
+  });
+});
+
+describe("what the connection ignores", () => {
+  test("a message that is not JSON leaves the connection and the send list alone", async () => {
+    const { dir, sessionObjects } = await deployment();
+    try {
+      const step = await onMessage(sessionObjects(), { sessionId: SESSION }, "{not json", 1);
+      expect(step).toEqual(ignoredStep(SESSION));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a frame that is not a report is ignored without touching storage", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("hello")), env);
+      const step = await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "turn.update",
+          params: { type: "turn.update", sessionId: SESSION },
+        }),
+        1_000,
+      );
+      expect(step).toEqual(ignoredStep(SESSION));
+      expect((await sessionObjects().turns(SESSION))[0]?.status).toBe("queued");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a report for a session that does not exist moves nothing", async () => {
+    const { dir, sessionObjects } = await deployment();
+    try {
+      const step = await onMessage(
+        sessionObjects(),
+        { sessionId: "missing" },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: { type: "turn.completed", sessionId: "missing", turnId: "t1", text: "x" },
+        }),
+        1_000,
+      );
+      expect(step.send).toEqual([]);
+      expect(step.settled).toBeUndefined();
+      expect(step.connection).toEqual({ sessionId: "missing" });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a connection with no session takes it from the report itself", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("hello")), env);
+      await onHello(sessionObjects(), SESSION, 1_000);
+      await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: { type: "turn.started", sessionId: SESSION, turnId: "t1" },
+        }),
+        1_001,
+      );
+      const step = await onMessage(
+        sessionObjects(),
+        { sessionId: undefined },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: {
+            type: "turn.completed",
+            sessionId: SESSION,
+            turnId: "t1",
+            stopReason: "end_turn",
+            text: "from the report",
+          },
+        }),
+        1_002,
+      );
+      expect(step.connection).toEqual({ sessionId: SESSION });
+      expect(step.settled).toEqual({
+        sessionId: SESSION,
+        replyTo: "sess-local",
+        text: "from the report",
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a bind with an empty ACP id is ignored, because it would lose the binding", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("hello")), env);
+      await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: { type: "session.bound", sessionId: SESSION, acpSessionId: "acp-1" },
+        }),
+        1_000,
+      );
+      await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: { type: "session.bound", sessionId: SESSION, acpSessionId: "" },
+        }),
+        1_001,
+      );
+      expect((await sessionObjects().session(SESSION))?.acpSessionId).toBe("acp-1");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a started event for a turn that is not dispatched is ignored", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("hello")), env);
+      // The turn is queued, not dispatched, so a start would be premature.
+      await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: { type: "turn.started", sessionId: SESSION, turnId: "t1" },
+        }),
+        1_000,
+      );
+      expect((await sessionObjects().turns(SESSION))[0]?.status).toBe("queued");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a completion for a turn that never started is ignored rather than skipped", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("hello")), env);
+      await onHello(sessionObjects(), SESSION, 1_000);
+      const step = await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: { type: "turn.completed", sessionId: SESSION, turnId: "t1", text: "x" },
+        }),
+        1_001,
+      );
+      expect(step.settled).toBeUndefined();
+      expect((await sessionObjects().turns(SESSION))[0]?.status).toBe("dispatched");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a failure for a turn that already completed is ignored", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("hello")), env);
+      await onHello(sessionObjects(), SESSION, 1_000);
+      for (const [type, extra] of [
+        ["turn.started", {}],
+        ["turn.completed", { stopReason: "end_turn", text: "done" }],
+      ] as const) {
+        await onMessage(
+          sessionObjects(),
+          { sessionId: SESSION },
+          JSON.stringify({
+            jsonrpc: "2.0",
+            method: "gateway/event",
+            params: { type, sessionId: SESSION, turnId: "t1", ...extra },
+          }),
+          1_001,
+        );
+      }
+      const step = await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: { type: "turn.failed", sessionId: SESSION, turnId: "t1", error: "late" },
+        }),
+        1_002,
+      );
+      expect(step.settled).toBeUndefined();
+      expect((await sessionObjects().turns(SESSION))[0]?.status).toBe("completed");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an event for a turn the session does not have is ignored", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("hello")), env);
+      const step = await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: { type: "turn.completed", sessionId: SESSION, turnId: "nope", text: "x" },
+        }),
+        1_000,
+      );
+      expect(step.settled).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the exact step a connection produces", () => {
+  test("a missing session yields nothing to send and keeps the asked-for id", async () => {
+    const { dir, sessionObjects } = await deployment();
+    try {
+      expect(await onHello(sessionObjects(), "missing", 1)).toEqual(ignoredStep("missing"));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a bind yields nothing to send and no settlement", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("hello")), env);
+      const step = await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: { type: "session.bound", sessionId: SESSION, acpSessionId: "acp-1" },
+        }),
+        1_000,
+      );
+      expect(step).toEqual(ignoredStep(SESSION));
+      expect(step).not.toHaveProperty("settled");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a started event yields nothing to send and no settlement", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("hello")), env);
+      await onHello(sessionObjects(), SESSION, 1_000);
+      const step = await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: { type: "turn.started", sessionId: SESSION, turnId: "t1" },
+        }),
+        1_001,
+      );
+      expect(step).toEqual(ignoredStep(SESSION));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the connection is bound to the report's session when it had none", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("hello")), env);
+      const step = await onMessage(
+        sessionObjects(),
+        { sessionId: undefined },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: { type: "session.bound", sessionId: SESSION, acpSessionId: "acp-1" },
+        }),
+        1_000,
+      );
+      expect(step).toEqual(ignoredStep(SESSION));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the gateway route and the executor choice", () => {
+  test("GET /gateway without an upgrade says what it needs, and the route exists", async () => {
+    const { dir, env } = await deployment();
+    try {
+      const response = await controlPlane(new Request("https://x/gateway"), env);
+      expect(response.status).toBe(426);
+      expect(await response.json()).toEqual({ error: "expected a WebSocket upgrade" });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a stdio session never runs the host's runner, and a durable one does", async () => {
+    const { dir } = await deployment();
+    const runs: string[] = [];
+    const runner = {
+      run: async (input: { sessionId: string }) => {
+        runs.push(input.sessionId);
+        return { kind: "answered" as const, text: "from pi" };
+      },
+    };
+    try {
+      // A stdio route is a gateway's process, so the object records and stops.
+      const stdioObject = new SessionObject(
+        new DiskHost(join(dir, "stdio-runs")),
+        {
+          policy: routingPolicyOf({
+            AGENT_DEFAULT: "claude-code",
+            AGENT_RUNTIMES: "local-vm",
+            AGENT_AVAILABLE_RUNTIMES: "local-vm",
+          }),
+        },
+        runner,
+      );
+      await stdioObject.accept(
+        SESSION,
+        { provider: "linear", workspaceId: "w", channelId: "i", threadId: "sess" },
+        "hello",
+        "evt-1",
+        10,
+      );
+      expect(runs).toEqual([]);
+      expect((await stdioObject.turns(SESSION))[0]?.status).toBe("queued");
+
+      // A durable route is this process, so the runner is asked.
+      const durableObject = new SessionObject(
+        new DiskHost(join(dir, "durable-runs")),
+        { policy: routingPolicyOf({}) },
+        runner,
+      );
+      await durableObject.accept(
+        SESSION,
+        { provider: "slack", workspaceId: "T", channelId: "C", threadId: "1" },
+        "hello",
+        "evt-2",
+        10,
+      );
+      expect(runs).toEqual([SESSION]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a message is dispatched only once it is understood", () => {
+  test("a hello arriving over the socket dispatches the queued turn", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("over the socket")), env);
+      const step = await onMessage(
+        sessionObjects(),
+        { sessionId: undefined },
+        JSON.stringify({ type: "hello", sessionId: SESSION }),
+        1_000,
+      );
+      // The handshake is what binds an otherwise anonymous connection.
+      expect(step.connection).toEqual({ sessionId: SESSION });
+      const envelope = JSON.parse(step.send[0] ?? "{}") as { params: { text: string } };
+      expect(envelope.params.text).toBe("over the socket");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a well-formed but unknown frame leaves the connection exactly as it was", async () => {
+    const { dir, sessionObjects } = await deployment();
+    try {
+      const step = await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({ jsonrpc: "2.0", method: "gateway/event", params: { type: "ping" } }),
+        1_000,
+      );
+      expect(step).toEqual(ignoredStep(SESSION));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a message that is not a JSON-RPC notification is not read as a report", async () => {
+    const { dir, sessionObjects } = await deployment();
+    try {
+      const step = await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "1.0",
+          params: { type: "turn.completed", sessionId: SESSION, turnId: "t1" },
+        }),
+        1_000,
+      );
+      // Without `method: gateway/event` the params are not unwrapped, and the
+      // object has no `type` of its own, so nothing happens.
+      expect(step).toEqual(ignoredStep(SESSION));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the frame the control plane sends", () => {
+  test("is a JSON-RPC 2.0 notification the gateway's codec reads", () => {
+    const text = frameText({
+      type: "prompt",
+      sessionId: "s",
+      acpSessionId: "",
+      turnId: "t",
+      text: "hi",
+    });
+    expect(JSON.parse(text)).toEqual({
+      jsonrpc: "2.0",
+      method: "gateway/command",
+      params: { type: "prompt", sessionId: "s", acpSessionId: "", turnId: "t", text: "hi" },
+    });
+  });
+});
+
+describe("the settled step's exact shape", () => {
+  test("a completion yields no frames, the bound connection, and the text", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("hello")), env);
+      await onHello(sessionObjects(), SESSION, 1_000);
+      await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: { type: "turn.started", sessionId: SESSION, turnId: "t1" },
+        }),
+        1_001,
+      );
+      expect(
+        await onMessage(
+          sessionObjects(),
+          { sessionId: SESSION },
+          JSON.stringify({
+            jsonrpc: "2.0",
+            method: "gateway/event",
+            params: {
+              type: "turn.completed",
+              sessionId: SESSION,
+              turnId: "t1",
+              stopReason: "end_turn",
+              text: "done",
+            },
+          }),
+          1_002,
+        ),
+      ).toEqual({
+        send: [],
+        connection: { sessionId: SESSION },
+        settled: { sessionId: SESSION, replyTo: "sess-local", text: "done" },
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a completion with no text settles with an empty body, not a missing one", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("hello")), env);
+      await onHello(sessionObjects(), SESSION, 1_000);
+      await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: { type: "turn.started", sessionId: SESSION, turnId: "t1" },
+        }),
+        1_001,
+      );
+      const step = await onMessage(
+        sessionObjects(),
+        { sessionId: SESSION },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/event",
+          params: {
+            type: "turn.completed",
+            sessionId: SESSION,
+            turnId: "t1",
+            stopReason: "end_turn",
+          },
+        }),
+        1_002,
+      );
+      expect(step.settled).toEqual({ sessionId: SESSION, replyTo: "sess-local", text: "" });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a failure yields no frames and carries the reason, not a text", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("hello")), env);
+      await onHello(sessionObjects(), SESSION, 1_000);
+      expect(
+        await onMessage(
+          sessionObjects(),
+          { sessionId: SESSION },
+          JSON.stringify({
+            jsonrpc: "2.0",
+            method: "gateway/event",
+            params: { type: "turn.failed", sessionId: SESSION, turnId: "t1", error: "boom" },
+          }),
+          1_001,
+        ),
+      ).toEqual({
+        send: [],
+        connection: { sessionId: SESSION },
+        settled: { sessionId: SESSION, replyTo: "sess-local", error: "boom" },
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

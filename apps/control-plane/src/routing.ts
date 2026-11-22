@@ -30,13 +30,15 @@ const isAgent = (value: string): value is Agent => (AGENTS as readonly string[])
 const isRuntime = (value: string): value is Runtime =>
   (RUNTIMES as readonly string[]).includes(value);
 
-/** A comma separated list, trimmed, with the entries the type does not know dropped. */
+/**
+ * A comma separated list, trimmed, with unknown names dropped. `isRuntime`
+ * already rejects a blank entry, because the empty string is not a runtime.
+ */
 function runtimeList(stated: string): Runtime[] {
-  const names = stated
+  return stated
     .split(",")
     .map((name) => name.trim())
-    .filter((name) => name !== "");
-  return names.filter(isRuntime) as Runtime[];
+    .filter(isRuntime);
 }
 
 /**
@@ -50,22 +52,22 @@ function runtimeList(stated: string): Runtime[] {
  * delivery rather than quietly running a different agent.
  */
 export function routingPolicyOf(env: RoutingEnv): RoutingPolicy {
-  const statedAgent = env.AGENT_DEFAULT?.trim();
+  const statedAgent = (env.AGENT_DEFAULT ?? "").trim();
   const preference = runtimeList(env.AGENT_RUNTIMES ?? "");
   const available = runtimeList(env.AGENT_AVAILABLE_RUNTIMES ?? "");
   return {
-    defaultAgent:
-      statedAgent !== undefined && statedAgent !== "" && isAgent(statedAgent)
-        ? statedAgent
-        : DEFAULT_POLICY.defaultAgent,
+    // `isAgent("")` is false, so a blank agent needs no separate check.
+    defaultAgent: isAgent(statedAgent) ? statedAgent : DEFAULT_POLICY.defaultAgent,
     runtimePreference: preference.length > 0 ? preference : DEFAULT_POLICY.runtimePreference,
     available: available.length > 0 ? available : DEFAULT_POLICY.available,
   };
 }
 
-/** The agent names a deployment stated that the catalog does not know. */
+/**
+ * The agent names a deployment stated that the catalog does not know. A blank
+ * field is unstated rather than a typo, so it is not reported.
+ */
 export function unknownAgents(env: RoutingEnv): string[] {
-  const stated = env.AGENT_DEFAULT?.trim();
-  if (stated === undefined || stated === "") return [];
-  return isAgent(stated) ? [] : [stated];
+  const stated = (env.AGENT_DEFAULT ?? "").trim();
+  return stated === "" || isAgent(stated) ? [] : [stated];
 }

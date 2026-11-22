@@ -116,7 +116,7 @@ function replyTargetOf(session: Session): string {
  * A frame as the JSON-RPC notification the gateway's codec reads. The gateway
  * parses every message with the ACP codec, so a bare object would be dropped.
  */
-function frameText(frame: { type: string; [key: string]: unknown }): string {
+export function frameText(frame: { type: string; [key: string]: unknown }): string {
   return JSON.stringify({ jsonrpc: "2.0", method: "gateway/command", params: frame });
 }
 

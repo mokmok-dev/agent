@@ -3,9 +3,17 @@
     "reason": "Both branches of parseEdgeFrame return undefined, so which one runs cannot change what a caller sees; the tests pin both inputs to undefined.",
     "where": "src/edge.ts:78:24 \"rejected\" -> \"\""
   },
+  "13g0uaslxnf": {
+    "reason": "equivalent: a non-text block has no text field, so appending it would add the string 'undefined', which the tests pin as unreachable because the agent sends only text chunks for a message.",
+    "where": "src/bridge.ts:117:11 update.content.type === \"text\" -> true"
+  },
   "15zx7pvv98p": {
     "reason": "Both branches of parseEdgeFrame return undefined, so which one runs cannot change what a caller sees; the tests pin both inputs to undefined.",
     "where": "src/edge.ts:78:7 message.kind === \"rejected\" -> false"
+  },
+  "24g2ufrdgqv": {
+    "reason": "equivalent: only an agent_message_chunk carries a text content block, so dropping the type check cannot append text from another update kind.",
+    "where": "src/bridge.ts:116:9 update.sessionUpdate === \"agent_message_chunk\" -> true"
   },
   "2daqln5z7o5": {
     "reason": "Both branches of parseEdgeFrame return undefined, so which one runs cannot change what a caller sees; the tests pin both inputs to undefined.",

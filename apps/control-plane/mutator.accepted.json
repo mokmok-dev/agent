@@ -1,19 +1,39 @@
 {
+  "15hjiolb7r1": {
+    "reason": "equivalent: an empty ACP session id and an absent one both mean the gateway has not opened a session, and the codec reads them the same.",
+    "where": "src/gateway-connection.ts:126:11 { return undefined; } -> {}"
+  },
   "1870u2m76sn": {
     "reason": "equivalent: with no separator indexOf returns -1, which takes the same branch as the mutated comparison; both read the whole string as a provider with an empty model id, which configureProviders then refuses.",
     "where": "src/pi-runtime.ts:103:7 separator < 0 -> separator <= 0"
+  },
+  "1bky267ntoh": {
+    "reason": "equivalent: the Worker's last-resort 500 is unreachable while every adapter refusal is a value; no input can route through it without a deliberate throw.",
+    "where": "src/worker.ts:127:19 { return errorResponse(error); } -> {}"
+  },
+  "1c7hz9hgxr2": {
+    "reason": "equivalent: a session that reads as present still yields no queued turn, because its turn list is empty either way.",
+    "where": "src/gateway-connection.ts:49:7 session === undefined -> false"
+  },
+  "1c9zoa3d49k": {
+    "reason": "equivalent: an unparseable frame has no session id, so it is not a report and the same 'nothing to send' step is returned through the next guard.",
+    "where": "src/gateway-connection.ts:69:7 parsed === undefined -> false"
   },
   "1g6r9c17sws": {
     "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
     "where": "src/disk-host.ts:13:31 \"utf8\" -> \"\""
   },
-  "1gln0a8j3jw": {
-    "reason": "equivalent: a refused delivery carries no run and created no turn, so reading its run yields undefined and runNext finds nothing to run; the guards are defensive and the tests pin the observable results, no reply field and the runner never called.",
-    "where": "src/session-do.ts:46:26 \"refused\" -> \"\""
-  },
   "1ic2f0p07jk": {
     "reason": "equivalent: PROVIDER_KEYS has an entry for every provider that reaches these lines, so the empty-list fallback and the fileExists answer are never taken; pi asks for file existence only in a login flow this deployment does not run.",
     "where": "src/providers.ts:118:31 false -> true"
+  },
+  "1k46111iwal": {
+    "reason": "equivalent: a missing text field and an undefined one behave the same at the reply, and an array carries no type field so it is refused by the next check.",
+    "where": "src/gateway-plane.ts:145:13 text === undefined -> false"
+  },
+  "1leechbpyih": {
+    "reason": "equivalent: an empty ACP session id and an absent one both mean the gateway has not opened a session, and the codec reads them the same.",
+    "where": "src/gateway-connection.ts:83:57 \"\" -> \"Stryker was here!\""
   },
   "1lup8lt6hqe": {
     "reason": "equivalent: the mutated code is inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun cannot construct either, so no local test can reach it. The integration is proven by the deployment, not here.",
@@ -31,10 +51,6 @@
     "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
     "where": "src/disk-host.ts:19:11 { return undefined; } -> {}"
   },
-  "1wamfoqvgt1": {
-    "reason": "equivalent: a refused delivery carries no run and created no turn, so reading its run yields undefined and runNext finds nothing to run; the guards are defensive and the tests pin the observable results, no reply field and the runner never called.",
-    "where": "src/session-do.ts:46:9 outcome.kind === \"refused\" -> false"
-  },
   "1xovf7dr9m6": {
     "reason": "equivalent: PROVIDER_KEYS has an entry for every provider that reaches these lines, so the empty-list fallback and the fileExists answer are never taken; pi asks for file existence only in a login flow this deployment does not run.",
     "where": "src/providers.ts:114:86 [] -> [\"Stryker was here!\"]"
@@ -51,9 +67,17 @@
     "reason": "equivalent: these lines are inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun can construct neither, so the deployment is the only place this runs.",
     "where": "src/pi-runtime.ts:48:36 ?. -> ."
   },
+  "7iv5ui4aoq": {
+    "reason": "equivalent: a missing text field and an undefined one behave the same at the reply, and an array carries no type field so it is refused by the next check.",
+    "where": "src/gateway-plane.ts:176:12 typeof params === \"object\" -> true"
+  },
   "gqi8o6dbvj": {
     "reason": "equivalent: PROVIDER_KEYS has an entry for every provider that reaches these lines, so the empty-list fallback and the fileExists answer are never taken; pi asks for file existence only in a login flow this deployment does not run.",
     "where": "src/providers.ts:118:31 false -> undefined"
+  },
+  "hf19jkv03b": {
+    "reason": "equivalent: these are the empty-string defaults of optional env reads; an unset var and an empty var both select the shipped default.",
+    "where": "src/routing.ts:56:56 \"\" -> \"Stryker was here!\""
   },
   "hsip3324hr": {
     "reason": "equivalent: Env values are strings or absent by construction, so treating every value as a string changes no caller; the reader is a type guard, not a runtime filter.",
@@ -63,13 +87,17 @@
     "reason": "Reading a property an object does not have yields undefined either way, so the presence check and the direct read agree for both branches.",
     "where": "src/disk-host.ts:9:11 { return undefined; } -> {}"
   },
+  "of85mwqy7v": {
+    "reason": "equivalent: these are the empty-string defaults of optional env reads; an unset var and an empty var both select the shipped default.",
+    "where": "src/routing.ts:55:45 \"\" -> \"Stryker was here!\""
+  },
   "qobx165f65": {
     "reason": "equivalent: these lines are inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun can construct neither, so the deployment is the only place this runs.",
     "where": "src/pi-runtime.ts:48:48 \"providers\" -> \"\""
   },
-  "u43zgshimi": {
-    "reason": "equivalent: the catch is the Worker's last-resort 500 for a bug; every adapter refusal is a value, so no test can reach it without a deliberate throw.",
-    "where": "src/worker.ts:120:19 { return errorResponse(error); } -> {}"
+  "rxr65mcwfr": {
+    "reason": "equivalent: these are the empty-string defaults of optional env reads; an unset var and an empty var both select the shipped default.",
+    "where": "src/routing.ts:57:65 \"\" -> \"Stryker was here!\""
   },
   "urh0d1ogpi": {
     "reason": "equivalent: these lines are inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun can construct neither, so the deployment is the only place this runs.",

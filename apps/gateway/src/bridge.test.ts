@@ -460,3 +460,57 @@ describe("a frame the edge cannot read", () => {
     ).toEqual({ type: "ping" });
   });
 });
+
+describe("the text a turn produced", () => {
+  const openTurn = async (updates: unknown[]) => {
+    const context = bridge();
+    const opened = context.bridge.open("sess-1", "/work");
+    context.agent.answer(1, { protocolVersion: 1 });
+    await until(() => context.agent.outbound().length === 2);
+    context.agent.answer(2, { sessionId: "acp-9" });
+    await opened;
+    context.events.length = 0;
+    const running = context.bridge.run("sess-1", "acp-9", "turn-1", "do it");
+    for (const update of updates) {
+      context.agent.update("acp-9", update as never);
+    }
+    context.agent.answer(3, { stopReason: "end_turn" });
+    await running;
+    return context;
+  };
+
+  test("the completed event carries the agent's message text", async () => {
+    const { events } = await openTurn([
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "the answer" } },
+    ]);
+    expect(events.at(-1)).toEqual({
+      type: "turn.completed",
+      turnId: "turn-1",
+      sessionId: "sess-1",
+      stopReason: "end_turn",
+      text: "the answer",
+    });
+  });
+
+  test("several chunks are concatenated in order", async () => {
+    const { events } = await openTurn([
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "one " } },
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "two" } },
+    ]);
+    expect((events.at(-1) as { text?: string }).text).toBe("one two");
+  });
+
+  test("a turn with no message chunks carries an empty text, never a missing one", async () => {
+    const { events } = await openTurn([
+      { sessionUpdate: "tool_call", toolCallId: "t", status: "completed" },
+    ]);
+    expect(events.at(-1)).toMatchObject({ type: "turn.completed", text: "" });
+  });
+
+  test("a non-text content block does not become the reply", async () => {
+    const { events } = await openTurn([
+      { sessionUpdate: "agent_message_chunk", content: { type: "thinking", thinking: "hidden" } },
+    ]);
+    expect((events.at(-1) as { text?: string }).text).toBe("");
+  });
+});
