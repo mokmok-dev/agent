@@ -1,9 +1,15 @@
 # agent
 
-A control plane for AI coding agents, with the agent running on its own VM.
-A person mentions the agent in Slack, Discord, or Linear. The control plane
-turns that into a session and a turn, the VM runs one ACP agent per session,
-and every update flows back to the thread.
+A control plane for AI coding agents. A person mentions the agent in Slack,
+Discord, or Linear. The control plane turns that into a session, chooses the
+agent, model, and runtime for it, and runs it either in a Cloudflare sandbox or
+on a local VM.
+
+Pi Durable is the conversation: the transcript, the inbox, the retries, and the
+crash recovery. Cloudflare's durable Code Mode rules are the execution base:
+JavaScript, persistence, replay, and approval. A capability router chooses the
+agent, model, and runtime. One runtime port decides whether the agent process
+runs in a sandbox or on the VM.
 
 ## How it fits together
 
@@ -11,34 +17,43 @@ and every update flows back to the thread.
 Slack / Discord / Linear
         │  webhook
         ▼
-apps/control-plane       Cloudflare Worker
-  routes.ts              verify + normalize (delegates to packages/adapters)
-  worker.ts              route to one session object
-  session-do.ts          one Durable Object per conversation
-  thread-index-do.ts     one session id per thread, across races
-        │  outbound WebSocket
+apps/control-plane                Cloudflare Worker
+  routes.ts                       verify + normalize
+  session-service.ts              route, then record the choice
+  session-do.ts                   one Durable Object per conversation
+        │
+        ├── packages/conversation  pi-durable: the agent's own history
+        ├── packages/capability    which agent, model, and runtime
+        ├── packages/execution     replay, approval, execution log
+        └── packages/runtime       sandbox spawn, VM spawn, supervision
+        │
         ▼
-apps/gateway             on the VM
-  main.ts                dial out, replay the local event log
-  bridge.ts              own the ACP client, attribute updates to a turn
-  supervisor.ts          restart a crashed agent up to a limit
-        │  stdio JSON-RPC
-        ▼
-agent process (ACP server)
+agent process                     pi, codex, claude code, opencode, grok build
 ```
 
 The VM only dials out. It accepts no inbound connection, so nothing on the
 internet can reach the agent directly.
 
+## Which agent runs where
+
+| runtime            | agents                                |
+| ------------------ | ------------------------------------- |
+| cloudflare-sandbox | pi, codex                             |
+| local-vm           | pi, claude code, opencode, grok build |
+
 ## Packages
 
-| path                 | what it owns                                                          |
-| -------------------- | --------------------------------------------------------------------- |
-| `packages/protocol`  | JSON-RPC 2.0, the ACP client, and the decoders both sides share       |
-| `packages/store`     | the session and turn model, its transition table, and the repository  |
-| `packages/adapters`  | Slack, Discord, and Linear signature checks and payload normalization |
-| `apps/control-plane` | the Worker, the Durable Objects, and the local dev server             |
-| `apps/gateway`       | the VM bridge, the process supervisor, and line framing               |
+| path                    | what it owns                                                    |
+| ----------------------- | --------------------------------------------------------------- |
+| `packages/protocol`     | JSON-RPC 2.0, the ACP client, and the decoders both sides share |
+| `packages/store`        | the session and turn model, its transition table, and the route |
+| `packages/adapters`     | Slack, Discord, and Linear signature checks and normalization   |
+| `packages/capability`   | the agent catalog and the router                                |
+| `packages/conversation` | pi-durable as the conversation and history base                 |
+| `packages/execution`    | the durable execution and approval state machine                |
+| `packages/runtime`      | the sandbox and VM targets, the supervisor, and line framing    |
+| `apps/control-plane`    | the Worker, the Durable Objects, and the local dev server       |
+| `apps/gateway`          | the VM bridge, the ACP client, and the outbound relay           |
 
 ## Commands
 
@@ -46,12 +61,14 @@ internet can reach the agent directly.
 bun test          # every unit and end to end test
 bun run check     # types across the workspace
 bun run fmt       # format
-bun run mutate    # mutation testing; fails on any undetected mutant
+bun run mutate    # mutation testing, one gate per package
 bun run dev       # local control plane on :8787
 ```
 
-Every package holds its own mutation gate at 100% killed. `nix flake check`
-runs the same four checks in a sandbox.
+Every package holds its own mutation gate at 100% killed. A survivor with no
+observable effect is recorded in that package's `mutator.accepted.json` with
+the reason it is equivalent. `nix flake check` runs the same checks in a
+sandbox.
 
 ## Local end to end
 
@@ -79,4 +96,5 @@ queued ──▶ dispatched ──▶ running ──▶ completed
 
 A delivery is acknowledged with `202` before the agent starts, so a provider
 never retries while a turn runs. A replayed delivery returns the turn it
-already created, keyed by the provider's event id.
+already created, keyed by the provider's event id. A delivery the router
+refuses writes no turn, so the provider can retry it.
