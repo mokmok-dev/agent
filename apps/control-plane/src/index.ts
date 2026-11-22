@@ -52,7 +52,20 @@ export class SessionDurableObject extends DurableObject<Env> {
     threadId: string,
   ): Promise<void> {
     const port = linearReplies(env.LINEAR_OAUTH.getByName("linear") as LinearOAuthPort);
-    await replyFor(port, threadId, outcome, Date.now());
+    // The reply is the last link between a run and the person, and it happens
+    // after the webhook has already answered, so nothing else records what it
+    // did. Its outcome is logged for exactly that reason.
+    try {
+      const result = await replyFor(port, threadId, outcome, Date.now());
+      console.log(
+        `reply for ${threadId}: ${result === undefined ? "nothing-to-say" : result.kind}` +
+          (result?.kind === "failed" ? ` reason=${result.error}` : ""),
+      );
+    } catch (error) {
+      console.log(
+        `reply for ${threadId} threw: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /**
