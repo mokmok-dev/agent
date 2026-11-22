@@ -10,6 +10,28 @@ bindings = [
   { name = "LINEAR_OAUTH", class_name = "LinearOAuthDurableObject" },
 ]
 
+# Every log and every trace, kept where the dashboard can query them. A webhook
+# problem is visible only after the fact, so the full rate is the point. The
+# query string is kept because the Linear callback's `code` and `state` are the
+# evidence for a refused login.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.issues]
+enabled = true
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 1
+persist = true
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SessionDurableObject", "ThreadIndexDurableObject"]
