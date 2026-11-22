@@ -163,7 +163,14 @@ export type McpServer =
   | { type: "http"; name: string; url: string; headers?: Array<{ name: string; value: string }> }
   | { type: "sse"; name: string; url: string; headers?: Array<{ name: string; value: string }> };
 
-export type NewSessionParams = { cwd: string; mcpServers?: McpServer[] };
+/**
+ * `mcpServers` is a list, but ACP clients in the wild send a record keyed by
+ * server name and at least one agent requires the field with either shape.
+ */
+export type NewSessionParams = {
+  cwd: string;
+  mcpServers?: McpServer[] | Readonly<Record<string, unknown>>;
+};
 
 export type NewSessionResult = { sessionId: string; modes?: SessionModeState };
 

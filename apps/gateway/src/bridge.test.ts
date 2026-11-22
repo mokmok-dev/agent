@@ -413,16 +413,18 @@ describe("more attribution cases", () => {
     expect(events.at(-1)).toMatchObject({ type: "turn.failed", error: "7: seven" });
   });
 
-  test("a session/new frame carries the working directory", async () => {
+  test("a session/new frame carries the working directory and an empty MCP record", async () => {
     const { agent, bridge: acp } = bridge();
     void acp.open("s", "/the/work/dir");
     agent.answer(1, { protocolVersion: 1 });
     await until(() => agent.outbound().length === 2);
+    // opencode2 refuses `session/new` without `mcpServers`, and omitting it
+    // hangs; an empty record is what the shipped agents accept.
     expect(agent.last()).toEqual({
       kind: "request",
       id: 2,
       method: "session/new",
-      params: { cwd: "/the/work/dir" },
+      params: { cwd: "/the/work/dir", mcpServers: {} },
     });
   });
 });

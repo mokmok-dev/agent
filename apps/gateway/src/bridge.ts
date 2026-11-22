@@ -58,7 +58,9 @@ export class AcpBridge {
 
   async open(sessionId: string, cwd: string): Promise<string> {
     await this.#client.initialize(this.#client.defaultInitializeParams());
-    const session = await this.#client.newSession({ cwd });
+    // An agent requires `mcpServers` in some form and ignores an empty one; a
+    // record is what opencode2 accepts, and ACP allows it in place of the array.
+    const session = await this.#client.newSession({ cwd, mcpServers: {} });
     this.#emit({ type: "session.bound", sessionId, acpSessionId: session.sessionId });
     return session.sessionId;
   }
