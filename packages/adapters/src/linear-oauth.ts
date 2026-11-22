@@ -62,19 +62,35 @@ export function newState(): string {
 export type CallbackParams = { code: string; state: string };
 
 /**
+ * The callback's query as a plain object. A `URLSearchParams` does not cross an
+ * RPC boundary, so the handler reads the query into a record before it reaches
+ * the object that owns the state.
+ */
+export function callbackOf(query: URLSearchParams): Record<string, string> {
+  const fields: Record<string, string> = {};
+  for (const [key, value] of query) fields[key] = value;
+  return fields;
+}
+
+/**
  * Read the callback, or refuse it. A provider error, a missing code, and a
  * `state` that does not match the one this object issued are three different
  * refusals, so an operator can tell them apart.
  */
-export function readCallback(params: URLSearchParams, expectedState: string): CallbackParams {
-  const error = params.get("error");
-  if (error !== null) {
+export function readCallback(
+  params: Record<string, string>,
+  expectedState: string,
+): CallbackParams {
+  const error = params["error"];
+  if (error !== undefined) {
     throw new AdapterError(400, `linear refused the authorization: ${error}`);
   }
-  const code = params.get("code");
-  if (code === null || code === "") throw new AdapterError(400, "linear callback has no code");
-  const state = params.get("state");
-  if (state === null || state === "") throw new AdapterError(400, "linear callback has no state");
+  const code = params["code"];
+  if (code === undefined || code === "") throw new AdapterError(400, "linear callback has no code");
+  const state = params["state"];
+  if (state === undefined || state === "") {
+    throw new AdapterError(400, "linear callback has no state");
+  }
   if (state !== expectedState) throw new AdapterError(400, "linear callback state does not match");
   return { code, state };
 }

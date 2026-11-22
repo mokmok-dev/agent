@@ -7,7 +7,7 @@ import { envWith, OAUTH } from "./test-env.ts";
 /** A port that records what the Worker asked for and answers as told. */
 class FakePort implements LinearOAuthPort {
   started = 0;
-  readonly paramses: URLSearchParams[] = [];
+  readonly paramses: Record<string, string>[] = [];
   answer: LinearCredential | Error;
 
   constructor(answer: LinearCredential | Error) {
@@ -19,7 +19,7 @@ class FakePort implements LinearOAuthPort {
     return "state-1";
   }
 
-  async complete(params: URLSearchParams, _now: number): Promise<LinearCredential> {
+  async complete(params: Record<string, string>, _now: number): Promise<LinearCredential> {
     this.paramses.push(params);
     if (this.answer instanceof Error) throw this.answer;
     return this.answer;
@@ -94,7 +94,7 @@ describe("the config mapping", () => {
 describe("finishing the login", () => {
   test("shows the workspace and the token lifetime on success", async () => {
     const port = new FakePort(credential({ organizationId: "mokmok", expiresIn: 3600 }));
-    const response = await finishLogin(port, new URLSearchParams({ code: "c", state: "s" }), 10);
+    const response = await finishLogin(port, { code: "c", state: "s" }, 10);
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/html");
     const body = await response.text();
@@ -106,40 +106,40 @@ describe("finishing the login", () => {
 
   test("escapes markup in the page, so a workspace name cannot inject a tag", async () => {
     const port = new FakePort(credential({ organizationId: "<script>alert(1)</script>" }));
-    const body = await (await finishLogin(port, new URLSearchParams(), 0)).text();
+    const body = await (await finishLogin(port, {}, 0)).text();
     expect(body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
     expect(body).not.toContain("<script>alert(1)");
   });
 
   test("escapes an ampersand", async () => {
     const port = new FakePort(credential({ organizationId: "a & b" }));
-    const body = await (await finishLogin(port, new URLSearchParams(), 0)).text();
+    const body = await (await finishLogin(port, {}, 0)).text();
     expect(body).toContain("a &amp; b");
   });
 
   test("names the workspace generically when Linear has not reported one", async () => {
     const port = new FakePort(credential({ organizationId: null }));
-    const body = await (await finishLogin(port, new URLSearchParams(), 0)).text();
+    const body = await (await finishLogin(port, {}, 0)).text();
     expect(body).toContain("the authorized workspace");
   });
 
   test("passes the callback parameters through to the port", async () => {
     const port = new FakePort(credential());
-    const params = new URLSearchParams({ code: "c1", state: "s1" });
+    const params = { code: "c1", state: "s1" };
     await finishLogin(port, params, 10);
-    expect(port.paramses[0]).toBe(params);
+    expect(port.paramses[0]).toEqual(params);
   });
 
   test("answers a refusal with its own status and message", async () => {
     const refusal = Object.assign(new Error("state does not match"), { status: 400 });
     const port = new FakePort(refusal);
-    const response = await finishLogin(port, new URLSearchParams(), 10);
+    const response = await finishLogin(port, {}, 10);
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: { message: "state does not match" } });
   });
 
   test("a refusal with no status is a 500", async () => {
-    const response = await finishLogin(new FakePort(new Error("boom")), new URLSearchParams(), 0);
+    const response = await finishLogin(new FakePort(new Error("boom")), {}, 0);
     expect(response.status).toBe(500);
   });
 
@@ -150,7 +150,7 @@ describe("finishing the login", () => {
         throw "plain string";
       },
     };
-    const response = await finishLogin(port, new URLSearchParams(), 0);
+    const response = await finishLogin(port, {}, 0);
     expect(await response.json()).toEqual({ error: { message: "plain string" } });
   });
 });

@@ -92,7 +92,7 @@ export class LinearOAuthDurableObject extends DurableObject<Env> {
     return this.#object.start();
   }
 
-  complete(params: URLSearchParams, now: number): Promise<LinearCredential> {
+  complete(params: Record<string, string>, now: number): Promise<LinearCredential> {
     return this.#object.complete(params, now);
   }
 

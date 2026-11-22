@@ -73,7 +73,7 @@ export class LinearOAuthObject {
    * Finish a login. The state is consumed first, so a replayed callback is
    * refused even when the code exchange would otherwise succeed twice.
    */
-  async complete(params: URLSearchParams, now: number): Promise<LinearCredential> {
+  async complete(params: Record<string, string>, now: number): Promise<LinearCredential> {
     const expected = expectedState(await this.#storage.get<unknown>(stateKey()));
     const callback = readCallback(params, expected);
     await this.#storage.delete(stateKey());

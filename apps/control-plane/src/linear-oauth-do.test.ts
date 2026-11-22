@@ -86,7 +86,7 @@ describe("starting a login", () => {
   test("stores the credential under one fixed key", async () => {
     const { host, oauth } = object();
     await oauth.start("s");
-    await oauth.complete(new URLSearchParams({ code: "c", state: "s" }), 0);
+    await oauth.complete({ code: "c", state: "s" }, 0);
     expect([...host.values.keys()].sort()).toEqual(["linear:credential"]);
   });
 
@@ -140,10 +140,7 @@ describe("completing a login", () => {
   test("exchanges the code and stores the pair", async () => {
     const { oauth } = object();
     await oauth.start("state-1");
-    const credential = await oauth.complete(
-      new URLSearchParams({ code: "c1", state: "state-1" }),
-      10,
-    );
+    const credential = await oauth.complete({ code: "c1", state: "state-1" }, 10);
     expect(credential).toMatchObject({
       accessToken: "at-1",
       refreshToken: "rt-1",
@@ -155,10 +152,8 @@ describe("completing a login", () => {
   test("consumes the state, so a replayed callback is refused", async () => {
     const { oauth } = object();
     await oauth.start("state-1");
-    await oauth.complete(new URLSearchParams({ code: "c1", state: "state-1" }), 10);
-    const replay = await refusalOf(() =>
-      oauth.complete(new URLSearchParams({ code: "c1", state: "state-1" }), 11),
-    );
+    await oauth.complete({ code: "c1", state: "state-1" }, 10);
+    const replay = await refusalOf(() => oauth.complete({ code: "c1", state: "state-1" }, 11));
     expect(replay.message).toContain("does not match");
   });
 
@@ -166,9 +161,7 @@ describe("completing a login", () => {
     const { forms, request } = endpoint([answer()]);
     const { oauth } = object(request);
     await oauth.start("state-1");
-    const refusal = await refusalOf(() =>
-      oauth.complete(new URLSearchParams({ code: "c1", state: "forged" }), 10),
-    );
+    const refusal = await refusalOf(() => oauth.complete({ code: "c1", state: "forged" }, 10));
     expect(refusal.message).toContain("does not match");
     expect(forms).toEqual([]);
   });
@@ -177,9 +170,7 @@ describe("completing a login", () => {
     const { request } = endpoint([{ error: "invalid_grant" }]);
     const { host, oauth } = object(request);
     await oauth.start("state-1");
-    await oauth
-      .complete(new URLSearchParams({ code: "c1", state: "state-1" }), 10)
-      .catch(() => undefined);
+    await oauth.complete({ code: "c1", state: "state-1" }, 10).catch(() => undefined);
     expect(await host.get<string>(stateKey())).toBeUndefined();
     expect(await oauth.credential()).toBeUndefined();
   });
@@ -195,7 +186,7 @@ describe("using the credential", () => {
     const { forms, request } = endpoint([answer(), answer({ access_token: "at-2" })]);
     const { oauth } = object(request);
     await oauth.start("s");
-    await oauth.complete(new URLSearchParams({ code: "c", state: "s" }), 0);
+    await oauth.complete({ code: "c", state: "s" }, 0);
     expect(await oauth.accessToken(1000)).toBe("at-1");
     expect(forms).toHaveLength(1);
   });
@@ -207,7 +198,7 @@ describe("using the credential", () => {
     ]);
     const { oauth } = object(request);
     await oauth.start("s");
-    await oauth.complete(new URLSearchParams({ code: "c", state: "s" }), 0);
+    await oauth.complete({ code: "c", state: "s" }, 0);
     const token = await oauth.accessToken(86_400 * 1000);
     expect(token).toBe("at-2");
     expect(new URLSearchParams(forms[1]).get("grant_type")).toBe("refresh_token");
@@ -218,7 +209,7 @@ describe("using the credential", () => {
     const { request } = endpoint([answer(), answer({ access_token: "at-forced" })]);
     const { oauth } = object(request);
     await oauth.start("s");
-    await oauth.complete(new URLSearchParams({ code: "c", state: "s" }), 0);
+    await oauth.complete({ code: "c", state: "s" }, 0);
     expect(await oauth.refresh(1)).toBe(true);
     expect((await oauth.credential())?.accessToken).toBe("at-forced");
   });
@@ -239,7 +230,7 @@ describe("using the credential", () => {
     const { request } = endpoint([answer(), answer({ access_token: "at-2" })]);
     const { host, oauth } = object(request);
     await oauth.start("s");
-    await oauth.complete(new URLSearchParams({ code: "c", state: "s" }), 0);
+    await oauth.complete({ code: "c", state: "s" }, 0);
     await host.put<LinearCredential>(credentialKey(), {
       ...(await oauth.credential())!,
       organizationId: "org-1",
@@ -253,7 +244,7 @@ describe("disconnecting", () => {
   test("removes the stored pair, so later requests find no token", async () => {
     const { oauth } = object();
     await oauth.start("s");
-    await oauth.complete(new URLSearchParams({ code: "c", state: "s" }), 0);
+    await oauth.complete({ code: "c", state: "s" }, 0);
     await oauth.disconnect();
     expect(await oauth.credential()).toBeUndefined();
     expect(await oauth.accessToken(0)).toBeUndefined();
@@ -282,7 +273,7 @@ describe("disconnecting", () => {
       return answer();
     });
     await oauth.start("s");
-    await oauth.complete(new URLSearchParams({ code: "c", state: "s" }), 0);
+    await oauth.complete({ code: "c", state: "s" }, 0);
     await oauth.disconnect();
     expect(new URLSearchParams(forms.at(-1)).get("token")).toBe("at-1");
   });

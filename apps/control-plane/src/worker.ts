@@ -1,4 +1,4 @@
-import type { InboundEvent } from "@agent/adapters";
+import { callbackOf, type InboundEvent } from "@agent/adapters";
 import type { Session, ThreadRef, Turn, TurnUpdate } from "@agent/store";
 import {
   errorResponse,
@@ -64,7 +64,7 @@ export async function fetch(request: Request, env: Env, now = Date.now()): Promi
     const port = env.LINEAR_OAUTH.getByName("linear") as LinearOAuthPort;
     return route.kind === "linear-oauth-start"
       ? startLogin(port, env, oauthConfigOf(env))
-      : finishLogin(port, url.searchParams, now);
+      : finishLogin(port, callbackOf(url.searchParams), now);
   }
   try {
     const result = await handleWebhook(

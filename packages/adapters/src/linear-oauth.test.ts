@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   AUTHORIZE_URL,
   authorizeUrl,
+  callbackOf,
   bearer,
   DEFAULT_SCOPES,
   exchangeCode,
@@ -94,8 +95,23 @@ describe("the state", () => {
   });
 });
 
+describe("the callback query", () => {
+  test("becomes a plain record, so it crosses an RPC boundary", () => {
+    const query = new URLSearchParams({ code: "c1", state: "s1" });
+    expect(callbackOf(query)).toEqual({ code: "c1", state: "s1" });
+  });
+
+  test("keeps an empty query empty", () => {
+    expect(callbackOf(new URLSearchParams())).toEqual({});
+  });
+
+  test("keeps a repeated key's last value, which is the one the platform would read", () => {
+    expect(callbackOf(new URLSearchParams("code=first&code=last"))).toEqual({ code: "last" });
+  });
+});
+
 describe("the callback", () => {
-  const params = (values: Record<string, string>) => new URLSearchParams(values);
+  const params = (values: Record<string, string>) => values;
 
   test("reads a code and a matching state", () => {
     expect(readCallback(params({ code: "c1", state: "s1" }), "s1")).toEqual({

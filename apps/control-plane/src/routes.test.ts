@@ -271,12 +271,12 @@ describe("fetch", () => {
   });
 
   test("a callback reads the query and finishes the login through the OAuth object", async () => {
-    const seen: URLSearchParams[] = [];
+    const seen: Record<string, string>[] = [];
     const value = envWith({
       LINEAR_OAUTH: {
         getByName: () => ({
           start: async () => "",
-          complete: async (params: URLSearchParams) => {
+          complete: async (params: Record<string, string>) => {
             seen.push(params);
             return {
               accessToken: "at",
@@ -296,8 +296,8 @@ describe("fetch", () => {
       50,
     );
     expect(response.status).toBe(200);
-    expect(seen[0]?.get("code")).toBe("c1");
-    expect(seen[0]?.get("state")).toBe("s1");
+    expect(seen[0]?.["code"]).toBe("c1");
+    expect(seen[0]?.["state"]).toBe("s1");
   });
 
   test("a refused callback answers its refusal and never touches a session", async () => {

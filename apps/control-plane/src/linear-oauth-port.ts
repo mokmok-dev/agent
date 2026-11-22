@@ -11,7 +11,7 @@ export interface LinearOAuthPort {
   /** Store a state for a login and return it. */
   start(): Promise<string>;
   /** Finish a login and return the stored credential. */
-  complete(params: URLSearchParams, now: number): Promise<LinearCredential>;
+  complete(params: Record<string, string>, now: number): Promise<LinearCredential>;
 }
 
 /**
@@ -41,7 +41,7 @@ export async function startLogin(
  */
 export async function finishLogin(
   port: LinearOAuthPort,
-  params: URLSearchParams,
+  params: Record<string, string>,
   now: number,
 ): Promise<Response> {
   try {
