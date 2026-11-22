@@ -1,12 +1,15 @@
 import {
   exchangeCode,
+  fetchViewer,
   needsRefresh,
   postForm,
+  postGraphql,
   readCallback,
   refreshTokens,
   revokeToken,
   type LinearTokens,
   type LinearOAuthConfig,
+  type GraphqlRequest,
   type TokenRequest,
 } from "@agent/adapters";
 import type { StorageHost } from "./storage.ts";
@@ -43,11 +46,18 @@ export class LinearOAuthObject {
   readonly #storage: StorageHost;
   readonly #config: LinearOAuthConfig;
   readonly #request: TokenRequest;
+  readonly #graphql: GraphqlRequest;
 
-  constructor(storage: StorageHost, config: LinearOAuthConfig, request: TokenRequest = postForm) {
+  constructor(
+    storage: StorageHost,
+    config: LinearOAuthConfig,
+    request: TokenRequest = postForm,
+    graphql: GraphqlRequest = postGraphql,
+  ) {
     this.#storage = storage;
     this.#config = config;
     this.#request = request;
+    this.#graphql = graphql;
   }
 
   /**
@@ -69,14 +79,19 @@ export class LinearOAuthObject {
 
   /**
    * Finish a login. The state is consumed first, so a replayed callback is
-   * refused even when the code exchange would otherwise succeed twice.
+   * refused even when the code exchange would otherwise succeed twice. The
+   * workspace id is fetched after the tokens are stored, so a slow or failing
+   * GraphQL call cannot lose a credential that already works.
    */
   async complete(params: Record<string, string>, now: number): Promise<LinearCredential> {
     const expected = expectedState(await this.#storage.get<unknown>(stateKey()));
     const callback = readCallback(params, expected);
     await this.#storage.delete(stateKey());
     const tokens = await exchangeCode(this.#config, callback.code, now, this.#request);
-    return this.#store({ ...tokens, organizationId: null });
+    const stored = await this.#store({ ...tokens, organizationId: null });
+    const viewer = await fetchViewer(stored.accessToken, this.#graphql);
+    if (viewer === undefined) return stored;
+    return this.#store({ ...stored, organizationId: viewer.id });
   }
 
   /** The stored credential, or `undefined` before the first login. */

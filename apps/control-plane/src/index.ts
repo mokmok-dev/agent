@@ -92,6 +92,10 @@ export class LinearOAuthDurableObject extends DurableObject<Env> {
     return this.#object.start(state);
   }
 
+  status(): Promise<LinearCredential | undefined> {
+    return this.#object.credential();
+  }
+
   complete(params: Record<string, string>, now: number): Promise<LinearCredential> {
     return this.#object.complete(params, now);
   }

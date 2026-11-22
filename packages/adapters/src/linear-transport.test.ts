@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { postForm, revokeToken, type TokenResponse } from "./linear-oauth.ts";
+import { postForm, postGraphql, revokeToken, type TokenResponse } from "./linear-oauth.ts";
 import { AdapterError } from "./events.ts";
 
 /** Serve one scripted answer per path, so the transport is exercised over HTTP. */
@@ -122,3 +122,27 @@ async function refused(run: () => Promise<unknown>): Promise<AdapterError> {
   }
   throw new Error("expected a refusal");
 }
+
+describe("the GraphQL transport", () => {
+  test("posts the body and reads the JSON answer", async () => {
+    const seen: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        seen.push(`${request.method} ${await request.text()}`);
+        return Response.json({ data: { viewer: { id: "app-1" } } });
+      },
+    });
+    try {
+      const body = await postGraphql(`http://127.0.0.1:${server.port}/graphql`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: '{"query":"{viewer{id}}"}',
+      });
+      expect(body).toEqual({ data: { viewer: { id: "app-1" } } });
+      expect(seen[0]).toBe('POST {"query":"{viewer{id}}"}');
+    } finally {
+      server.stop(true);
+    }
+  });
+});

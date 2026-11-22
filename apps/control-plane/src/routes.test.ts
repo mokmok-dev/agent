@@ -25,6 +25,7 @@ describe("routeOf", () => {
   test("maps the two Linear OAuth paths", () => {
     expect(routeOf("/oauth/linear")).toEqual({ kind: "linear-oauth-start" });
     expect(routeOf("/oauth/linear/callback")).toEqual({ kind: "linear-oauth-callback" });
+    expect(routeOf("/oauth/linear/status")).toEqual({ kind: "linear-oauth-status" });
   });
 });
 
@@ -316,6 +317,30 @@ describe("fetch", () => {
     expect(await response.json()).toEqual({
       error: { message: "linear callback state does not match" },
     });
+  });
+
+  test("a status request reads the connection from the OAuth object", async () => {
+    const value = envWith({
+      LINEAR_OAUTH: {
+        getByName: () => ({
+          start: async () => "",
+          complete: async () => {
+            throw new Error("not called");
+          },
+          status: async () => ({
+            accessToken: "at",
+            refreshToken: "rt",
+            expiresIn: 86_400,
+            issuedAt: 0,
+            scope: "read write",
+            organizationId: "app-1",
+          }),
+        }),
+      },
+    });
+    const response = await fetch(new Request("https://x/oauth/linear/status"), value, 0);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ connected: true, organizationId: "app-1" });
   });
 
   test("an ignored delivery answers 200, which differs from an event's 202", async () => {

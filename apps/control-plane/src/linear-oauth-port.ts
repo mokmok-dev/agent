@@ -12,6 +12,8 @@ export interface LinearOAuthPort {
   start(state: string): Promise<void>;
   /** Finish a login and return the stored credential. */
   complete(params: Record<string, string>, now: number): Promise<LinearCredential>;
+  /** The stored credential, or undefined before the first login. */
+  status(now: number): Promise<LinearCredential | undefined>;
 }
 
 /**
@@ -41,8 +43,7 @@ export async function startLogin(
 /**
  * `GET /oauth/linear/callback`: finish the login. A success shows the workspace
  * and the token lifetime; a refusal shows Linear's own message with its status.
- */
-export async function finishLogin(
+ */ export async function finishLogin(
   port: LinearOAuthPort,
   params: Record<string, string>,
   now: number,
@@ -74,4 +75,22 @@ function describe(credential: LinearCredential): string {
   const workspace = credential.organizationId ?? "the authorized workspace";
   const hours = Math.round(credential.expiresIn / 3600);
   return `The deployment can now act in ${workspace}. The access token lives ${hours} hours and is refreshed automatically. You can close this window.`;
+}
+
+/**
+ * `GET /oauth/linear/status`: what the deployment holds, without the tokens.
+ * The token values never leave the object, so this is safe to open in a browser.
+ */
+export async function loginStatus(port: LinearOAuthPort, now: number): Promise<Response> {
+  const credential = await port.status(now);
+  if (credential === undefined) {
+    return Response.json({ connected: false }, { status: 404 });
+  }
+  return Response.json({
+    connected: true,
+    organizationId: credential.organizationId,
+    scope: credential.scope,
+    expiresAt: new Date(credential.issuedAt + credential.expiresIn * 1000).toISOString(),
+    renewsInSeconds: Math.round((credential.issuedAt + credential.expiresIn * 1000 - now) / 1000),
+  });
 }

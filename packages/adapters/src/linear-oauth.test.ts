@@ -8,8 +8,10 @@ import {
   DEFAULT_SCOPES,
   exchangeCode,
   exchangeForm,
+  fetchViewer,
   needsRefresh,
   newState,
+  parseViewer,
   readCallback,
   refreshForm,
   REFRESH_SKEW_MS,
@@ -309,3 +311,64 @@ function caught(run: () => unknown): AdapterError {
   }
   throw new Error("expected a refusal");
 }
+
+describe("the viewer lookup", () => {
+  test("reads the id Linear returns", () => {
+    expect(parseViewer({ data: { viewer: { id: "app-1" } } })).toEqual({ id: "app-1" });
+  });
+
+  test("an empty or missing id reads as no viewer", () => {
+    for (const body of [
+      {},
+      { data: {} },
+      { data: { viewer: {} } },
+      { data: { viewer: { id: "" } } },
+    ]) {
+      expect(parseViewer(body)).toBeUndefined();
+    }
+    expect(parseViewer(undefined)).toBeUndefined();
+  });
+
+  test("a call carries the token and the query", async () => {
+    const seen: { url: string; headers: Record<string, string>; body: string }[] = [];
+    const viewer = await fetchViewer("at-9", async (url, init) => {
+      seen.push({ url, headers: init.headers, body: init.body });
+      return { data: { viewer: { id: "app-9" } } };
+    });
+    expect(viewer).toEqual({ id: "app-9" });
+    expect(seen[0]?.url).toBe("https://api.linear.app/graphql");
+    expect(seen[0]?.headers["authorization"]).toBe("Bearer at-9");
+    expect(seen[0]?.body).toContain("viewer");
+  });
+
+  test("a failed call reads as no viewer, so a stored token is not called broken", async () => {
+    expect(
+      await fetchViewer("at", async () => {
+        throw new Error("offline");
+      }),
+    ).toBeUndefined();
+  });
+});
+
+describe("the viewer request's shape", () => {
+  test("posts JSON to the GraphQL URL with the bearer token", async () => {
+    const seen: { method: string; type: string; query: string }[] = [];
+    await fetchViewer("at-1", async (url, init) => {
+      seen.push({
+        method: init.method,
+        type: init.headers["content-type"] ?? "",
+        query: JSON.parse(init.body).query,
+      });
+      return { data: { viewer: { id: "a" } } };
+    });
+    expect(seen).toEqual([
+      { method: "POST", type: "application/json", query: "{ viewer { id name } }" },
+    ]);
+  });
+
+  test("a response with no data reads as no viewer", async () => {
+    expect(
+      await fetchViewer("at-1", async () => ({ errors: [{ message: "bad" }] })),
+    ).toBeUndefined();
+  });
+});

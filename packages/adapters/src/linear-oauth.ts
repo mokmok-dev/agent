@@ -255,3 +255,53 @@ export async function revokeToken(
     return false;
   }
 }
+
+export const GRAPHQL_URL = "https://api.linear.app/graphql";
+
+/** A GraphQL call, as a port so a test answers without the network. */
+export type GraphqlRequest = (
+  url: string,
+  init: { method: string; headers: Record<string, string>; body: string },
+) => Promise<unknown>;
+
+export type Viewer = { id: string };
+
+/**
+ * The app's id in the workspace that authorized it. Linear documents this as the
+ * value to store with the token, because it is unique per workspace.
+ */
+export function parseViewer(body: unknown): Viewer | undefined {
+  const viewer = (body as { data?: { viewer?: { id?: unknown } } } | undefined)?.data?.viewer;
+  const id = viewer?.id;
+  return typeof id === "string" && id !== "" ? { id } : undefined;
+}
+
+/**
+ * Ask Linear which app user the token belongs to. A failure returns
+ * `undefined`, because a login that already stored a usable token should not be
+ * reported as failed for want of an id.
+ */
+export async function fetchViewer(
+  accessToken: string,
+  request: GraphqlRequest = postGraphql,
+): Promise<Viewer | undefined> {
+  try {
+    const body = await request(GRAPHQL_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ query: "{ viewer { id name } }" }),
+    });
+    return parseViewer(body);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The default GraphQL transport. */
+export async function postGraphql(
+  url: string,
+  init: { method: string; headers: Record<string, string>; body: string },
+): Promise<unknown> {
+  const response = await fetch(url, init);
+  return response.json();
+}

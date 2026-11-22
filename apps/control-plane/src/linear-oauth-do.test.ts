@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { TokenRequest, TokenResponse } from "@agent/adapters";
+import type { GraphqlRequest, TokenRequest, TokenResponse } from "@agent/adapters";
 import {
   credentialKey,
   expectedState,
@@ -71,9 +71,12 @@ function endpoint(answers: TokenResponse[]): { request: TokenRequest; forms: str
   return { request, forms };
 }
 
-const object = (request: TokenRequest = endpoint([answer()]).request) => {
+const object = (
+  request: TokenRequest = endpoint([answer()]).request,
+  graphql: GraphqlRequest = async () => ({}),
+) => {
   const host = new Host();
-  return { host, oauth: new LinearOAuthObject(host, config, request) };
+  return { host, oauth: new LinearOAuthObject(host, config, request, graphql) };
 };
 
 describe("starting a login", () => {
@@ -139,6 +142,43 @@ describe("completing a login", () => {
       organizationId: null,
     });
     expect(await oauth.credential()).toEqual(credential);
+  });
+
+  test("stores the app's id in the workspace, which Linear says to keep with the token", async () => {
+    const { host, oauth } = object(undefined, async () => ({ data: { viewer: { id: "app-1" } } }));
+    await oauth.start("s");
+    const credential = await oauth.complete({ code: "c", state: "s" }, 10);
+    expect(credential.organizationId).toBe("app-1");
+    expect((await oauth.credential())?.organizationId).toBe("app-1");
+    expect(host.values.size).toBe(1);
+  });
+
+  test("asks Linear for the viewer with the token it just stored", async () => {
+    const seen: { url: string; auth: string | undefined }[] = [];
+    const { oauth } = object(undefined, async (url, init) => {
+      seen.push({ url, auth: init.headers["authorization"] });
+      return { data: { viewer: { id: "app-1" } } };
+    });
+    await oauth.start("s");
+    await oauth.complete({ code: "c", state: "s" }, 10);
+    expect(seen).toEqual([{ url: "https://api.linear.app/graphql", auth: "Bearer at-1" }]);
+  });
+
+  test("keeps the credential when the viewer lookup fails, because the token still works", async () => {
+    const { oauth } = object(undefined, async () => {
+      throw new Error("offline");
+    });
+    await oauth.start("s");
+    const credential = await oauth.complete({ code: "c", state: "s" }, 10);
+    expect(credential.accessToken).toBe("at-1");
+    expect(credential.organizationId).toBeNull();
+    expect(await oauth.credential()).toBeDefined();
+  });
+
+  test("keeps the credential when Linear answers without a viewer id", async () => {
+    const { oauth } = object(undefined, async () => ({ data: {} }));
+    await oauth.start("s");
+    expect((await oauth.complete({ code: "c", state: "s" }, 10)).organizationId).toBeNull();
   });
 
   test("consumes the state, so a replayed callback is refused", async () => {

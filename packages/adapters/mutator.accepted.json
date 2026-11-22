@@ -3,6 +3,10 @@
     "reason": "Extractable flag on a CryptoKey that never leaves this module. Flipping it changes no observable result.",
     "where": "src/signature.ts:87:5 false -> true"
   },
+  "26hpt3c0zk9": {
+    "reason": "An emptied catch body falls through to the same undefined return, because a caught error has no viewer to report.",
+    "where": "src/linear-oauth.ts:295:11 { return undefined; } -> {}"
+  },
   "oep2utqo9x": {
     "reason": "Extractable flag on a CryptoKey that never leaves this module. Flipping it changes no observable result.",
     "where": "src/signature.ts:75:79 false -> true"

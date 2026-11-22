@@ -10,7 +10,7 @@ import {
   type LinearOAuthEnv,
   type ProviderConfig,
 } from "./routes.ts";
-import { finishLogin, startLogin, type LinearOAuthPort } from "./linear-oauth-port.ts";
+import { finishLogin, loginStatus, startLogin, type LinearOAuthPort } from "./linear-oauth-port.ts";
 
 export interface Namespace {
   getByName(name: string): unknown;
@@ -60,11 +60,15 @@ export async function fetch(request: Request, env: Env, now = Date.now()): Promi
   const route = routeOf(url.pathname);
   if (route.kind === "not-found") return Response.json({ error: "not found" }, { status: 404 });
   if (route.kind === "health") return Response.json({ ok: true });
-  if (route.kind === "linear-oauth-start" || route.kind === "linear-oauth-callback") {
+  if (
+    route.kind === "linear-oauth-start" ||
+    route.kind === "linear-oauth-callback" ||
+    route.kind === "linear-oauth-status"
+  ) {
     const port = env.LINEAR_OAUTH.getByName("linear") as LinearOAuthPort;
-    return route.kind === "linear-oauth-start"
-      ? startLogin(port, env, oauthConfigOf(env))
-      : finishLogin(port, callbackOf(url.searchParams), now);
+    if (route.kind === "linear-oauth-start") return startLogin(port, env, oauthConfigOf(env));
+    if (route.kind === "linear-oauth-status") return loginStatus(port, now);
+    return finishLogin(port, callbackOf(url.searchParams), now);
   }
   try {
     const result = await handleWebhook(

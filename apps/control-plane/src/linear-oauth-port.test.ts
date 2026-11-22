@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { LinearCredential } from "./linear-oauth-do.ts";
-import { finishLogin, startLogin, type LinearOAuthPort } from "./linear-oauth-port.ts";
+import { finishLogin, loginStatus, startLogin, type LinearOAuthPort } from "./linear-oauth-port.ts";
 import { oauthConfigOf, oauthConfigured } from "./routes.ts";
 import { envWith, OAUTH } from "./test-env.ts";
 
@@ -24,6 +24,10 @@ class FakePort implements LinearOAuthPort {
     this.paramses.push(params);
     if (this.answer instanceof Error) throw this.answer;
     return this.answer;
+  }
+
+  async status(): Promise<LinearCredential | undefined> {
+    return this.answer instanceof Error ? undefined : this.answer;
   }
 }
 
@@ -116,6 +120,45 @@ describe("the config mapping", () => {
   });
 });
 
+describe("the status route", () => {
+  test("reports the connection without exposing the tokens", async () => {
+    const port = new FakePort(
+      credential({ organizationId: "app-1", expiresIn: 3600, issuedAt: 0 }),
+    );
+    const response = await loginStatus(port, 10_000);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body).toEqual({
+      connected: true,
+      organizationId: "app-1",
+      scope: "read",
+      expiresAt: "1970-01-01T01:00:00.000Z",
+      renewsInSeconds: 3590,
+    });
+    expect(JSON.stringify(body)).not.toContain("at-1");
+    expect(JSON.stringify(body)).not.toContain("rt");
+  });
+
+  test("answers 404 before the first login, so a check can tell the two apart", async () => {
+    const port: LinearOAuthPort = {
+      start: async () => undefined,
+      status: async () => undefined,
+      complete: async () => {
+        throw new Error("not called");
+      },
+    };
+    const response = await loginStatus(port, 0);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ connected: false });
+  });
+
+  test("a credential past its expiry reports a negative remaining time rather than hiding it", async () => {
+    const port = new FakePort(credential({ expiresIn: 60, issuedAt: 0 }));
+    const body = (await (await loginStatus(port, 120_000)).json()) as { renewsInSeconds: number };
+    expect(body.renewsInSeconds).toBe(-60);
+  });
+});
+
 describe("finishing the login", () => {
   test("shows the workspace and the token lifetime on success", async () => {
     const port = new FakePort(credential({ organizationId: "mokmok", expiresIn: 3600 }));
@@ -182,6 +225,7 @@ describe("finishing the login", () => {
   test("a thrown non-error still answers with its text", async () => {
     const port: LinearOAuthPort = {
       start: async () => undefined,
+      status: async () => undefined,
       complete: async () => {
         throw "plain string";
       },
