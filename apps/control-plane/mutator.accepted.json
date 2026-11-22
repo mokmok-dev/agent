@@ -1,7 +1,19 @@
 {
+  "14rpc7jlt98": {
+    "reason": "equivalent: an id that is not a string is already absent from the catalog, a capability entry that is not a string never equals a name, and a context length that is not a positive number reads as unknown either way.",
+    "where": "src/ollama-cloud.ts:80:7 typeof id !== \"string\" -> false"
+  },
+  "151gx2o8hlm": {
+    "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
+    "where": "src/ollama-cloud.ts:219:11 { return undefined; } -> {}"
+  },
   "15hjiolb7r1": {
     "reason": "equivalent: an empty ACP session id and an absent one both mean the gateway has not opened a session, and the codec reads them the same.",
     "where": "src/gateway-connection.ts:126:11 { return undefined; } -> {}"
+  },
+  "16oqq08sdop": {
+    "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
+    "where": "src/ollama-cloud.ts:179:9 !Array.isArray(body.models) -> false"
   },
   "1870u2m76sn": {
     "reason": "equivalent: with no separator indexOf returns -1, which takes the same branch as the mutated comparison; both read the whole string as a provider with an empty model id, which configureProviders then refuses.",
@@ -22,6 +34,10 @@
   "1g6r9c17sws": {
     "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
     "where": "src/disk-host.ts:13:31 \"utf8\" -> \"\""
+  },
+  "1gbojh129pd": {
+    "reason": "equivalent: an id that is not a string is already absent from the catalog, a capability entry that is not a string never equals a name, and a context length that is not a positive number reads as unknown either way.",
+    "where": "src/ollama-cloud.ts:87:7 [] -> [\"Stryker was here!\"]"
   },
   "1ic2f0p07jk": {
     "reason": "equivalent: PROVIDER_KEYS has an entry for every provider that reaches these lines, so the empty-list fallback and the fileExists answer are never taken; pi asks for file existence only in a login flow this deployment does not run.",
@@ -51,9 +67,21 @@
     "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
     "where": "src/disk-host.ts:19:11 { return undefined; } -> {}"
   },
+  "1sks1fbztdl": {
+    "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
+    "where": "src/ollama-cloud.ts:177:9 !response.ok -> false"
+  },
+  "1wijqx2v4qb": {
+    "reason": "equivalent: these guards return the current catalog, so removing one changes nothing while 'current' already equals the published list; the offline and refusal tests pin the observable result.",
+    "where": "src/ollama-cloud.ts:163:10 key === undefined -> false"
+  },
   "1xovf7dr9m6": {
     "reason": "equivalent: PROVIDER_KEYS has an entry for every provider that reaches these lines, so the empty-list fallback and the fileExists answer are never taken; pi asks for file existence only in a login flow this deployment does not run.",
     "where": "src/providers.ts:114:86 [] -> [\"Stryker was here!\"]"
+  },
+  "1ysgjgfcyb3": {
+    "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
+    "where": "src/ollama-cloud.ts:212:24 `Bearer ${key}` -> ``"
   },
   "1yxkyyqlsbi": {
     "reason": "equivalent: a refused delivery carries no run and created no turn, so reading its run yields undefined and runNext finds nothing to run; the guards are defensive and the tests pin the observable results, no reply field and the runner never called.",
@@ -63,6 +91,10 @@
     "reason": "equivalent: an empty credential list and a provider absent from the list both render credential: null, so the fallback array changes no response a caller sees.",
     "where": "src/worker.ts:194:9 [] -> [\"Stryker was here!\"]"
   },
+  "28ae8xhmcwf": {
+    "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
+    "where": "src/ollama-cloud.ts:174:26 \"application/json\" -> \"\""
+  },
   "2bf4w4o1hfy": {
     "reason": "equivalent: these lines are inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun can construct neither, so the deployment is the only place this runs.",
     "where": "src/pi-runtime.ts:48:36 ?. -> ."
@@ -70,6 +102,26 @@
   "7iv5ui4aoq": {
     "reason": "equivalent: a missing text field and an undefined one behave the same at the reply, and an array carries no type field so it is refused by the next check.",
     "where": "src/gateway-plane.ts:176:12 typeof params === \"object\" -> true"
+  },
+  "8i264ndpf1": {
+    "reason": "equivalent: an id that is not a string is already absent from the catalog, a capability entry that is not a string never equals a name, and a context length that is not a positive number reads as unknown either way.",
+    "where": "src/ollama-cloud.ts:86:59 typeof value === \"string\" -> true"
+  },
+  "9frmz7o9hs": {
+    "reason": "equivalent: these guards return the current catalog, so removing one changes nothing while 'current' already equals the published list; the offline and refusal tests pin the observable result.",
+    "where": "src/ollama-cloud.ts:138:11 key === undefined -> false"
+  },
+  "cs1jt5mgxq": {
+    "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
+    "where": "src/ollama-cloud.ts:181:11 { // A refresh is best effort: pi keeps the previous list o… -> {}"
+  },
+  "e76qr3n2yy": {
+    "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
+    "where": "src/ollama-cloud.ts:86:7 tag.capabilities.filter((value): value is string => typeof … -> tag.capabilities"
+  },
+  "fzxexowbuj": {
+    "reason": "equivalent: these guards return the current catalog, so removing one changes nothing while 'current' already equals the published list; the offline and refusal tests pin the observable result.",
+    "where": "src/ollama-cloud.ts:134:11 !context.allowNetwork -> false"
   },
   "gqi8o6dbvj": {
     "reason": "equivalent: PROVIDER_KEYS has an entry for every provider that reaches these lines, so the empty-list fallback and the fileExists answer are never taken; pi asks for file existence only in a login flow this deployment does not run.",
@@ -82,6 +134,10 @@
   "hsip3324hr": {
     "reason": "equivalent: Env values are strings or absent by construction, so treating every value as a string changes no caller; the reader is a type guard, not a runtime filter.",
     "where": "src/pi-runtime.ts:64:12 typeof value === \"string\" -> true"
+  },
+  "hx10mw1jl0": {
+    "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
+    "where": "src/ollama-cloud.ts:217:9 !response.ok -> false"
   },
   "j4hc1r8ola": {
     "reason": "Reading a property an object does not have yields undefined either way, so the presence check and the direct read agree for both branches.",
@@ -103,8 +159,16 @@
     "reason": "equivalent: these lines are inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun can construct neither, so the deployment is the only place this runs.",
     "where": "src/pi-runtime.ts:50:61 { models: setup.models, registry: createRegistry(), context… -> {}"
   },
+  "vgtd5t0mu6": {
+    "reason": "equivalent: an id that is not a string is already absent from the catalog, a capability entry that is not a string never equals a name, and a context length that is not a positive number reads as unknown either way.",
+    "where": "src/ollama-cloud.ts:98:9 typeof value === \"number\" -> true"
+  },
   "vjqvy4t7fb": {
     "reason": "equivalent: the mutated code is inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun cannot construct either, so no local test can reach it. The integration is proven by the deployment, not here.",
     "where": "src/pi-runtime.ts:24:29 open(state, env) -> undefined"
+  },
+  "znxbknwwin": {
+    "reason": "equivalent: these guards return the current catalog, so removing one changes nothing while 'current' already equals the published list; the offline and refusal tests pin the observable result.",
+    "where": "src/ollama-cloud.ts:142:11 tags === undefined -> false"
   }
 }

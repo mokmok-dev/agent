@@ -327,11 +327,11 @@ describe("a provider this repository supplies itself", () => {
     expect(provider?.baseUrl).toBe("https://ollama.com/v1");
   });
 
-  test("registers its models, so a turn can name one", async () => {
+  test("starts with no catalog, because the list is fetched from Ollama, not shipped", () => {
     const setup = configureProviders(config(ollama), envOf({}));
     if (setup.kind !== "configured") throw new Error("expected a configured collection");
-    const listed = await setup.models.getProvider("ollama-cloud")?.getModels();
-    expect(listed?.map((model) => model.id)).toContain("gemma4:31b");
+    // A hardcoded list would go stale; the provider fills this on refresh.
+    expect(setup.models.getProvider("ollama-cloud")?.getModels()).toEqual([]);
   });
 
   test("is not registered when the deployment does not enable it", () => {
