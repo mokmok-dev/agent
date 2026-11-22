@@ -71,4 +71,4 @@ LINEAR_REDIRECT_URI = "https://agent-control-plane.mokmok.workers.dev/oauth/line
 #   PI_PROVIDERS = "cloudflare-workers-ai,ollama-cloud"
 #   PI_DEFAULT_MODEL = "ollama-cloud:gemma4:31b"
 PI_PROVIDERS = "ollama-cloud"
-PI_DEFAULT_MODEL = "ollama-cloud:deepseek-v4.1-flash:1017"
+PI_DEFAULT_MODEL = "ollama-cloud:deepseek-v4.1-flash"
