@@ -27,8 +27,11 @@
       "dependencies": {
         "@agent/adapters": "workspace:*",
         "@agent/capability": "workspace:*",
+        "@agent/conversation": "workspace:*",
         "@agent/protocol": "workspace:*",
         "@agent/store": "workspace:*",
+        "@earendil-works/chord": "^1.6.0",
+        "@earendil-works/pi-durable": "^1.6.0",
       },
       "devDependencies": {
         "@cloudflare/workers-types": "4.20260101.0",
