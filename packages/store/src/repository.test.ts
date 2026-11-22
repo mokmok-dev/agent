@@ -74,6 +74,8 @@ describe("sessions", () => {
       status: "active",
       acpSessionId: null,
       gatewayId: null,
+      selection: null,
+      conversationId: null,
       turnSeq: 0,
       createdAt: 5,
       updatedAt: 5,
@@ -116,6 +118,56 @@ describe("sessions", () => {
       expect.objectContaining({ acpSessionId: "acp-1", gatewayId: "gateway-1", updatedAt: 9 }),
     );
     expect((await repo.session("s1"))?.acpSessionId).toBe("acp-1");
+  });
+
+  test("routing records the choice and the conversation", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    const selection = {
+      agent: "pi",
+      runtime: "cloudflare-sandbox",
+      model: { provider: "cloudflare-workers-ai", modelId: "m" },
+      protocol: "durable",
+    };
+    const routed = await repo.route("s1", selection, "conv-1", 6);
+    expect(routed).toEqual(
+      expect.objectContaining({ selection, conversationId: "conv-1", updatedAt: 6 }),
+    );
+    expect((await repo.session("s1"))?.conversationId).toBe("conv-1");
+  });
+
+  test("a routed session keeps its first choice", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    const first = {
+      agent: "pi",
+      runtime: "cloudflare-sandbox",
+      model: { provider: "p", modelId: "m" },
+      protocol: "durable",
+    };
+    const other = { ...first, agent: "codex" };
+    await repo.route("s1", first, "conv-1", 6);
+    const again = await repo.route("s1", other, "conv-2", 7);
+    expect(again.selection).toEqual(first);
+    expect(again.conversationId).toBe("conv-1");
+  });
+
+  test("routing a missing session throws MissingSession", async () => {
+    const { repo } = repository();
+    const refusal = await repo
+      .route(
+        "nope",
+        {
+          agent: "pi",
+          runtime: "local-vm",
+          model: { provider: "p", modelId: "m" },
+          protocol: "stdio",
+        },
+        "c",
+        1,
+      )
+      .catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(MissingSession);
   });
 
   test("binding a missing session throws MissingSession", async () => {

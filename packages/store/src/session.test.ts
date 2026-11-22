@@ -20,6 +20,8 @@ const session = (overrides: Partial<Session> = {}): Session => ({
   status: "active",
   acpSessionId: null,
   gatewayId: null,
+  selection: null,
+  conversationId: null,
   turnSeq: 0,
   createdAt: 0,
   updatedAt: 0,

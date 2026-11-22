@@ -2,6 +2,7 @@ import {
   nextQueued,
   transitionTurn,
   type Session,
+  type SessionSelection,
   type ThreadRef,
   type Turn,
   type TurnUpdate,
@@ -49,6 +50,8 @@ export class SessionRepository {
       status: "active",
       acpSessionId: null,
       gatewayId: null,
+      selection: null,
+      conversationId: null,
       turnSeq: 0,
       createdAt: now,
       updatedAt: now,
@@ -139,6 +142,25 @@ export class SessionRepository {
     const session = await this.session(sessionId);
     if (session === undefined) throw new MissingSession(sessionId);
     const next: Session = { ...session, acpSessionId, gatewayId, updatedAt: now };
+    await this.#storage.put(sessionKey(sessionId), next);
+    return next;
+  }
+
+  /**
+   * Record the router's choice and the pi conversation it runs in. A session
+   * keeps the choice it already made, so a redelivery cannot move a live
+   * conversation to another agent or runtime.
+   */
+  async route(
+    sessionId: string,
+    selection: SessionSelection,
+    conversationId: string,
+    now: number,
+  ): Promise<Session> {
+    const session = await this.session(sessionId);
+    if (session === undefined) throw new MissingSession(sessionId);
+    if (session.selection !== null) return session;
+    const next: Session = { ...session, selection, conversationId, updatedAt: now };
     await this.#storage.put(sessionKey(sessionId), next);
     return next;
   }

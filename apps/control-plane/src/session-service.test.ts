@@ -96,6 +96,75 @@ describe("delivery", () => {
     expect(outcome.kind === "accepted" && outcome.turn.prompt).toBe("hello");
   });
 
+  test("a delivery records the route the session will run on", async () => {
+    const { service: sessions } = service();
+    const outcome = await sessions.deliver("s1", thread, "hello", "evt-1", 10);
+    expect(outcome.kind).toBe("accepted");
+    if (outcome.kind === "refused") return;
+    expect(outcome.selection).toMatchObject({
+      agent: "pi",
+      runtime: "cloudflare-sandbox",
+      protocol: "durable",
+    });
+    const session = await sessions.session("s1");
+    expect(session?.selection).toEqual(outcome.selection);
+    expect(session?.conversationId).toBe("s1");
+  });
+
+  test("an explicit agent and runtime are honored and kept on the session", async () => {
+    const { service: sessions } = service();
+    const outcome = await sessions.deliver("s1", thread, "hello", "evt-1", 10, {
+      agent: "claude-code",
+      runtime: "local-vm",
+    });
+    if (outcome.kind === "refused") throw new Error(outcome.refusal);
+    expect(outcome.selection).toMatchObject({
+      agent: "claude-code",
+      runtime: "local-vm",
+      protocol: "stdio",
+    });
+  });
+
+  test("an unroutable request is refused and leaves no turn behind", async () => {
+    const { service: sessions } = service();
+    const outcome = await sessions.deliver("s1", thread, "hello", "evt-1", 10, {
+      agent: "codex",
+      runtime: "local-vm",
+    });
+    expect(outcome).toEqual({
+      kind: "refused",
+      reason: "unroutable",
+      refusal: "unsupported-combination",
+    });
+    expect(await sessions.turns("s1")).toEqual([]);
+  });
+
+  test("a refused request can be retried with a runtime that supports the agent", async () => {
+    const { service: sessions } = service();
+    await sessions.deliver("s1", thread, "hello", "evt-1", 10, {
+      agent: "codex",
+      runtime: "local-vm",
+    });
+    const outcome = await sessions.deliver("s1", thread, "hello", "evt-1", 11, {
+      agent: "codex",
+      runtime: "cloudflare-sandbox",
+    });
+    expect(outcome.kind).toBe("accepted");
+  });
+
+  test("a session keeps the route it first chose, even when a replay asks for another", async () => {
+    const { service: sessions } = service();
+    const first = await sessions.deliver("s1", thread, "hello", "evt-1", 10, { agent: "pi" });
+    const second = await sessions.deliver("s1", thread, "hello", "evt-2", 11, {
+      agent: "grok-build",
+      runtime: "local-vm",
+    });
+    if (first.kind === "refused" || second.kind === "refused")
+      throw new Error("unexpected refusal");
+    expect(second.selection).toEqual(first.selection);
+    expect(second.selection.agent).toBe("pi");
+  });
+
   test("a replayed delivery returns the turn it already created", async () => {
     const { service: sessions } = service();
     const first = await sessions.deliver("s1", thread, "hello", "evt-1", 10);
@@ -105,6 +174,7 @@ describe("delivery", () => {
     if (first.kind === "refused" || second.kind === "refused") return;
     expect(second.turn.id).toBe(first.turn.id);
     expect(second.turn.prompt).toBe("hello");
+    expect(second.selection).toEqual(first.selection);
   });
 
   test("two concurrent deliveries for one thread converge on one turn", async () => {

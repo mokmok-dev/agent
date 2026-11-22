@@ -20,10 +20,29 @@ export type Session = {
   /** The ACP session id the VM gateway reports after `session/new`. */
   acpSessionId: string | null;
   gatewayId: string | null;
+  /**
+   * The agent, model, and runtime this session runs on, as the capability
+   * router chose them. `null` until the first delivery is routed, so the
+   * choice is inspectable after the fact.
+   */
+  selection: SessionSelection | null;
+  /** The pi conversation that holds this session's transcript. */
+  conversationId: string | null;
   /** How many turns this session has created; the next turn id continues from here. */
   turnSeq: number;
   createdAt: number;
   updatedAt: number;
+};
+
+/**
+ * The router's answer, as the session keeps it. It mirrors the capability
+ * package's `Selection`, kept structural so the store does not depend on it.
+ */
+export type SessionSelection = {
+  agent: string;
+  runtime: string;
+  model: { provider: string; modelId: string };
+  protocol: string;
 };
 
 export type Turn = {

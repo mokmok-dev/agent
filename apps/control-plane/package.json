@@ -5,6 +5,7 @@
   "type": "module",
   "dependencies": {
     "@agent/adapters": "workspace:*",
+    "@agent/capability": "workspace:*",
     "@agent/protocol": "workspace:*",
     "@agent/store": "workspace:*"
   },
