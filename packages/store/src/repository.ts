@@ -2,6 +2,7 @@ import {
   expireTurn,
   nextQueued,
   transitionTurn,
+  type AgentCapability,
   type Session,
   type SessionSelection,
   type ThreadRef,
@@ -52,6 +53,7 @@ export class SessionRepository {
       acpSessionId: null,
       gatewayId: null,
       selection: null,
+      capability: null,
       conversationId: null,
       turnSeq: 0,
       createdAt: now,
@@ -203,6 +205,23 @@ export class SessionRepository {
     const session = await this.session(sessionId);
     if (session === undefined) throw new MissingSession(sessionId);
     const next: Session = { ...session, acpSessionId, gatewayId, updatedAt: now };
+    await this.#storage.put(sessionKey(sessionId), next);
+    return next;
+  }
+
+  /**
+   * Record what the session's agent said it can run. It arrives from a process
+   * outside this deployment, so it is written only after the gateway reported
+   * it, and a later report replaces it: an agent's credentials can change.
+   */
+  async recordCapability(
+    sessionId: string,
+    capability: AgentCapability,
+    now: number,
+  ): Promise<Session> {
+    const session = await this.session(sessionId);
+    if (session === undefined) throw new MissingSession(sessionId);
+    const next: Session = { ...session, capability, updatedAt: now };
     await this.#storage.put(sessionKey(sessionId), next);
     return next;
   }

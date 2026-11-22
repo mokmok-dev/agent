@@ -43,6 +43,9 @@ describe("end to end against the real scripted agent", () => {
 
     expect(events.map((event) => event.type)).toEqual([
       "session.bound",
+      // The scripted agent states no models, which is still a capability the
+      // control plane records: "this agent names none" is a real answer.
+      "session.capability",
       "turn.started",
       "turn.update",
       "turn.completed",

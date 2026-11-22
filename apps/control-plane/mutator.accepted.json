@@ -3,6 +3,10 @@
     "reason": "equivalent: an id that is not a string is already absent from the catalog, a capability entry that is not a string never equals a name, and a context length that is not a positive number reads as unknown either way.",
     "where": "src/ollama-cloud.ts:80:7 typeof id !== \"string\" -> false"
   },
+  "14sa4j960sz": {
+    "reason": "equivalent: a reply of undefined and a missing session both send nothing, so dropping the guard can only change which of two silent paths is taken.",
+    "where": "src/session-do.ts:107:11 reply === undefined || session === undefined -> false"
+  },
   "151gx2o8hlm": {
     "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
     "where": "src/ollama-cloud.ts:219:11 { return undefined; } -> {}"
@@ -31,6 +35,10 @@
     "reason": "equivalent: an unparseable frame has no session id, so it is not a report and the same 'nothing to send' step is returned through the next guard.",
     "where": "src/gateway-connection.ts:69:7 parsed === undefined -> false"
   },
+  "1eqm5gbnrzy": {
+    "reason": "equivalent: open() needs a Durable Object's SQLite, which workerd cannot provide on this host; the conversation wiring it builds is exercised by the pi turn runner test over the same ConversationBase.",
+    "where": "src/pi-runtime.ts:65:61 { models: setup.models, registry: createRegistry(), context… -> {}"
+  },
   "1g6r9c17sws": {
     "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
     "where": "src/disk-host.ts:13:31 \"utf8\" -> \"\""
@@ -43,9 +51,9 @@
     "reason": "equivalent: PROVIDER_KEYS has an entry for every provider that reaches these lines, so the empty-list fallback and the fileExists answer are never taken; pi asks for file existence only in a login flow this deployment does not run.",
     "where": "src/providers.ts:118:31 false -> true"
   },
-  "1k46111iwal": {
-    "reason": "equivalent: a missing text field and an undefined one behave the same at the reply, and an array carries no type field so it is refused by the next check.",
-    "where": "src/gateway-plane.ts:145:13 text === undefined -> false"
+  "1iq76r5310l": {
+    "reason": "equivalent: an expired turn exists only on a stored session, so the session read cannot be undefined here and both branches reach the same reply loop.",
+    "where": "src/session-do.ts:82:9 session === undefined -> false"
   },
   "1leechbpyih": {
     "reason": "equivalent: an empty ACP session id and an absent one both mean the gateway has not opened a session, and the codec reads them the same.",
@@ -55,21 +63,33 @@
     "reason": "equivalent: the mutated code is inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun cannot construct either, so no local test can reach it. The integration is proven by the deployment, not here.",
     "where": "src/pi-runtime.ts:42:92 { const storage = await openDurableObjectSqliteStorage(stat… -> {}"
   },
-  "1nf0vzbbd88": {
-    "reason": "equivalent: a refused delivery carries no run and created no turn, so reading its run yields undefined and runNext finds nothing to run; the guards are defensive and the tests pin the observable results, no reply field and the runner never called.",
-    "where": "src/worker.ts:137:24 \"refused\" -> \"\""
+  "1mvd590d62r": {
+    "reason": "equivalent: open() needs a Durable Object's SQLite and a live pi runtime, so no in-process test reaches it; the credential port it selects is covered by the credential-bridge test, which drives the same wrapper with a stub RPC.",
+    "where": "src/pi-runtime.ts:51:23 rpc === undefined -> false"
   },
   "1nhez5179ni": {
     "reason": "equivalent: assigning undefined to an optional property reads the same as leaving it out, so the presence check changes no observable value.",
     "where": "src/providers.ts:91:7 credentials !== undefined -> true"
   },
+  "1o41gjt1jsp": {
+    "reason": "equivalent at the observable level: reading the outcome as present throws on undefined, and the surrounding catch turns that into the same 'no reply sent' outcome plus a log line; no stored state or reply differs.",
+    "where": "src/session-do.ts:103:11 outcome === undefined -> false"
+  },
   "1omqkceg0f": {
     "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
     "where": "src/disk-host.ts:19:11 { return undefined; } -> {}"
   },
+  "1qwe8wspo1m": {
+    "reason": "equivalent: the sweep always writes the missing-gateway reason, so the fallback string is unreachable while the sweep is its only producer.",
+    "where": "src/session-do.ts:85:48 \"no gateway claimed this turn\" -> \"\""
+  },
   "1sks1fbztdl": {
     "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
     "where": "src/ollama-cloud.ts:177:9 !response.ok -> false"
+  },
+  "1ud5toipx1k": {
+    "reason": "equivalent: the branch is only reachable when a runner exists, because accept() and expire() call it behind that same check, so treating it as present cannot be observed.",
+    "where": "src/session-do.ts:63:11 this.#runner === undefined -> false"
   },
   "1wijqx2v4qb": {
     "reason": "equivalent: these guards return the current catalog, so removing one changes nothing while 'current' already equals the published list; the offline and refusal tests pin the observable result.",
@@ -83,10 +103,6 @@
     "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
     "where": "src/ollama-cloud.ts:212:24 `Bearer ${key}` -> ``"
   },
-  "1yxkyyqlsbi": {
-    "reason": "equivalent: a refused delivery carries no run and created no turn, so reading its run yields undefined and runNext finds nothing to run; the guards are defensive and the tests pin the observable results, no reply field and the runner never called.",
-    "where": "src/worker.ts:137:7 outcome.kind === \"refused\" -> false"
-  },
   "221izg9eme0": {
     "reason": "equivalent: an empty credential list and a provider absent from the list both render credential: null, so the fallback array changes no response a caller sees.",
     "where": "src/worker.ts:194:9 [] -> [\"Stryker was here!\"]"
@@ -95,13 +111,37 @@
     "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
     "where": "src/ollama-cloud.ts:174:26 \"application/json\" -> \"\""
   },
+  "28tbmcro9co": {
+    "reason": "equivalent: an unstated model trims to the empty string, and indexOf then returns -1 for both, so the provider is empty either way and the same undefined is returned.",
+    "where": "src/routing.ts:105:27 \"\" -> \"Stryker was here!\""
+  },
   "2bf4w4o1hfy": {
     "reason": "equivalent: these lines are inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun can construct neither, so the deployment is the only place this runs.",
     "where": "src/pi-runtime.ts:48:36 ?. -> ."
   },
+  "2bluj0ntqp3": {
+    "reason": "equivalent: with no expired turns the loop below writes nothing, so skipping the early return yields the same empty array and the same replies.",
+    "where": "src/session-do.ts:80:9 expired.length === 0 -> false"
+  },
+  "2d7hwd4ag4q": {
+    "reason": "equivalent: open() needs a Durable Object's SQLite and a live pi runtime, so no in-process test reaches it; the credential port it selects is covered by the credential-bridge test, which drives the same wrapper with a stub RPC.",
+    "where": "src/pi-runtime.ts:51:23 rpc === undefined -> rpc !== undefined"
+  },
+  "2eji0h3e4vc": {
+    "reason": "equivalent: an anonymous connection names no session, and no session can have the made-up id, so the sweep finds nothing exactly as the empty id does.",
+    "where": "src/session-do.ts:171:43 \"\" -> \"Stryker was here!\""
+  },
+  "3hdl9m0una": {
+    "reason": "equivalent: the two conditions are exclusive in practice (a reply exists only for an existing session), so the || and && forms agree.",
+    "where": "src/session-do.ts:107:11 reply === undefined || session === undefined -> (reply === undefined && session === undefined)"
+  },
   "7iv5ui4aoq": {
     "reason": "equivalent: a missing text field and an undefined one behave the same at the reply, and an array carries no type field so it is refused by the next check.",
     "where": "src/gateway-plane.ts:176:12 typeof params === \"object\" -> true"
+  },
+  "8f8d6g44tu": {
+    "reason": "equivalent: the branch is only reached through the check in accept(), so treating the runner as present cannot be observed.",
+    "where": "src/session-do.ts:99:9 this.#runner === undefined -> false"
   },
   "8i264ndpf1": {
     "reason": "equivalent: an id that is not a string is already absent from the catalog, a capability entry that is not a string never equals a name, and a context length that is not a positive number reads as unknown either way.",
@@ -110,6 +150,10 @@
   "9frmz7o9hs": {
     "reason": "equivalent: these guards return the current catalog, so removing one changes nothing while 'current' already equals the published list; the offline and refusal tests pin the observable result.",
     "where": "src/ollama-cloud.ts:138:11 key === undefined -> false"
+  },
+  "bxfi0wrjuw": {
+    "reason": "equivalent: a session that vanished while its run settled has no thread to answer, so the reply guard already stops the send.",
+    "where": "src/session-do.ts:107:34 session === undefined -> false"
   },
   "cs1jt5mgxq": {
     "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
@@ -123,9 +167,17 @@
     "reason": "equivalent: these guards return the current catalog, so removing one changes nothing while 'current' already equals the published list; the offline and refusal tests pin the observable result.",
     "where": "src/ollama-cloud.ts:134:11 !context.allowNetwork -> false"
   },
+  "gpe4ve4rj1": {
+    "reason": "equivalent: the session was just read to claim the turn, so it is present here; reading its capability directly and reading through an optional chain agree.",
+    "where": "src/session-service.ts:181:69 ?. -> ."
+  },
   "gqi8o6dbvj": {
     "reason": "equivalent: PROVIDER_KEYS has an entry for every provider that reaches these lines, so the empty-list fallback and the fileExists answer are never taken; pi asks for file existence only in a login flow this deployment does not run.",
     "where": "src/providers.ts:118:31 false -> undefined"
+  },
+  "h94ep27ss0": {
+    "reason": "equivalent: open() needs a Durable Object's SQLite and a live pi runtime, so no in-process test reaches it; the credential port it selects is covered by the credential-bridge test, which drives the same wrapper with a stub RPC.",
+    "where": "src/pi-runtime.ts:51:23 rpc === undefined -> true"
   },
   "hf19jkv03b": {
     "reason": "equivalent: these are the empty-string defaults of optional env reads; an unset var and an empty var both select the shipped default.",
@@ -151,13 +203,13 @@
     "reason": "equivalent: these lines are inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun can construct neither, so the deployment is the only place this runs.",
     "where": "src/pi-runtime.ts:48:48 \"providers\" -> \"\""
   },
+  "regn8j5r8k": {
+    "reason": "equivalent: at separator 0 the provider slice is empty, which the final guard refuses, so < 0 and <= 0 both answer undefined for a leading colon.",
+    "where": "src/routing.ts:107:7 separator < 0 -> separator <= 0"
+  },
   "rxr65mcwfr": {
     "reason": "equivalent: these are the empty-string defaults of optional env reads; an unset var and an empty var both select the shipped default.",
     "where": "src/routing.ts:57:65 \"\" -> \"Stryker was here!\""
-  },
-  "urh0d1ogpi": {
-    "reason": "equivalent: these lines are inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun can construct neither, so the deployment is the only place this runs.",
-    "where": "src/pi-runtime.ts:50:61 { models: setup.models, registry: createRegistry(), context… -> {}"
   },
   "vgtd5t0mu6": {
     "reason": "equivalent: an id that is not a string is already absent from the catalog, a capability entry that is not a string never equals a name, and a context length that is not a positive number reads as unknown either way.",
@@ -170,5 +222,9 @@
   "znxbknwwin": {
     "reason": "equivalent: these guards return the current catalog, so removing one changes nothing while 'current' already equals the published list; the offline and refusal tests pin the observable result.",
     "where": "src/ollama-cloud.ts:142:11 tags === undefined -> false"
+  },
+  "zto6i0mg9o": {
+    "reason": "equivalent: a turn that never ran still has a session, so the session guard alone leaves nothing to send.",
+    "where": "src/session-do.ts:107:11 reply === undefined -> false"
   }
 }

@@ -303,3 +303,56 @@ describe("the catalog a turn resolves against", () => {
     expect(setup.models.getProvider("cloudflare-workers-ai")).toBeDefined();
   });
 });
+
+describe("what the catalog refresh asks for", () => {
+  test("the refresh is asked for the deployment's providers over the network", async () => {
+    // The arguments are the whole point: a refresh of the wrong providers, or
+    // one that cannot reach the network, fills nothing and the turn fails with
+    // `no_model`.
+    const asked: unknown[] = [];
+    const models = {
+      refresh: async (request: unknown) => {
+        asked.push(request);
+        return { errors: new Map() };
+      },
+      getProvider: () => undefined,
+    } as never;
+    await refreshCatalog(models, ["ollama-cloud"]);
+    expect(asked).toEqual([{ providers: ["ollama-cloud"], allowNetwork: true }]);
+  });
+
+  test("every provider is reported after the refresh, so an empty catalog is visible", async () => {
+    const logged: string[] = [];
+    const original = console.log;
+    console.log = (message: string) => logged.push(message);
+    try {
+      const models = {
+        refresh: async () => ({ errors: new Map() }),
+        getProvider: (id: string) =>
+          id === "present" ? { getModels: () => [{ id: "m" }, { id: "n" }] } : undefined,
+      } as never;
+      await refreshCatalog(models, ["present", "absent"]);
+      expect(logged).toEqual(["catalog present: 2 models", "catalog absent: absent models"]);
+    } finally {
+      console.log = original;
+    }
+  });
+
+  test("a provider's own refresh error is reported by name, not swallowed", async () => {
+    const logged: string[] = [];
+    const original = console.log;
+    console.log = (message: string) => logged.push(message);
+    try {
+      const models = {
+        refresh: async () => ({
+          errors: new Map([["ollama-cloud", new Error("401 unauthorized")]]),
+        }),
+        getProvider: () => undefined,
+      } as never;
+      await refreshCatalog(models, ["ollama-cloud"]);
+      expect(logged[0]).toContain("ollama-cloud: 401 unauthorized");
+    } finally {
+      console.log = original;
+    }
+  });
+});

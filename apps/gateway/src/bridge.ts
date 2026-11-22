@@ -1,7 +1,12 @@
 import {
   AcpClient,
   ProtocolError,
+  agentCapabilityOf,
+  emptyMcpServers,
+  modelValueFor,
+  type AgentCapability,
   type AgentRequestHandlers,
+  type McpServersShape,
   type SessionUpdate,
 } from "@agent/protocol";
 import { PendingPermission } from "./permission.ts";
@@ -16,7 +21,8 @@ export type GatewayEvent =
   | { type: "turn.completed"; turnId: string; sessionId: string; stopReason: string; text: string }
   | { type: "turn.failed"; turnId: string; sessionId: string; error: string }
   | { type: "permission.asked"; turnId: string; toolCallId: string; options: string[] }
-  | { type: "session.bound"; sessionId: string; acpSessionId: string };
+  | { type: "session.bound"; sessionId: string; acpSessionId: string }
+  | { type: "session.capability"; sessionId: string; capability: AgentCapability };
 
 /** The text a turn's message chunks have produced so far. */
 type ActiveTurn = { turnId: string; sessionId: string; text: string };
@@ -25,10 +31,24 @@ export class AcpBridge {
   readonly #client: AcpClient;
   readonly #emit: (event: GatewayEvent) => void;
   readonly #permissions = new Map<string, PendingPermission>();
+  /** The empty `mcpServers` shape this agent accepts. */
+  readonly #mcpServers: McpServersShape;
+  /** What the agent said it can run, which is what a model choice is checked against. */
+  #capability: AgentCapability | undefined;
   #turn: ActiveTurn | undefined;
 
-  constructor(options: { channel: AgentChannel; emit: (event: GatewayEvent) => void }) {
+  constructor(options: {
+    channel: AgentChannel;
+    emit: (event: GatewayEvent) => void;
+    /**
+     * How the empty `mcpServers` is sent. `opencode2 acp` requires a record and
+     * `grok agent stdio` requires an array, so the host states which agent it
+     * started rather than the bridge guessing.
+     */
+    mcpServers?: McpServersShape;
+  }) {
     this.#emit = options.emit;
+    this.#mcpServers = options.mcpServers ?? "array";
     const handlers: AgentRequestHandlers = {
       onSessionUpdate: (update) => this.#update(update),
       requestPermission: async (params) => {
@@ -57,12 +77,50 @@ export class AcpBridge {
   }
 
   async open(sessionId: string, cwd: string): Promise<string> {
-    await this.#client.initialize(this.#client.defaultInitializeParams());
-    // An agent requires `mcpServers` in some form and ignores an empty one; a
-    // record is what opencode2 accepts, and ACP allows it in place of the array.
-    const session = await this.#client.newSession({ cwd, mcpServers: {} });
+    const initialized = await this.#client.initialize(this.#client.defaultInitializeParams());
+    // The field is required, and its empty form differs by agent: a record for
+    // opencode2, an array for grok. The host states which, so this module does
+    // not carry a table of agents.
+    const session = await this.#client.newSession({
+      cwd,
+      mcpServers: emptyMcpServers(this.#mcpServers),
+    });
     this.#emit({ type: "session.bound", sessionId, acpSessionId: session.sessionId });
+    this.#capability = agentCapabilityOf(initialized, session);
+    // A `stdio` agent's models depend on its own credentials, so the control
+    // plane learns what this one offers instead of assuming the routed model.
+    this.#emit({ type: "session.capability", sessionId, capability: this.#capability });
     return session.sessionId;
+  }
+
+  /**
+   * Tell the agent which model the route chose, when the agent lets the client
+   * pick one. An agent that names its models takes the id it lists; an agent
+   * that names none has nothing to select, so the call is skipped rather than
+   * assumed to work.
+   */
+  async selectModel(
+    acpSessionId: string,
+    model: { provider: string; modelId: string },
+  ): Promise<boolean> {
+    const capability = this.#capability;
+    // No report means no list to match against, which is not the same as a list
+    // the model happens to be missing from.
+    if (capability === undefined) return false;
+    const value = modelValueFor(capability.availableModels, model);
+    if (value === undefined) return false;
+    try {
+      await this.#client.setConfigOption({
+        sessionId: acpSessionId,
+        configId: "model",
+        value,
+      });
+      return true;
+    } catch {
+      // An agent that reports models but cannot change them is not a defect on
+      // this side; the turn still runs on the model the agent already chose.
+      return false;
+    }
   }
 
   async run(sessionId: string, acpSessionId: string, turnId: string, text: string): Promise<void> {
@@ -123,7 +181,28 @@ export class AcpBridge {
 }
 
 export function errorMessage(error: unknown): string {
-  if (error instanceof ProtocolError) return `${error.code}: ${error.message}`;
+  if (error instanceof ProtocolError) {
+    // An agent often puts the real cause in `data`, as grok does when the
+    // account cannot pay for a model: `-32603: Internal error` alone would hide
+    // why the turn failed. The detail is included when it is a string or names
+    // one, and left out when it adds nothing.
+    const detail = detailOf(error.data);
+    return detail === undefined
+      ? `${error.code}: ${error.message}`
+      : `${error.code}: ${error.message} (${detail})`;
+  }
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/** The most specific text an error's `data` carries, when it carries any. */
+function detailOf(data: unknown): string | undefined {
+  if (typeof data === "string") return data === "" ? undefined : data;
+  if (typeof data !== "object" || data === null) return undefined;
+  const record = data as Record<string, unknown>;
+  for (const key of ["message", "detail", "reason"]) {
+    const value = record[key];
+    if (typeof value === "string" && value !== "") return value;
+  }
+  return undefined;
 }

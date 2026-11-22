@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { adaptLinear, parseLinearEvent, verifyLinear } from "./linear.ts";
+import { issueOf } from "./linear-schema.ts";
 import type { AdapterResult, RawRequest } from "./events.ts";
 import type { Signature, Verified } from "./signature.ts";
 import { hmacHex } from "./signature.ts";
@@ -174,6 +175,14 @@ describe("parseLinearEvent", () => {
   test("an issue with an empty id falls back to the session, so the thread is never empty", () => {
     const result = parseLinearEvent(sessionBody({ issue: undefined }));
     expect(result.kind === "event" && result.event.thread.channelId).toBe("sess-9");
+  });
+
+  test("an event with no issue anywhere has none to read, rather than failing", () => {
+    // A `prompted` event carries the session and no issue, and an older
+    // payload may carry no session either; reading the issue must still work.
+    const result = parseLinearEvent(sessionBody({ issue: undefined }));
+    if (result.kind !== "event") throw new Error("expected an event");
+    expect(issueOf(result.event)).toBeUndefined();
   });
 });
 

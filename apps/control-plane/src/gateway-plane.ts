@@ -1,3 +1,4 @@
+import type { AgentCapability } from "@agent/protocol";
 import type { Session, Turn, TurnUpdate } from "@agent/store";
 
 /**
@@ -14,6 +15,11 @@ export type PromptFrame = {
   acpSessionId: string;
   turnId: string;
   text: string;
+  /**
+   * The model the route chose. A `stdio` agent picks its own by default, so a
+   * gateway that can select one is told which the route meant.
+   */
+  model?: { provider: string; modelId: string };
 };
 
 /**
@@ -31,6 +37,9 @@ export function promptFor(session: Session, turn: Turn): PromptFrame {
     acpSessionId: session.acpSessionId ?? "",
     turnId: turn.id,
     text: turn.prompt,
+    // A stored session always has a selection once it is routed; a session that
+    // has not been routed has none, and then there is no model to send.
+    ...(session.selection == null ? {} : { model: session.selection.model }),
   };
 }
 
@@ -46,13 +55,15 @@ export function nextPrompt(session: Session, turns: readonly Turn[]): PromptFram
 /** A gateway event, as the control plane reads it. Unknown types are ignored. */
 export type GatewayReport =
   | { type: "session.bound"; sessionId: string; acpSessionId: string }
+  | { type: "session.capability"; sessionId: string; capability: AgentCapability }
   | { type: "turn.started"; sessionId: string; turnId: string }
   | { type: "turn.completed"; sessionId: string; turnId: string; stopReason: string; text?: string }
   | { type: "turn.failed"; sessionId: string; turnId: string; error: string };
 
-/** What applying an event does: a turn move, an ACP binding, or nothing. */
+/** What applying an event does: a turn move, an ACP binding, a capability, or nothing. */
 export type GatewayEffect =
   | { kind: "bind"; acpSessionId: string }
+  | { kind: "capability"; capability: AgentCapability }
   | { kind: "settle"; turnId: string; update: TurnUpdate; text?: string }
   | { kind: "ignore"; reason: string };
 
@@ -78,6 +89,8 @@ export function effectOf(
       return report.acpSessionId === ""
         ? { kind: "ignore", reason: "an empty ACP session id would lose the binding" }
         : { kind: "bind", acpSessionId: report.acpSessionId };
+    case "session.capability":
+      return { kind: "capability", capability: report.capability };
     case "turn.started": {
       const turn = turns.find((candidate) => candidate.id === report.turnId);
       if (turn === undefined) return { kind: "ignore", reason: "no such turn" };
@@ -128,6 +141,12 @@ export function reportOf(value: unknown): GatewayReport | undefined {
       return acpSessionId === undefined
         ? undefined
         : { type: "session.bound", sessionId, acpSessionId };
+    }
+    case "session.capability": {
+      const capability = capabilityOf(record["capability"]);
+      return capability === undefined
+        ? undefined
+        : { type: "session.capability", sessionId, capability };
     }
     case "turn.started": {
       const turnId = str("turnId");
@@ -185,4 +204,37 @@ export function helloOf(value: unknown): string | undefined {
   const record = bodyOf(value);
   if (record === undefined || record["type"] !== "hello") return undefined;
   return typeof record["sessionId"] === "string" ? record["sessionId"] : undefined;
+}
+
+/**
+ * The capability an agent stated, read from the frame the gateway sends.
+ *
+ * It arrives from a process outside this deployment, so every field is checked
+ * rather than trusted: a malformed capability is dropped, which leaves the
+ * session as it was instead of recording a model list that is not real.
+ */
+export function capabilityOf(value: unknown): AgentCapability | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  const stated = record["availableModels"];
+  if (!Array.isArray(stated)) return undefined;
+  const availableModels = stated.filter((model): model is string => typeof model === "string");
+  const agentInfo = record["agent"];
+  const agent =
+    typeof agentInfo === "object" &&
+    agentInfo !== null &&
+    typeof (agentInfo as Record<string, unknown>)["name"] === "string" &&
+    typeof (agentInfo as Record<string, unknown>)["version"] === "string"
+      ? {
+          name: (agentInfo as { name: string }).name,
+          version: (agentInfo as { version: string }).version,
+        }
+      : undefined;
+  const currentModelId = record["currentModelId"];
+  return {
+    ...(agent === undefined ? {} : { agent }),
+    ...(typeof currentModelId === "string" ? { currentModelId } : {}),
+    availableModels,
+    statesModels: record["statesModels"] === true,
+  };
 }

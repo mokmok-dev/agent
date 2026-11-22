@@ -171,13 +171,16 @@ describe("the gateway connection", () => {
         params: Record<string, unknown>;
       };
       expect(envelope.method).toBe("gateway/command");
-      // The whole params object, so no field can be silently dropped.
+      // The whole params object, so no field can be silently dropped. The
+      // route's model travels with the prompt, because a stdio agent picks its
+      // own model unless the gateway selects one.
       expect(envelope.params).toEqual({
         type: "prompt",
         sessionId: SESSION,
         turnId: "t1",
         text: "write the note",
         acpSessionId: "",
+        model: { provider: "anthropic", modelId: "claude-opus-4-7" },
       });
       // Claimed before it left, so a second connection is not handed it again.
       expect((await sessionObjects().turns(SESSION))[0]?.status).toBe("dispatched");
@@ -436,6 +439,77 @@ describe("the Linear reply", () => {
     const body = JSON.parse(sent[0]?.body ?? "{}").variables.input.content.body;
     expect(body).toContain("the agent exited");
   });
+
+  test("a run with no reason still names a failure rather than staying silent", async () => {
+    const { request, sent } = capture();
+    const { linearReplies } = await import("./linear-reply.ts");
+    await replyFor(
+      linearReplies(oauth(), request as never, "http://capture/graphql"),
+      "sess-local",
+      { kind: "failed" },
+      1,
+    );
+    const body = JSON.parse(sent[0]?.body ?? "{}").variables.input.content.body;
+    expect(body).toBe("The run failed: no reason given");
+  });
+
+  test("a failed run's body is not mistaken for an answer", async () => {
+    const { request, sent } = capture();
+    const { linearReplies } = await import("./linear-reply.ts");
+    await replyFor(
+      linearReplies(oauth(), request as never, "http://capture/graphql"),
+      "sess-local",
+      { kind: "failed", error: "the agent exited", text: "stale text" },
+      1,
+    );
+    const body = JSON.parse(sent[0]?.body ?? "{}").variables.input.content.body;
+    expect(body).toBe("The run failed: the agent exited");
+  });
+
+  test("an answered run with no text sends an empty body, not a failure", async () => {
+    const { request, sent } = capture();
+    const { linearReplies } = await import("./linear-reply.ts");
+    await replyFor(
+      linearReplies(oauth(), request as never, "http://capture/graphql"),
+      "sess-local",
+      { kind: "answered" },
+      1,
+    );
+    const body = JSON.parse(sent[0]?.body ?? "{}").variables.input.content.body;
+    expect(body).toBe("");
+  });
+
+  test("a run of some other kind sends nothing, because it is neither an answer nor a failure", async () => {
+    // A cancelled or unclaimed run must not be reported as an empty answer or a
+    // failure with no reason: it simply has nothing to say.
+    const { request, sent } = capture();
+    const { linearReplies } = await import("./linear-reply.ts");
+    for (const kind of ["cancelled", "not-queued", "missing"]) {
+      expect(
+        await replyFor(
+          linearReplies(oauth(), request as never, "http://capture/graphql"),
+          "sess-local",
+          { kind, error: "carried but not a failure kind" },
+          1,
+        ),
+      ).toBeUndefined();
+    }
+    expect(sent).toEqual([]);
+  });
+
+  test("a run that never produced an outcome sends nothing", async () => {
+    const { request, sent } = capture();
+    const { linearReplies } = await import("./linear-reply.ts");
+    expect(
+      await replyFor(
+        linearReplies(oauth(), request as never, "http://capture/graphql"),
+        "sess-local",
+        undefined,
+        1,
+      ),
+    ).toBeUndefined();
+    expect(sent).toEqual([]);
+  });
 });
 
 describe("the payload the gateway sends", () => {
@@ -476,6 +550,8 @@ describe("the payload the gateway sends", () => {
     const frame = nextPrompt({ id: SESSION, acpSessionId: "acp-1" } as never, [
       { id: "t2", prompt: "text", status: "queued", createdAt: 5 } as never,
     ]);
+    // A session that has not been routed yet has no model to send, so the frame
+    // carries the turn and nothing it cannot know.
     expect(frame).toEqual({
       type: "prompt",
       sessionId: SESSION,
@@ -483,6 +559,18 @@ describe("the payload the gateway sends", () => {
       turnId: "t2",
       text: "text",
     });
+  });
+
+  test("a routed session's model travels with the prompt, so the agent can select it", () => {
+    const frame = nextPrompt(
+      {
+        id: SESSION,
+        acpSessionId: "acp-1",
+        selection: { model: { provider: "ollama-cloud", modelId: "deepseek-v4.1-flash" } },
+      } as never,
+      [{ id: "t2", prompt: "text", status: "queued", createdAt: 5 } as never],
+    );
+    expect(frame?.model).toEqual({ provider: "ollama-cloud", modelId: "deepseek-v4.1-flash" });
   });
 });
 
@@ -794,6 +882,79 @@ describe("the gateway route and the executor choice", () => {
         expect(response.status).toBe(426);
         expect(await response.json()).toEqual({ error: "expected a WebSocket upgrade" });
       }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an upgrade is refused unless it names the session the gateway serves", async () => {
+    const { dir, env } = await deployment();
+    try {
+      for (const path of ["https://x/gateway", "https://x/gateway?session="]) {
+        const response = await controlPlane(
+          new Request(path, { headers: { upgrade: "websocket" } }),
+          env,
+        );
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({
+          error: "name the session a gateway serves with ?session=<id>",
+        });
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an upgrade naming a session is handed to that session's object", async () => {
+    const { dir } = await deployment();
+    try {
+      const asked: string[] = [];
+      const object = {
+        fetch: async (request: Request) => {
+          asked.push(new URL(request.url).searchParams.get("session") ?? "");
+          return new Response(null, { status: 101 });
+        },
+      };
+      const env = {
+        SESSIONS: { getByName: (id: string) => ({ ...object, id }) },
+      } as unknown as Env;
+      const response = await controlPlane(
+        new Request("https://x/gateway?session=s1", {
+          headers: { upgrade: "WebSocket" },
+        }),
+        env,
+      );
+      expect(response.status).toBe(101);
+      // The route names the object by the session the gateway asked for, so a
+      // Worker with many objects reaches the one that owns this socket.
+      expect(asked).toEqual(["s1"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the upgrade header is read whatever case it arrives in", async () => {
+    const { dir } = await deployment();
+    try {
+      const asked: string[] = [];
+      const env = {
+        SESSIONS: {
+          getByName: (id: string) => ({
+            fetch: async () => {
+              asked.push(id);
+              return new Response(null, { status: 101 });
+            },
+          }),
+        },
+      } as unknown as Env;
+      for (const upgrade of ["websocket", "WebSocket", "WEBSOCKET"]) {
+        const response = await controlPlane(
+          new Request("https://x/gateway?session=s1", { headers: { upgrade } }),
+          env,
+        );
+        expect(response.status).toBe(101);
+      }
+      expect(asked).toEqual(["s1", "s1", "s1"]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

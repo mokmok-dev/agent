@@ -10,6 +10,7 @@ import {
   type Storage,
 } from "./repository.ts";
 import type { ThreadRef, TurnStatus, TurnUpdate } from "./session.ts";
+import { GATEWAY_CLAIM_DEADLINE_MS, NO_GATEWAY_REASON } from "./session.ts";
 
 class MemoryStorage implements Storage {
   readonly values = new Map<string, string>();
@@ -75,6 +76,7 @@ describe("sessions", () => {
       acpSessionId: null,
       gatewayId: null,
       selection: null,
+      capability: null,
       conversationId: null,
       turnSeq: 0,
       createdAt: 5,
@@ -500,5 +502,128 @@ describe("nextWork", () => {
     await repo.transition("s1", first.id, { status: "dispatched" }, 7);
     const { turn: second } = await repo.appendTurn("s1", "second", "evt-2", 8);
     expect((await repo.nextWork("s1"))?.turn.id).toBe(second.id);
+  });
+});
+
+describe("expiring the stale turns of a session", () => {
+  /**
+   * The sweep runs on the object that owns the turns, so a stopped VM cannot
+   * leave a queued turn behind: the next event through this session fails it.
+   */
+
+  test("an unclaimed turn past its deadline is failed and returned", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    const { turn } = await repo.appendTurn("s1", "hello", "evt-1", 1_000);
+    const expired = await repo.expireStaleTurns("s1", 1_000 + GATEWAY_CLAIM_DEADLINE_MS);
+    expect(expired).toHaveLength(1);
+    expect(expired[0]).toMatchObject({ id: turn.id, status: "failed", error: NO_GATEWAY_REASON });
+    expect(await repo.turns("s1")).toEqual([
+      expect.objectContaining({ id: turn.id, status: "failed" }),
+    ]);
+  });
+
+  test("a turn inside its deadline is left queued and not returned", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    await repo.appendTurn("s1", "hello", "evt-1", 1_000);
+    expect(await repo.expireStaleTurns("s1", 1_000 + GATEWAY_CLAIM_DEADLINE_MS - 1)).toEqual([]);
+    expect((await repo.turns("s1"))[0]?.status).toBe("queued");
+  });
+
+  test("a claimed turn is left alone, so a slow agent is not failed", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    const { turn } = await repo.appendTurn("s1", "hello", "evt-1", 1_000);
+    await repo.transition("s1", turn.id, { status: "dispatched" }, 1_001);
+    expect(await repo.expireStaleTurns("s1", 1_000 + GATEWAY_CLAIM_DEADLINE_MS * 10)).toEqual([]);
+    expect((await repo.turns("s1"))[0]?.status).toBe("dispatched");
+  });
+
+  test("a second sweep finds the turn terminal and returns nothing", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    await repo.appendTurn("s1", "hello", "evt-1", 1_000);
+    const deadline = 1_000 + GATEWAY_CLAIM_DEADLINE_MS;
+    expect(await repo.expireStaleTurns("s1", deadline)).toHaveLength(1);
+    expect(await repo.expireStaleTurns("s1", deadline * 2)).toEqual([]);
+  });
+
+  test("only the expired turns of the session are returned, in turn order", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    const { turn: first } = await repo.appendTurn("s1", "first", "evt-1", 1_000);
+    const { turn: second } = await repo.appendTurn("s1", "second", "evt-2", 1_000);
+    const deadline = 1_000 + GATEWAY_CLAIM_DEADLINE_MS;
+    const expired = await repo.expireStaleTurns("s1", deadline);
+    expect(expired.map((turn) => turn.id)).toEqual([first.id, second.id]);
+  });
+
+  test("a session that does not exist has no turns to expire", async () => {
+    const { repo } = repository();
+    await expect(repo.expireStaleTurns("missing", 1_000_000)).resolves.toEqual([]);
+  });
+
+  test("one session's stale turn does not fail another session's", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    await repo.createSession("s2", thread, 5);
+    await repo.appendTurn("s1", "first", "evt-1", 1_000);
+    await repo.appendTurn("s2", "second", "evt-2", 1_000);
+    await repo.expireStaleTurns("s1", 1_000 + GATEWAY_CLAIM_DEADLINE_MS);
+    expect((await repo.turns("s2"))[0]?.status).toBe("queued");
+  });
+
+  test("a turn in a closed session is not failed by the sweep", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    await repo.appendTurn("s1", "hello", "evt-1", 1_000);
+    await repo.close("s1", 1_001);
+    expect(await repo.expireStaleTurns("s1", 1_000 + GATEWAY_CLAIM_DEADLINE_MS)).toEqual([]);
+    expect((await repo.turns("s1"))[0]?.status).toBe("queued");
+  });
+});
+
+describe("recording what the agent can run", () => {
+  test("a capability is stored on the session and returned", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    const capability = { availableModels: ["a", "b"], statesModels: true };
+    const updated = await repo.recordCapability("s1", capability, 9);
+    expect(updated).toEqual(expect.objectContaining({ capability, updatedAt: 9 }));
+    expect((await repo.session("s1"))?.capability).toEqual(capability);
+  });
+
+  test("a session that does not exist cannot record a capability", async () => {
+    const { repo } = repository();
+    await expect(
+      repo.recordCapability("missing", { availableModels: [], statesModels: false }, 9),
+    ).rejects.toBeInstanceOf(MissingSession);
+  });
+
+  test("a later report replaces the earlier one, because credentials can change", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    await repo.recordCapability("s1", { availableModels: ["a"], statesModels: true }, 9);
+    await repo.recordCapability("s1", { availableModels: ["b"], statesModels: true }, 10);
+    expect((await repo.session("s1"))?.capability?.availableModels).toEqual(["b"]);
+  });
+
+  test("recording a capability leaves the route and the turns alone", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    const selection = {
+      agent: "claude-code",
+      runtime: "local-vm",
+      model: { provider: "anthropic", modelId: "m" },
+      protocol: "stdio",
+    };
+    await repo.route("s1", selection, "conv-1", 6);
+    await repo.appendTurn("s1", "hello", "evt-1", 7);
+    await repo.recordCapability("s1", { availableModels: ["a"], statesModels: true }, 8);
+    const session = await repo.session("s1");
+    expect(session?.selection).toEqual(selection);
+    expect(session?.conversationId).toBe("conv-1");
+    expect((await repo.turns("s1"))[0]?.status).toBe("queued");
   });
 });

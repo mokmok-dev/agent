@@ -184,6 +184,45 @@ describe("request correlation", () => {
     client.receive(JSON.stringify({ jsonrpc: "2.0", id: 1, result: null }));
     expect(await pending).toBeNull();
   });
+
+  test("setConfigOption sends the setting and returns the options it changed", async () => {
+    const recorder = new Recorder();
+    const client = new AcpClient({ channel: recorder });
+    const pending = client.setConfigOption({
+      sessionId: "s1",
+      configId: "model",
+      value: "grok-4.6",
+    });
+    expect(recorder.last()).toMatchObject({
+      kind: "request",
+      method: AgentMethod.SetConfigOption,
+      params: { sessionId: "s1", configId: "model", value: "grok-4.6" },
+    });
+    client.receive(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { configOptions: [{ id: "model", name: "Model", currentValue: "grok-4.6" }] },
+      }),
+    );
+    expect(await pending).toEqual({
+      configOptions: [{ id: "model", name: "Model", currentValue: "grok-4.6" }],
+    });
+  });
+
+  test("setConfigOption rejects with the agent's own error, so the caller can report it", async () => {
+    const recorder = new Recorder();
+    const client = new AcpClient({ channel: recorder });
+    const pending = client.setConfigOption({ sessionId: "s1", configId: "model", value: "nope" });
+    client.receive(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        error: { code: -32602, message: "no such model" },
+      }),
+    );
+    await expect(pending).rejects.toMatchObject({ code: -32602, message: "no such model" });
+  });
 });
 
 describe("session updates", () => {

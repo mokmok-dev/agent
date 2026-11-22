@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { Session, Turn } from "./session.ts";
-import { expireTurn, GATEWAY_CLAIM_DEADLINE_MS, hasExpired, NO_GATEWAY_REASON } from "./session.ts";
+import {
+  expireTurn,
+  GATEWAY_CLAIM_DEADLINE_MS,
+  hasExpired,
+  NO_GATEWAY_REASON,
+  NO_MODEL_REASON,
+  offersModel,
+} from "./session.ts";
 
 /**
  * A `stdio` turn waits for the gateway that hosts its agent. These tests pin
@@ -71,6 +78,15 @@ describe("the claim deadline", () => {
     expect(hasExpired(turn(), 100, 100)).toBe(true);
     expect(hasExpired(turn(), 99, 100)).toBe(false);
   });
+
+  test("the wait is the time since the turn was created, not the sum of the two times", () => {
+    // A turn created at 900 with the clock at 1_000 has waited 100, which is
+    // inside a 500 deadline; adding the two times would reach 1_900 and call it
+    // expired.
+    expect(hasExpired(turn({ createdAt: 900 }), 1_000, 500)).toBe(false);
+    // The same turn does expire once the wait itself passes the deadline.
+    expect(hasExpired(turn({ createdAt: 400 }), 1_000, 500)).toBe(true);
+  });
 });
 
 describe("expiring a turn", () => {
@@ -111,5 +127,33 @@ describe("expiring a turn", () => {
       1_000 + GATEWAY_CLAIM_DEADLINE_MS,
     );
     expect(expired?.updatedAt).toBe(1_000 + GATEWAY_CLAIM_DEADLINE_MS);
+  });
+});
+
+describe("a model the agent does not offer", () => {
+  test("the reason names the model and every model the agent did list", () => {
+    const reason = NO_MODEL_REASON(
+      { availableModels: ["grok-4.6", "grok-4.7"], statesModels: true },
+      "claude-opus-4-7",
+    );
+    expect(reason).toContain("claude-opus-4-7");
+    expect(reason).toContain("grok-4.6, grok-4.7");
+  });
+
+  test("an agent that listed nothing is described as listing no models", () => {
+    const reason = NO_MODEL_REASON({ availableModels: [], statesModels: false }, "m");
+    expect(reason).toContain("no models");
+    // A made-up list would read as if the agent offered something.
+    expect(reason).not.toContain(",");
+  });
+
+  test("a model the agent listed is offered, and one it did not is not", () => {
+    const capability = { availableModels: ["a"], statesModels: true };
+    expect(offersModel(capability, "a")).toBe(true);
+    expect(offersModel(capability, "b")).toBe(false);
+  });
+
+  test("an agent that named no models offers none, whatever list it carries", () => {
+    expect(offersModel({ availableModels: ["a"], statesModels: false }, "a")).toBe(false);
   });
 });

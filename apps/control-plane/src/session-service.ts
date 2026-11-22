@@ -1,6 +1,9 @@
 import {
   acceptsTurns,
+  NO_MODEL_REASON,
+  offersModel,
   SessionRepository,
+  type AgentCapability,
   type AppendResult,
   type Session,
   type SessionSelection,
@@ -172,6 +175,15 @@ export class SessionService {
         : { kind: "not-queued", status: current.status };
     }
     const turn = claimed.next;
+    // A `stdio` agent offers whatever its own credentials reach, so the routed
+    // model may not be one it can run. Refusing here names the real cause on
+    // the turn instead of letting the agent fail with no model.
+    const capability = await this.session(sessionId).then((it) => it?.capability ?? null);
+    // An agent that named no models said nothing about what it can run, so its
+    // silence is not a refusal; only a stated list can rule a model out.
+    if (capability !== null && capability.statesModels && !offersModel(capability, model.modelId)) {
+      return this.#fail(sessionId, turnId, NO_MODEL_REASON(capability, model.modelId), now);
+    }
     const result = await runner.run({
       sessionId,
       conversationId,
@@ -230,6 +242,11 @@ export class SessionService {
 
   bind(sessionId: string, acpSessionId: string, gatewayId: string, now: number) {
     return this.#repo.bindAgentSession(sessionId, acpSessionId, gatewayId, now);
+  }
+
+  /** Keep what the session's agent said it can run, which the gateway reported. */
+  capability(sessionId: string, capability: AgentCapability, now: number) {
+    return this.#repo.recordCapability(sessionId, capability, now);
   }
 
   close(sessionId: string, now: number) {

@@ -7,6 +7,10 @@
     "reason": "equivalent: a non-text block has no text field, so appending it would add the string 'undefined', which the tests pin as unreachable because the agent sends only text chunks for a message.",
     "where": "src/bridge.ts:117:11 update.content.type === \"text\" -> true"
   },
+  "13sox7kn6by": {
+    "reason": "equivalent: no session can have the made-up id, so cancelling with it finds nothing to stop and nothing to forget, exactly as the empty default does.",
+    "where": "src/agent/pi-adapter.ts:255:55 \"\" -> \"Stryker was here!\""
+  },
   "15zx7pvv98p": {
     "reason": "Both branches of parseEdgeFrame return undefined, so which one runs cannot change what a caller sees; the tests pin both inputs to undefined.",
     "where": "src/edge.ts:78:7 message.kind === \"rejected\" -> false"
@@ -18,5 +22,9 @@
   "2daqln5z7o5": {
     "reason": "Both branches of parseEdgeFrame return undefined, so which one runs cannot change what a caller sees; the tests pin both inputs to undefined.",
     "where": "src/edge.ts:80:10 decoded.kind === \"decoded\" -> true"
+  },
+  "b9s6a04p79": {
+    "reason": "equivalent: the settled guard returns before writing or cancelling anything, so a fired timer and a cancelled timer both produce no second answer; the timer only delays process exit.",
+    "where": "src/agent/pi-adapter.ts:147:7 cancel(); -> ;"
   }
 }

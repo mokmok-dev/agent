@@ -77,9 +77,10 @@ export class SessionObject {
    */
   async expire(sessionId: string, now: number): Promise<unknown[]> {
     const expired = await this.#service.expire(sessionId, now);
+    if (expired.length === 0) return expired;
+    const session = await this.#service.session(sessionId);
+    if (session === undefined) return expired;
     for (const turn of expired) {
-      const session = await this.#service.session(sessionId);
-      if (session === undefined) continue;
       await this.#replies(
         { kind: "failed", error: turn.error ?? "no gateway claimed this turn" },
         session.thread.threadId,
@@ -88,11 +89,6 @@ export class SessionObject {
     return expired;
   }
 
-  /**
-   * Run the queued turn without holding the caller. A failure is recorded on
-   * the turn, which is what a later read reports, so a rejected promise here
-   * cannot leave the session silently stuck.
-   */
   /**
    * Run the queued turn without holding the caller, then answer the thread it
    * came from. The reply belongs here rather than in the webhook handler,
@@ -103,20 +99,13 @@ export class SessionObject {
     if (this.#runner === undefined) return;
     try {
       const outcome = await this.#service.runNext(sessionId, this.#runner, now);
-      console.log(
-        `turn run settled for ${sessionId}: ${outcome?.kind ?? "nothing-queued"}` +
-          (outcome?.kind === "failed" ? ` reason=${outcome.error}` : ""),
-      );
+      // A run that found no queued turn has nothing to answer with.
       if (outcome === undefined) return;
       const session = await this.#service.session(sessionId);
-      if (session === undefined) return;
-      const reply =
-        outcome.kind === "answered"
-          ? { kind: "answered" as const, text: outcome.text }
-          : outcome.kind === "failed"
-            ? { kind: "failed" as const, error: outcome.error }
-            : undefined;
-      if (reply !== undefined) await this.#replies(reply, session.thread.threadId);
+      const reply = replyOf(outcome);
+      // A session that vanished has nowhere to answer.
+      if (reply === undefined || session === undefined) return;
+      await this.#replies(reply, session.thread.threadId);
     } catch (error) {
       console.log(
         `turn run failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -146,6 +135,10 @@ export class SessionObject {
 
   bind(...args: Parameters<SessionService["bind"]>) {
     return this.#service.bind(...args);
+  }
+
+  capability(...args: Parameters<SessionService["capability"]>) {
+    return this.#service.capability(...args);
   }
 
   close(...args: Parameters<SessionService["close"]>) {
@@ -187,6 +180,8 @@ export class SessionObject {
         this.#service.transition(sessionId, turnId, update, at),
       bind: (sessionId, acpSessionId, gatewayId, at) =>
         this.#service.bind(sessionId, acpSessionId, gatewayId, at),
+      capability: (sessionId, capability, at) =>
+        this.#service.capability(sessionId, capability, at),
     };
   }
 }
@@ -200,5 +195,19 @@ export type ReplySink = (
   outcome: { kind: "answered"; text: string } | { kind: "failed"; error: string },
   threadId: string,
 ) => Promise<void>;
+
+/**
+ * The reply a run's outcome earns, or `undefined` when there is nothing to say.
+ *
+ * A turn that never ran has no answer and no failure, so it earns no reply: an
+ * empty message would read as the agent having nothing to offer.
+ */
+export function replyOf(
+  outcome: TurnRunOutcome,
+): { kind: "answered"; text: string } | { kind: "failed"; error: string } | undefined {
+  if (outcome.kind === "answered") return { kind: "answered", text: outcome.text };
+  if (outcome.kind === "failed") return { kind: "failed", error: outcome.error };
+  return undefined;
+}
 
 export type { TurnRunOutcome };

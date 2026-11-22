@@ -384,3 +384,124 @@ describe("a turn id that is present but not first", () => {
     expect(effect).not.toHaveProperty("text");
   });
 });
+
+describe("reading the capability an agent reported", () => {
+  const report = (capability: unknown) =>
+    reportOf({ type: "session.capability", sessionId: "s1", capability });
+
+  test("the whole capability is read, including the agent's identity and current model", () => {
+    expect(
+      report({
+        agent: { name: "OpenCode", version: "2.3.0" },
+        currentModelId: "ollama-cloud/deepseek-v4.1-flash",
+        availableModels: ["ollama-cloud/deepseek-v4.1-flash", "opencode/tidepool-alpha-free"],
+        statesModels: true,
+      }),
+    ).toEqual({
+      type: "session.capability",
+      sessionId: "s1",
+      capability: {
+        agent: { name: "OpenCode", version: "2.3.0" },
+        currentModelId: "ollama-cloud/deepseek-v4.1-flash",
+        availableModels: ["ollama-cloud/deepseek-v4.1-flash", "opencode/tidepool-alpha-free"],
+        statesModels: true,
+      },
+    });
+  });
+
+  test("a capability with no model list is not a report, so a bad frame cannot clear the record", () => {
+    expect(report({ statesModels: true })).toBeUndefined();
+    expect(report(undefined)).toBeUndefined();
+    expect(report("models")).toBeUndefined();
+    expect(report(null)).toBeUndefined();
+  });
+
+  test("a model entry that is not a string is dropped, keeping the real ones", () => {
+    const read = report({ availableModels: ["a", 42, null, "b"], statesModels: true });
+    expect(read).toMatchObject({ capability: { availableModels: ["a", "b"] } });
+  });
+
+  test("an identity that is not two strings is dropped rather than half-recorded", () => {
+    for (const agent of [{ name: "x" }, { version: "1" }, { name: 1, version: "1" }, "x", null]) {
+      expect(report({ agent, availableModels: [], statesModels: false })).toEqual({
+        type: "session.capability",
+        sessionId: "s1",
+        capability: { availableModels: [], statesModels: false },
+      });
+    }
+  });
+
+  test("a current model that is not a string is left out", () => {
+    expect(report({ currentModelId: 7, availableModels: [], statesModels: false })).toEqual({
+      type: "session.capability",
+      sessionId: "s1",
+      capability: { availableModels: [], statesModels: false },
+    });
+    expect(report({ availableModels: [], statesModels: false })).not.toHaveProperty(
+      "capability.currentModelId",
+    );
+  });
+
+  test("only a stated true counts as naming models, so a missing field says nothing", () => {
+    // A truthy-looking value that is not `true` must not be read as a list.
+    const read = report({ availableModels: ["a"] });
+    expect(read).toMatchObject({ capability: { statesModels: false } });
+    expect(report({ availableModels: ["a"], statesModels: "yes" })).toMatchObject({
+      capability: { statesModels: false },
+    });
+  });
+
+  test("the capability is kept on the session, and it settles no turn", () => {
+    expect(
+      effectOf(
+        {
+          type: "session.capability",
+          sessionId: "s1",
+          capability: { availableModels: ["a"], statesModels: true },
+        },
+        session(),
+        [],
+      ),
+    ).toEqual({ kind: "capability", capability: { availableModels: ["a"], statesModels: true } });
+  });
+});
+
+describe("the capability reader's exact answers", () => {
+  const report = (capability: unknown) =>
+    reportOf({ type: "session.capability", sessionId: "s1", capability });
+
+  test("a capability on a message that names no session is not a report", () => {
+    expect(
+      reportOf({
+        type: "session.capability",
+        capability: { availableModels: [], statesModels: false },
+      }),
+    ).toBeUndefined();
+  });
+
+  test("the whole record is pinned, so no field is added or lost", () => {
+    expect(report({ availableModels: [], statesModels: false })).toEqual({
+      type: "session.capability",
+      sessionId: "s1",
+      capability: { availableModels: [], statesModels: false },
+    });
+    // The identity and the current model are the only extra fields, and each is
+    // present only when the agent stated it.
+    const read = report({ availableModels: ["a"], statesModels: true });
+    if (read?.type !== "session.capability") throw new Error("expected a capability report");
+    expect(Object.keys(read.capability).sort()).toEqual(["availableModels", "statesModels"]);
+  });
+
+  test("a completion with no text settles with no text, because the agent said nothing", () => {
+    // The reader must not invent an empty body for a completion that carried
+    // none, or a turn with no words would look like an empty answer.
+    const read = reportOf({ type: "turn.completed", sessionId: "s1", turnId: "t1" });
+    expect(read).toEqual({
+      type: "turn.completed",
+      sessionId: "s1",
+      turnId: "t1",
+      stopReason: "end_turn",
+    });
+    expect(read).not.toHaveProperty("text");
+  });
+});

@@ -32,6 +32,9 @@ function flush(): void {
 
 const bridge = new AcpBridge({
   channel: { send: (text) => supervisor.write(text) },
+  // The agent decides the empty `mcpServers` shape: opencode2 refuses an array,
+  // grok refuses a record. An operator states which agent the command starts.
+  mcpServers: process.env.AGENT_MCP_SERVERS === "record" ? "record" : "array",
   emit: (event) => {
     log.append(event);
     flush();
@@ -53,6 +56,16 @@ async function handleCommand(text: string): Promise<void> {
   switch (frame.type) {
     case "prompt":
       if (acpSessionId === undefined) acpSessionId = await bridge.open(frame.sessionId, cwd);
+      // The agent picked its own model when it opened the session; the route
+      // may have chosen another, which only an agent that lists models takes.
+      if (frame.model !== undefined) {
+        const selected = await bridge.selectModel(acpSessionId, frame.model);
+        console.error(
+          `gateway: model ${frame.model.provider}:${frame.model.modelId} ${
+            selected ? "selected on the agent" : "left to the agent's own choice"
+          }`,
+        );
+      }
       await bridge.run(frame.sessionId, acpSessionId, frame.turnId, frame.text);
       return;
     case "cancel":

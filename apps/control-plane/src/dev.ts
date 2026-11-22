@@ -35,6 +35,8 @@ function gatewaySessions(): GatewaySessions {
       sessions(sessionId).transition(sessionId, turnId, update, now),
     bind: (sessionId, acpSessionId, gatewayId, now) =>
       sessions(sessionId).bind(sessionId, acpSessionId, gatewayId, now),
+    capability: (sessionId, capability, now) =>
+      sessions(sessionId).capability(sessionId, capability, now),
   };
 }
 

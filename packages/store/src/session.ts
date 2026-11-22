@@ -26,6 +26,13 @@ export type Session = {
    * choice is inspectable after the fact.
    */
   selection: SessionSelection | null;
+  /**
+   * What the agent that hosts this session said it can run, once a gateway
+   * reported it. `null` until then, which is different from an agent that
+   * states no models at all: a `stdio` agent's models depend on its own
+   * credentials, so the router's choice is only known to be valid after this.
+   */
+  capability: AgentCapability | null;
   /** The pi conversation that holds this session's transcript. */
   conversationId: string | null;
   /** How many turns this session has created; the next turn id continues from here. */
@@ -44,6 +51,36 @@ export type SessionSelection = {
   model: { provider: string; modelId: string };
   protocol: string;
 };
+
+/**
+ * What a session's agent said it can run, kept structural like the selection so
+ * the store does not depend on the protocol package.
+ *
+ * `statesModels` separates "this agent listed no models" from "no agent has
+ * reported yet", which is what lets a caller refuse a routed model only when
+ * the agent actually named its list.
+ */
+export type AgentCapability = {
+  agent?: { name: string; version: string };
+  currentModelId?: string;
+  availableModels: string[];
+  statesModels: boolean;
+};
+
+/**
+ * Why a routed model cannot run on the agent that hosts the session. A `stdio`
+ * agent offers whatever its own credentials reach, so the router's choice must
+ * be checked against what the agent reported.
+ */
+export const NO_MODEL_REASON = (reported: AgentCapability, modelId: string): string =>
+  `the agent does not offer ${modelId}; it lists ${
+    reported.availableModels.length === 0 ? "no models" : reported.availableModels.join(", ")
+  }`;
+
+/** Whether the routed model is one the agent said it offers. */
+export function offersModel(capability: AgentCapability, modelId: string): boolean {
+  return capability.statesModels && capability.availableModels.includes(modelId);
+}
 
 export type Turn = {
   id: string;

@@ -1,6 +1,12 @@
 {
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts", "src/recorder.ts", "src/main.ts", "src/agent/stdio-agent.ts"],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/recorder.ts",
+    "src/main.ts",
+    "src/agent/stdio-agent.ts",
+    "src/agent/pi-acp.ts"
+  ],
   "runner": "bun",
   "reporters": ["text"],
   "typecheck": false,

@@ -5,10 +5,14 @@ import { ProtocolError } from "@agent/protocol";
 import { encodeEvent, EventLog, parseEdgeFrame } from "./edge.ts";
 import { decodeMessage } from "@agent/protocol";
 
-const bridge = () => {
+const bridge = (options: { mcpServers?: "array" | "record" } = {}) => {
   const agent = new AgentRecorder();
   const events: GatewayEvent[] = [];
-  const bridge = new AcpBridge({ channel: agent, emit: (event) => events.push(event) });
+  const bridge = new AcpBridge({
+    channel: agent,
+    emit: (event) => events.push(event),
+    ...(options.mcpServers === undefined ? {} : { mcpServers: options.mcpServers }),
+  });
   agent.inbound = (text) => bridge.receive(text);
   return { agent, events, bridge };
 };
@@ -25,7 +29,76 @@ describe("open", () => {
     expect(agent.last()).toMatchObject({ kind: "request", method: "session/new", id: 2 });
     agent.answer(2, { sessionId: "acp-9" });
     expect(await opened).toBe("acp-9");
-    expect(events).toEqual([{ type: "session.bound", sessionId: "sess-1", acpSessionId: "acp-9" }]);
+    // An agent that states no models still reports its capability, so the
+    // control plane can tell "this agent names none" from "nothing arrived".
+    expect(events).toEqual([
+      { type: "session.bound", sessionId: "sess-1", acpSessionId: "acp-9" },
+      {
+        type: "session.capability",
+        sessionId: "sess-1",
+        capability: { availableModels: [], statesModels: false },
+      },
+    ]);
+  });
+
+  test("the capability names the agent, its model list, and its current model", async () => {
+    const { agent, events, bridge: acp } = bridge();
+    void acp.open("sess-1", "/work");
+    agent.answer(1, { protocolVersion: 1, agentInfo: { name: "OpenCode", version: "2.3.0" } });
+    await until(() => agent.outbound().length === 2);
+    agent.answer(2, {
+      sessionId: "acp-9",
+      configOptions: [
+        {
+          id: "model",
+          name: "Model",
+          category: "model",
+          type: "select",
+          currentValue: "ollama-cloud/deepseek-v4.1-flash",
+          options: [
+            { value: "ollama-cloud/deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+            { value: "opencode/tidepool-alpha-free", name: "Tidepool" },
+          ],
+        },
+        { id: "mode", name: "Session Mode", category: "mode", currentValue: "build" },
+      ],
+    });
+    await until(() => events.length === 2);
+    expect(events.at(-1)).toEqual({
+      type: "session.capability",
+      sessionId: "sess-1",
+      capability: {
+        agent: { name: "OpenCode", version: "2.3.0" },
+        currentModelId: "ollama-cloud/deepseek-v4.1-flash",
+        availableModels: ["ollama-cloud/deepseek-v4.1-flash", "opencode/tidepool-alpha-free"],
+        statesModels: true,
+      },
+    });
+  });
+
+  test("a model list stated in `models` is read when there is no settings entry", async () => {
+    const { agent, events, bridge: acp } = bridge();
+    void acp.open("sess-1", "/work");
+    agent.answer(1, { protocolVersion: 1 });
+    await until(() => agent.outbound().length === 2);
+    agent.answer(2, {
+      sessionId: "acp-9",
+      models: {
+        currentModelId: "deepseek-v4.1-flash",
+        availableModels: [
+          { modelId: "grok-4.7", name: "Grok 4.7" },
+          { modelId: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+        ],
+      },
+    });
+    await until(() => events.length === 2);
+    expect(events.at(-1)).toMatchObject({
+      capability: {
+        currentModelId: "deepseek-v4.1-flash",
+        availableModels: ["grok-4.7", "deepseek-v4.1-flash"],
+        statesModels: true,
+      },
+    });
   });
 
   test("sends the client info so the agent can name the gateway", async () => {
@@ -413,14 +486,25 @@ describe("more attribution cases", () => {
     expect(events.at(-1)).toMatchObject({ type: "turn.failed", error: "7: seven" });
   });
 
-  test("a session/new frame carries the working directory and an empty MCP record", async () => {
-    const { agent, bridge: acp } = bridge();
-    void acp.open("s", "/the/work/dir");
-    agent.answer(1, { protocolVersion: 1 });
-    await until(() => agent.outbound().length === 2);
-    // opencode2 refuses `session/new` without `mcpServers`, and omitting it
-    // hangs; an empty record is what the shipped agents accept.
-    expect(agent.last()).toEqual({
+  test("a session/new frame carries the working directory and the agent's MCP shape", async () => {
+    const asArray = bridge();
+    void asArray.bridge.open("s", "/the/work/dir");
+    asArray.agent.answer(1, { protocolVersion: 1 });
+    await until(() => asArray.agent.outbound().length === 2);
+    // `grok agent stdio` requires an array and refuses a record.
+    expect(asArray.agent.last()).toEqual({
+      kind: "request",
+      id: 2,
+      method: "session/new",
+      params: { cwd: "/the/work/dir", mcpServers: [] },
+    });
+
+    // `opencode2 acp` requires a record and refuses an array.
+    const asRecord = bridge({ mcpServers: "record" });
+    void asRecord.bridge.open("s", "/the/work/dir");
+    asRecord.agent.answer(1, { protocolVersion: 1 });
+    await until(() => asRecord.agent.outbound().length === 2);
+    expect(asRecord.agent.last()).toEqual({
       kind: "request",
       id: 2,
       method: "session/new",
@@ -442,6 +526,46 @@ describe("error messages", () => {
     expect(errorMessage("plain")).toBe("plain");
     expect(errorMessage(42)).toBe("42");
     expect(errorMessage(undefined)).toBe("undefined");
+  });
+
+  test("an error that puts the real cause in its data keeps that cause", () => {
+    // grok answers a turn with `-32603: Internal error` and the actual reason
+    // nested in `data`; reporting only the code would hide why it stopped.
+    expect(
+      errorMessage(
+        new ProtocolError(-32603, "Internal error", {
+          message: "API error (status 402 Payment Required): usage balance exhausted",
+          http_status: 402,
+        }),
+      ),
+    ).toBe(
+      "-32603: Internal error (API error (status 402 Payment Required): usage balance exhausted)",
+    );
+  });
+
+  test("a data field that is a plain string is used as the detail", () => {
+    expect(errorMessage(new ProtocolError(-32603, "Internal error", "no such model"))).toBe(
+      "-32603: Internal error (no such model)",
+    );
+  });
+
+  test("data that names no reason adds nothing, so the message stays clean", () => {
+    const clean = "-32603: Internal error";
+    expect(errorMessage(new ProtocolError(-32603, "Internal error"))).toBe(clean);
+    expect(errorMessage(new ProtocolError(-32603, "Internal error", {}))).toBe(clean);
+    expect(errorMessage(new ProtocolError(-32603, "Internal error", ""))).toBe(clean);
+    expect(errorMessage(new ProtocolError(-32603, "Internal error", 402))).toBe(clean);
+    expect(errorMessage(new ProtocolError(-32603, "Internal error", { message: "" }))).toBe(clean);
+    expect(errorMessage(new ProtocolError(-32603, "Internal error", { message: 42 }))).toBe(clean);
+  });
+
+  test("a detail field other than message is read when that is what the agent names", () => {
+    expect(errorMessage(new ProtocolError(-1, "x", { detail: "the detail" }))).toBe(
+      "-1: x (the detail)",
+    );
+    expect(errorMessage(new ProtocolError(-1, "x", { reason: "the reason" }))).toBe(
+      "-1: x (the reason)",
+    );
   });
 });
 
@@ -514,5 +638,256 @@ describe("the text a turn produced", () => {
       { sessionUpdate: "agent_message_chunk", content: { type: "thinking", thinking: "hidden" } },
     ]);
     expect((events.at(-1) as { text?: string }).text).toBe("");
+  });
+});
+
+describe("selecting the routed model", () => {
+  /** Open a session and answer `session/new` with the capability it states. */
+  const openWith = async (
+    session: Record<string, unknown>,
+    initialized: Record<string, unknown> = { protocolVersion: 1 },
+  ) => {
+    const harness = bridge();
+    void harness.bridge.open("sess-1", "/work");
+    harness.agent.answer(1, initialized);
+    await until(() => harness.agent.outbound().length === 2);
+    harness.agent.answer(2, { sessionId: "acp-9", ...session });
+    await until(() => harness.events.length === 2);
+    return harness;
+  };
+
+  test("a model the agent lists is selected by the value it lists", async () => {
+    const { agent, bridge: acp } = await openWith({
+      models: {
+        currentModelId: "default-model",
+        availableModels: [
+          { modelId: "grok-4.6", name: "Grok 4.6" },
+          { modelId: "default-model", name: "Default" },
+        ],
+      },
+    });
+    const selecting = acp.selectModel("acp-9", { provider: "xai", modelId: "grok-4.6" });
+    await until(() => agent.outbound().length === 3);
+    expect(agent.last()).toEqual({
+      kind: "request",
+      id: 3,
+      method: "session/set_config_option",
+      params: { sessionId: "acp-9", configId: "model", value: "grok-4.6" },
+    });
+    agent.answer(3, { configOptions: [] });
+    expect(await selecting).toBe(true);
+  });
+
+  test("a model the agent lists with a provider prefix is selected by that value", async () => {
+    const { agent, bridge: acp } = await openWith({
+      configOptions: [
+        {
+          id: "model",
+          name: "Model",
+          category: "model",
+          currentValue: "opencode/other",
+          options: [{ value: "ollama-cloud/deepseek-v4.1-flash", name: "DeepSeek" }],
+        },
+      ],
+    });
+    const selecting = acp.selectModel("acp-9", {
+      provider: "ollama-cloud",
+      modelId: "deepseek-v4.1-flash",
+    });
+    await until(() => agent.outbound().length === 3);
+    expect(agent.last()).toMatchObject({
+      method: "session/set_config_option",
+      params: { value: "ollama-cloud/deepseek-v4.1-flash" },
+    });
+    agent.answer(3, {});
+    expect(await selecting).toBe(true);
+  });
+
+  test("a model the agent does not list is not selected at all", async () => {
+    const { agent, bridge: acp } = await openWith({
+      models: { currentModelId: "only", availableModels: [{ modelId: "only", name: "Only" }] },
+    });
+    expect(await acp.selectModel("acp-9", { provider: "xai", modelId: "grok-4.6" })).toBe(false);
+    // Nothing was sent, so the agent keeps the model it chose.
+    expect(agent.outbound()).toHaveLength(2);
+  });
+
+  test("an agent that states no models has nothing to select", async () => {
+    const { agent, bridge: acp } = await openWith({});
+    expect(await acp.selectModel("acp-9", { provider: "xai", modelId: "grok-4.6" })).toBe(false);
+    expect(agent.outbound()).toHaveLength(2);
+  });
+
+  test("an agent that refuses the setting leaves the turn to run on its own model", async () => {
+    const { agent, bridge: acp } = await openWith({
+      models: { currentModelId: "a", availableModels: [{ modelId: "a", name: "A" }] },
+    });
+    const selecting = acp.selectModel("acp-9", { provider: "p", modelId: "a" });
+    await until(() => agent.outbound().length === 3);
+    agent.fail(3, -32601, "method not found");
+    expect(await selecting).toBe(false);
+  });
+});
+
+describe("the model a prompt carries", () => {
+  test("a frame with a model reaches the bridge as that model", () => {
+    const frame = parseEdgeFrame(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "gateway/command",
+        params: {
+          type: "prompt",
+          sessionId: "s",
+          acpSessionId: "a",
+          turnId: "t",
+          text: "x",
+          model: { provider: "xai", modelId: "grok-4.6" },
+        },
+      }),
+    );
+    expect(frame).toEqual({
+      type: "prompt",
+      sessionId: "s",
+      acpSessionId: "a",
+      turnId: "t",
+      text: "x",
+      model: { provider: "xai", modelId: "grok-4.6" },
+    });
+  });
+
+  test("a frame with no model reaches the bridge without one, which means the agent chooses", () => {
+    const frame = parseEdgeFrame(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "gateway/command",
+        params: { type: "prompt", sessionId: "s", acpSessionId: "a", turnId: "t", text: "x" },
+      }),
+    );
+    expect(frame).not.toHaveProperty("model");
+  });
+
+  test("a model that names no provider is dropped, and the turn runs on the agent's own choice", () => {
+    // A half-read model cannot select anything, so the frame keeps the turn and
+    // loses only the unusable model, rather than dropping the prompt.
+    expect(
+      parseEdgeFrame(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/command",
+          params: {
+            type: "prompt",
+            sessionId: "s",
+            acpSessionId: "a",
+            turnId: "t",
+            text: "x",
+            model: { modelId: "grok-4.6" },
+          },
+        }),
+      ),
+    ).toEqual({
+      type: "prompt",
+      sessionId: "s",
+      acpSessionId: "a",
+      turnId: "t",
+      text: "x",
+    });
+  });
+});
+
+describe("selecting before a session is open", () => {
+  test("an agent with no reported capability selects nothing rather than guessing", async () => {
+    // A gateway that has not opened a session has nothing to select against, so
+    // the call must report that rather than send a request it cannot justify.
+    const harness = bridge();
+    expect(await harness.bridge.selectModel("acp-9", { provider: "xai", modelId: "m" })).toBe(
+      false,
+    );
+    expect(harness.agent.outbound()).toHaveLength(0);
+  });
+});
+
+describe("an error whose data is not an object", () => {
+  test("a null data adds nothing, which is the same as no data at all", () => {
+    expect(errorMessage(new ProtocolError(-1, "x", null))).toBe("-1: x");
+  });
+});
+
+describe("a capability the bridge kept", () => {
+  test("an agent that listed models but named none now still selects nothing", async () => {
+    // The empty-list case is reached only when the agent's own list is empty,
+    // which is different from having no capability at all.
+    const harness = bridge();
+    void harness.bridge.open("sess-1", "/work");
+    harness.agent.answer(1, { protocolVersion: 1 });
+    await until(() => harness.agent.outbound().length === 2);
+    harness.agent.answer(2, {
+      sessionId: "acp-9",
+      models: { currentModelId: "a", availableModels: [{ modelId: "a", name: "A" }] },
+    });
+    await until(() => harness.events.length === 2);
+    expect(await harness.bridge.selectModel("acp-9", { provider: "p", modelId: "other" })).toBe(
+      false,
+    );
+  });
+});
+
+describe("a prompt frame whose model fails to decode", () => {
+  test("a model that is not an object is dropped rather than failing the frame", () => {
+    expect(
+      parseEdgeFrame(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/command",
+          params: {
+            type: "prompt",
+            sessionId: "s",
+            acpSessionId: "a",
+            turnId: "t",
+            text: "x",
+            model: "grok-4.6",
+          },
+        }),
+      ),
+    ).toEqual({ type: "prompt", sessionId: "s", acpSessionId: "a", turnId: "t", text: "x" });
+  });
+
+  test("a prompt frame of another kind is refused, which is what the kind guard decides", () => {
+    // The decoder answers "rejected" for a frame whose `type` is not prompt,
+    // so the guard turns it into a dropped command rather than a prompt.
+    expect(
+      parseEdgeFrame(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "gateway/command",
+          params: { type: "not-prompt", sessionId: "s" },
+        }),
+      ),
+    ).toBeUndefined();
+  });
+});
+
+describe("the model list a selection reads", () => {
+  test("an agent that listed no models and one that never reported both select nothing", async () => {
+    // The two empty cases arrive by different routes: one capability with an
+    // empty list, and no capability at all. Neither may send a request.
+    const listingNone = bridge();
+    void listingNone.bridge.open("sess-1", "/work");
+    listingNone.agent.answer(1, { protocolVersion: 1 });
+    await until(() => listingNone.agent.outbound().length === 2);
+    listingNone.agent.answer(2, {
+      sessionId: "acp-9",
+      models: { currentModelId: "a", availableModels: [] },
+    });
+    await until(() => listingNone.events.length === 2);
+    expect(await listingNone.bridge.selectModel("acp-9", { provider: "p", modelId: "a" })).toBe(
+      false,
+    );
+    expect(listingNone.agent.outbound()).toHaveLength(2);
+
+    const unreported = bridge();
+    expect(await unreported.bridge.selectModel("acp-9", { provider: "p", modelId: "a" })).toBe(
+      false,
+    );
+    expect(unreported.agent.outbound()).toHaveLength(0);
   });
 });

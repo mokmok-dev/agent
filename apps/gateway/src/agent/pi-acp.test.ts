@@ -57,6 +57,8 @@ describe("the pi adapter's protocol", () => {
       result: {
         protocolVersion: 1,
         agentCapabilities: { promptCapabilities: { embeddedContext: true, image: false } },
+        // pi itself has no ACP identity; the adapter is what answers.
+        agentInfo: { name: "pi-adapter", version: "0" },
       },
     });
   });

@@ -31,6 +31,10 @@
     "reason": "A dropped frame and a frame with no matching handler both reach no code, because the notification path checks the method and the handler before it decodes anything.",
     "where": "src/acp/client.ts:250:9 !handler -> false"
   },
+  "domlpkayo3": {
+    "reason": "equivalent: a listed model with no description gains an explicit undefined field, which every reader treats exactly as an absent field, and the capability maps the values to ids where the field is dropped again.",
+    "where": "src/acp/types.ts:252:9 value.description === undefined -> false"
+  },
   "eydv4fn3t0": {
     "reason": "A dropped frame and a frame with no matching handler both reach no code, because the notification path checks the method and the handler before it decodes anything.",
     "where": "src/acp/client.ts:218:9 decoded.kind === \"rejected\" -> false"

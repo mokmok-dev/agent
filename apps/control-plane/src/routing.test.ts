@@ -156,4 +156,58 @@ describe("the catalog the router answers with", () => {
     expect(catalog.agents.codex).toEqual(CATALOG.agents.codex);
     expect(catalog.runtimes).toEqual(CATALOG.runtimes);
   });
+
+  test("surrounding whitespace is trimmed, so a pasted secret still routes", () => {
+    const catalog = catalogOf({ PI_DEFAULT_MODEL: "  ollama-cloud:deepseek-v4.1-flash  " }, "pi");
+    expect(catalog.agents.pi.defaultModel).toEqual({
+      provider: "ollama-cloud",
+      modelId: "deepseek-v4.1-flash",
+    });
+  });
+
+  test("whitespace alone states no model, so the shipped catalog stands", () => {
+    expect(catalogOf({ PI_DEFAULT_MODEL: "   " }, "pi")).toEqual(CATALOG);
+  });
+
+  test("a separator at the start means an empty provider, which is ignored", () => {
+    expect(catalogOf({ PI_DEFAULT_MODEL: ":m" }, "pi")).toEqual(CATALOG);
+  });
+
+  test("an agent the catalog does not name keeps the shipped catalog", () => {
+    // The named agent has no profile to pin a model onto, so there is nothing
+    // to replace and the shipped catalog is the answer.
+    const unknown = "not-an-agent" as Parameters<typeof catalogOf>[1];
+    expect(catalogOf({ PI_DEFAULT_MODEL: "ollama-cloud:m" }, unknown)).toEqual(CATALOG);
+  });
+});
+
+describe("a stated model with no separator", () => {
+  test("a model id that is a single word is ignored, because it names no provider", () => {
+    // `modelRefOf` reads the first colon; without one there is no provider to
+    // route to, so the shipped catalog stands.
+    expect(catalogOf({ PI_DEFAULT_MODEL: "deepseek-v4.1-flash" }, "pi")).toEqual(CATALOG);
+  });
+
+  test("a colon at the very start is an empty provider, which is refused", () => {
+    expect(catalogOf({ PI_DEFAULT_MODEL: ":" }, "pi")).toEqual(CATALOG);
+  });
+
+  test("a separator found later still splits at the first one", () => {
+    const catalog = catalogOf({ PI_DEFAULT_MODEL: "a:b:c" }, "pi");
+    expect(catalog.agents.pi.defaultModel).toEqual({ provider: "a", modelId: "b:c" });
+  });
+});
+
+describe("a model id that is empty after the separator", () => {
+  test("a statement whose model id is blank is ignored rather than routed", () => {
+    // The provider is real but the model is blank, so there is nothing to pin.
+    expect(catalogOf({ PI_DEFAULT_MODEL: "ollama-cloud:" }, "pi")).toEqual(CATALOG);
+    expect(catalogOf({ PI_DEFAULT_MODEL: "ollama-cloud:   " }, "pi")).toEqual(CATALOG);
+  });
+
+  test("a statement with no separator is ignored before any slicing happens", () => {
+    // `indexOf` answering -1 is what stops the split; a different answer would
+    // produce a provider with a made-up model id.
+    expect(catalogOf({ PI_DEFAULT_MODEL: "providerOnly" }, "pi")).toEqual(CATALOG);
+  });
 });

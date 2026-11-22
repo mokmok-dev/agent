@@ -18,6 +18,7 @@ import {
   decodePromptResult,
   decodeReadTextFileParams,
   decodeRequestPermissionParams,
+  decodeSetConfigOptionResult,
   decodeSessionUpdate,
   decodeTerminalOutputResult,
   decodeTerminalRefParams,
@@ -35,6 +36,8 @@ import {
   type RequestPermissionParams,
   type RequestPermissionResult,
   type SessionUpdate,
+  type SetConfigOptionParams,
+  type SetConfigOptionResult,
   type TerminalOutputResult,
   type WaitForTerminalExitResult,
   type WriteTextFileParams,
@@ -191,6 +194,17 @@ export class AcpClient {
   newSession(params: NewSessionParams): Promise<NewSessionResult> {
     return this.request(AgentMethod.NewSession, params).then((result) =>
       unwrap(decodeNewSessionResult(result)),
+    );
+  }
+
+  /**
+   * Change one session setting, which is how an agent that lets the client pick
+   * a model is told which one the route chose. An agent that does not implement
+   * it answers with an error, which the caller reports rather than ignores.
+   */
+  setConfigOption(params: SetConfigOptionParams): Promise<SetConfigOptionResult> {
+    return this.request(AgentMethod.SetConfigOption, params).then((result) =>
+      unwrap(decodeSetConfigOptionResult(result)),
     );
   }
 

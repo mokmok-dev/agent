@@ -46,7 +46,15 @@ export class EventLog {
 }
 
 export type EdgeFrame =
-  | { type: "prompt"; sessionId: string; acpSessionId: string; turnId: string; text: string }
+  | {
+      type: "prompt";
+      sessionId: string;
+      acpSessionId: string;
+      turnId: string;
+      text: string;
+      /** The model the route chose, for an agent that lets the client pick one. */
+      model?: { provider: string; modelId: string };
+    }
   | { type: "cancel"; acpSessionId: string }
   | { type: "permission"; toolCallId: string; optionId: string | null }
   | { type: "ping" };
@@ -60,6 +68,9 @@ export const decodeEdgeFrame = tagged<EdgeFrame>("type", {
     acpSessionId: str,
     turnId: str,
     text: str,
+    // A model the route chose is a hint, so a malformed one drops the field and
+    // keeps the prompt: the agent then runs its own model.
+    model: optional(lenient(object({ provider: str, modelId: str }))),
   }),
   permission: (value) => {
     const frame = object({
