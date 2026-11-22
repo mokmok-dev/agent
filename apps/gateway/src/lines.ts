@@ -17,16 +17,18 @@ export class LineFramer {
   }
 }
 
+/**
+ * Read a byte stream to its end, handing every complete line to `listener`.
+ * `for await` consumes the stream once, so an emptied body loses lines instead
+ * of looping forever.
+ */
 export async function readLines(
   stream: ReadableStream<Uint8Array>,
   listener: (line: string) => void,
 ): Promise<void> {
-  const reader = stream.getReader();
   const framer = new LineFramer();
-  for (;;) {
-    const chunk = await reader.read();
-    if (chunk.done) break;
-    for (const line of framer.push(chunk.value)) listener(line);
+  for await (const chunk of stream) {
+    for (const line of framer.push(chunk)) listener(line);
   }
   const rest = framer.flush();
   if (rest !== undefined) listener(rest);

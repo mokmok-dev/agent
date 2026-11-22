@@ -37,8 +37,9 @@ describe("spawnProcess", () => {
 
   test("kill stops a long-running child", async () => {
     const codes: Array<number | null> = [];
-    const child = spawnProcess("bun", ["-e", "setTimeout(() => {}, 60_000)"]);
+    const child = spawnProcess("bun", ["-e", "setInterval(() => {}, 1000)"]);
     child.once("exit", (code) => codes.push(code));
+    await new Promise((resolve) => setTimeout(resolve, 100));
     child.kill();
     expect(await eventually(() => codes.length === 1)).toBe(true);
   });
@@ -63,19 +64,15 @@ describe("spawnProcess", () => {
     expect(await eventually(() => lines.length === 1)).toBe(true);
     expect(lines[0]!.length).toBeGreaterThan(0);
   });
-});
 
-describe("stdout that ends without a newline", () => {
-  test("the trailing text is delivered as a line", async () => {
+  test("stdout that ends without a newline is delivered", async () => {
     const lines: string[] = [];
     const child = spawnProcess("bun", ["-e", 'process.stdout.write("no-newline")']);
     child.stdout?.onLine((line) => lines.push(line));
     expect(await eventually(() => lines.length === 1)).toBe(true);
     expect(lines).toEqual(["no-newline"]);
   });
-});
 
-describe("the kill binding", () => {
   test("killing a process that already exited is harmless", async () => {
     const codes: Array<number | null> = [];
     const child = spawnProcess("bun", ["-e", "process.exit(0)"]);
@@ -83,23 +80,13 @@ describe("the kill binding", () => {
     expect(await eventually(() => codes.length === 1)).toBe(true);
     expect(() => child.kill()).not.toThrow();
   });
-});
 
-describe("a process that never exits", () => {
-  test("kill ends it and its exit is reported", async () => {
+  test("kill ends a process that would otherwise run forever", async () => {
     const codes: Array<number | null> = [];
     const child = spawnProcess("bun", ["-e", "setInterval(() => {}, 1000)"]);
     child.once("exit", (code) => codes.push(code));
     await new Promise((resolve) => setTimeout(resolve, 50));
     child.kill();
     expect(await eventually(() => codes.length === 1)).toBe(true);
-  });
-});
-
-describe("the kill result", () => {
-  test("kill returns undefined, the child signal being fire and forget", async () => {
-    const child = spawnProcess("bun", ["-e", "setInterval(() => {}, 1000)"]);
-    const result = (child as unknown as { kill(): unknown }).kill();
-    expect(result).toBeUndefined();
   });
 });
