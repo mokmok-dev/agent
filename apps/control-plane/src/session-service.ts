@@ -175,9 +175,11 @@ export class SessionService {
         : { kind: "not-queued", status: current.status };
     }
     const turn = claimed.next;
-    // A `stdio` agent offers whatever its own credentials reach, so the routed
-    // model may not be one it can run. Refusing here names the real cause on
-    // the turn instead of letting the agent fail with no model.
+    // This path pins the model: the runner is asked for exactly this one, so a
+    // model the agent cannot reach would fail with `no_model` after the run
+    // started. Refusing first names the real cause on the turn. A `stdio` turn
+    // does not come through here (the gateway runs its agent, which picks its
+    // own model), so this does not override an agent's own choice.
     const capability = await this.session(sessionId).then((it) => it?.capability ?? null);
     // An agent that named no models said nothing about what it can run, so its
     // silence is not a refusal; only a stated list can rule a model out.

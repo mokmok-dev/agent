@@ -414,108 +414,72 @@ describe("frame text", () => {
   });
 });
 
-describe("a capability that rules out the routed model", () => {
-  /** A connection whose session already has a route the agent cannot run. */
-  const refusalOver = (turns: Turn[]) => {
-    const stored = session();
-    const sessions = new FakeSessions(stored, turns);
-    const socket = new FakeSocket();
-    socket.sessionId = "s1";
-    return { sessions, socket };
-  };
-
+describe("a capability that differs from the route", () => {
+  /**
+   * A `stdio` agent picks its own model, so the route's wish and the agent's
+   * reality can differ. The gateway records both and lets the turn run: failing
+   * it here would report a mismatch the agent never had, and would do so only
+   * when the report arrived before the turn was claimed.
+   */
   const capability = {
     type: "session.capability",
     sessionId: "s1",
     capability: { availableModels: ["agent-only"], statesModels: true },
   };
 
-  test("a queued turn is failed with the reason, and the thread is told", async () => {
-    const { sessions, socket } = refusalOver([turn({ status: "queued" })]);
+  const over = (turns: Turn[]) => {
+    const sessions = new FakeSessions(session(), turns);
+    const socket = new FakeSocket();
+    socket.sessionId = "s1";
+    return { sessions, socket };
+  };
+
+  test("a queued turn is left to run on the model the agent chose", async () => {
+    const { sessions, socket } = over([turn({ status: "queued" })]);
     settledCalls.length = 0;
     await handleSocketMessage(sessions, socket, JSON.stringify(capability), 90, recordSettled);
-    expect(sessions.transitions).toEqual([
+    expect(sessions.transitions).toEqual([]);
+    expect(settledCalls).toEqual([]);
+  });
+
+  test("the agent's own model is recorded, so the session says what actually runs", async () => {
+    const { sessions, socket } = over([turn({ status: "queued" })]);
+    await handleSocketMessage(
+      sessions,
+      socket,
+      JSON.stringify({
+        type: "session.capability",
+        sessionId: "s1",
+        capability: {
+          currentModelId: "grok-4.6",
+          availableModels: ["grok-4.6"],
+          statesModels: true,
+        },
+      }),
+      90,
+      recordSettled,
+    );
+    expect(sessions.capabilities).toEqual([
       {
         sessionId: "s1",
-        turnId: "t1",
-        update: {
-          status: "failed",
-          error: "the agent does not offer m; it lists agent-only",
+        capability: {
+          currentModelId: "grok-4.6",
+          availableModels: ["grok-4.6"],
+          statesModels: true,
         },
         now: 90,
       },
     ]);
-    expect(settledCalls).toEqual([
-      {
-        sessionId: "s1",
-        replyTo: "sess-1",
-        error: expect.stringContaining("does not offer"),
-      },
-    ]);
+    // The route keeps its own record, so the difference stays visible.
+    expect(sessions.stored?.selection?.model.modelId).toBe("m");
   });
 
-  test("a turn the gateway already claimed is left to run, because it already chose", async () => {
+  test("a dispatched or settled turn is not disturbed by the report", async () => {
     for (const status of ["dispatched", "running", "completed"] as const) {
-      const { sessions, socket } = refusalOver([turn({ status })]);
-      settledCalls.length = 0;
+      const { sessions, socket } = over([turn({ status })]);
       await handleSocketMessage(sessions, socket, JSON.stringify(capability), 90, recordSettled);
       expect(sessions.transitions).toEqual([]);
-      expect(settledCalls).toEqual([]);
     }
-  });
-
-  test("the oldest queued turn is the one failed, so an earlier wait is reported first", async () => {
-    const { sessions, socket } = refusalOver([
-      turn({ id: "newer", createdAt: 20 }),
-      turn({ id: "older", createdAt: 5 }),
-    ]);
-    settledCalls.length = 0;
-    await handleSocketMessage(sessions, socket, JSON.stringify(capability), 90, recordSettled);
-    expect(sessions.transitions).toEqual([expect.objectContaining({ turnId: "older" })]);
-  });
-
-  test("a model the agent does list refuses nothing", async () => {
-    const sessions = new FakeSessions(session(), [turn({ status: "queued" })]);
-    const socket = new FakeSocket();
-    socket.sessionId = "s1";
-    await handleSocketMessage(
-      sessions,
-      socket,
-      JSON.stringify({
-        type: "session.capability",
-        sessionId: "s1",
-        capability: { availableModels: ["m", "other"], statesModels: true },
-      }),
-      90,
-      recordSettled,
-    );
-    expect(sessions.transitions).toEqual([]);
-  });
-
-  test("an agent that names no models refuses nothing, because it said nothing", async () => {
-    const sessions = new FakeSessions(session(), [turn({ status: "queued" })]);
-    const socket = new FakeSocket();
-    socket.sessionId = "s1";
-    await handleSocketMessage(
-      sessions,
-      socket,
-      JSON.stringify({
-        type: "session.capability",
-        sessionId: "s1",
-        capability: { availableModels: [], statesModels: false },
-      }),
-      90,
-      recordSettled,
-    );
-    expect(sessions.transitions).toEqual([]);
-  });
-
-  test("a session with no route refuses nothing, because there is no model to check", async () => {
-    const sessions = new FakeSessions(session({ selection: null }), [turn({ status: "queued" })]);
-    const socket = new FakeSocket();
-    socket.sessionId = "s1";
-    await handleSocketMessage(sessions, socket, JSON.stringify(capability), 90, recordSettled);
-    expect(sessions.transitions).toEqual([]);
   });
 });
 

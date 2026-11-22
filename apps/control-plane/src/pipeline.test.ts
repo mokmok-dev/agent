@@ -933,6 +933,118 @@ describe("the gateway route and the executor choice", () => {
     }
   });
 
+  test('a gateway that asks for "auto" is handed the session with a queued turn', async () => {
+    const { dir, env } = await deployment();
+    try {
+      // A delivery creates the session and its turn, which is what a gateway
+      // that connected before the delegation is waiting for.
+      await controlPlane(signedSession(sessionEvent("for the gateway")), env);
+      const asked: string[] = [];
+      // Only the fetch the upgrade uses is replaced, so the object still
+      // answers `next` and the route can tell which session has work.
+      const real = env.SESSIONS;
+      const withAuto = {
+        ...env,
+        SESSIONS: {
+          getByName: (id: string) => {
+            const object = real.getByName(id) as {
+              next(sessionId: string): Promise<unknown>;
+            };
+            return {
+              next: (sessionId: string) => object.next(sessionId),
+              fetch: async () => {
+                asked.push(id);
+                return new Response(null, { status: 101 });
+              },
+            };
+          },
+        },
+      } as Env;
+      const response = await controlPlane(
+        new Request("https://x/gateway?session=auto", { headers: { upgrade: "websocket" } }),
+        withAuto,
+      );
+      expect(response.status).toBe(101);
+      // The id is the session the delivery created, not the literal "auto".
+      expect(asked).toEqual([SESSION]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the handoff carries the resolved id on the request the object receives", async () => {
+    const { dir, env } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("for the gateway")), env);
+      const probe: { seen?: string | null; received?: Request } = {};
+      const withProbe = {
+        ...env,
+        SESSIONS: {
+          getByName: (id: string) => {
+            const real = env.SESSIONS.getByName(id) as {
+              next(sessionId: string): Promise<unknown>;
+            };
+            return {
+              next: (sessionId: string) => real.next(sessionId),
+              fetch: async (request: Request) => {
+                probe.received = request;
+                probe.seen = request.headers.get("x-agent-session");
+                return new Response(null, { status: 101 });
+              },
+            };
+          },
+        },
+      } as Env;
+      const response = await controlPlane(
+        new Request("https://x/gateway?session=auto", {
+          headers: { upgrade: "websocket", "x-client": "kept" },
+        }),
+        withProbe,
+      );
+      expect(response.status).toBe(101);
+      // The object is told which session it is, and the original headers survive
+      // the handoff because the upgrade depends on them.
+      expect(probe.seen).toBe(SESSION);
+      expect(probe.received?.headers.get("x-client")).toBe("kept");
+      expect(probe.received?.headers.get("upgrade")).toBe("websocket");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a gateway that asks for "auto" with nothing queued is told to delegate first', async () => {
+    const { dir, env } = await deployment();
+    try {
+      const response = await controlPlane(
+        new Request("https://x/gateway?session=auto", { headers: { upgrade: "websocket" } }),
+        env,
+      );
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({
+        error: "no session is waiting for a gateway; delegate an issue first",
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a session that is already claimed is not offered to a second gateway", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("only once")), env);
+      // The first gateway takes the turn, so it is no longer queued.
+      const step = await onHello(sessionObjects(), SESSION, 1_000);
+      expect(step.send).toHaveLength(1);
+      const response = await controlPlane(
+        new Request("https://x/gateway?session=auto", { headers: { upgrade: "websocket" } }),
+        env,
+      );
+      expect(response.status).toBe(404);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("the upgrade header is read whatever case it arrives in", async () => {
     const { dir } = await deployment();
     try {
@@ -1221,7 +1333,10 @@ describe("the deployed entry exposes the gateway socket", () => {
     // The route resolves the session's object and forwards the upgrade to it;
     // the names may wrap, so the check is on the identifiers a handoff needs.
     expect(source).toContain("env.SESSIONS.getByName(sessionId)");
-    expect(source).toContain("object.fetch(request)");
+    // The handoff is a `fetch` on that object, carrying the id it resolved so a
+    // gateway that asked for `auto` learns which session it reached.
+    expect(source).toContain("object.fetch(forwarded)");
+    expect(source).toContain('new Headers([...request.headers, ["x-agent-session", sessionId]])');
     expect(source).toContain("?session=<id>");
   });
 

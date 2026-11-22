@@ -71,12 +71,15 @@ export class SessionDurableObject extends DurableObject<Env> {
       sessionId: undefined as string | undefined,
       send: (frame: string) => server.send(frame),
     };
+    // The Worker resolved the session's real name before handing the upgrade
+    // over, because a gateway that asked for `auto` only knows the word.
+    const resolved = request.headers.get("x-agent-session") ?? undefined;
     server.addEventListener("message", (event) => {
       const raw = typeof event.data === "string" ? event.data : "";
       // Messages are serialized by chaining, so a bind and a completed event that
       // arrive together cannot both read the session as it was before the bind.
       this.#gatewayQueue = this.#gatewayQueue.then(() =>
-        this.#object.gateway(gateway, raw, Date.now()),
+        this.#object.gateway(gateway, raw, Date.now(), resolved),
       );
     });
     return new Response(null, { status: 101, webSocket: client });

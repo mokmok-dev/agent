@@ -217,6 +217,12 @@ describe("fetch", () => {
             calls.push(`lookup:${thread.threadId}`);
             return "session-1";
           },
+          // The delivery records the session it created, so a gateway that
+          // connected before the delegation can find it.
+          remember: async (thread: ThreadRef) => {
+            calls.push(`remember:${thread.threadId}`);
+          },
+          recent: async () => [],
         }),
       },
       SESSIONS: {
@@ -422,6 +428,7 @@ describe("fetch", () => {
         names.push(name);
         return {
           lookup: async () => "s1",
+          remember: async () => undefined,
         };
       },
     };
@@ -464,7 +471,9 @@ describe("fetch", () => {
       eventId: "Ev1",
       outcome: { kind: "accepted", session: {}, turn: {} },
     });
-    expect(calls).toEqual(["lookup:1"]);
+    // The delivery records its session after the lookup, because a gateway
+    // that connected before the delegation has to be able to find it.
+    expect(calls).toEqual(["lookup:1", "remember:1"]);
   });
 
   test("a bad signature is a 401 and no session is touched", async () => {
@@ -503,7 +512,13 @@ describe("fetch", () => {
       ...config,
       ...OAUTH,
       LINEAR_OAUTH: { getByName: () => ({}) },
-      THREAD_INDEX: { getByName: () => ({ lookup: async () => "session-1" }) },
+      THREAD_INDEX: {
+        getByName: () => ({
+          lookup: async () => "session-1",
+          remember: async () => undefined,
+          recent: async () => [],
+        }),
+      },
       SESSIONS: {
         getByName: () => ({
           active: async () => undefined,
@@ -568,7 +583,13 @@ describe("accept", () => {
       ...config,
       ...OAUTH,
       LINEAR_OAUTH: { getByName: () => ({}) },
-      THREAD_INDEX: { getByName: () => ({ lookup: async () => "session-1" }) },
+      THREAD_INDEX: {
+        getByName: () => ({
+          lookup: async () => "session-1",
+          remember: async () => undefined,
+          recent: async () => [],
+        }),
+      },
       SESSIONS: {
         getByName: () => ({
           active: async () => undefined,
@@ -590,7 +611,13 @@ describe("accept", () => {
       ...config,
       ...OAUTH,
       LINEAR_OAUTH: { getByName: () => ({}) },
-      THREAD_INDEX: { getByName: () => ({ lookup: async () => "session-1" }) },
+      THREAD_INDEX: {
+        getByName: () => ({
+          lookup: async () => "session-1",
+          remember: async () => undefined,
+          recent: async () => [],
+        }),
+      },
       SESSIONS: {
         getByName: () => ({
           active: async () => undefined,

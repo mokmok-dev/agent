@@ -463,6 +463,66 @@ describe("durable object wrappers", () => {
   });
 });
 
+describe("the sessions a gateway can find", () => {
+  /**
+   * A Linear agent session id is made by Linear when someone delegates, so a
+   * gateway cannot name it. It asks for the sessions this deployment has seen
+   * instead, newest first.
+   */
+  const linearThread = (threadId: string): ThreadRef => ({
+    provider: "linear",
+    workspaceId: "org-1",
+    channelId: "issue-1",
+    threadId,
+  });
+
+  test("a delivery records its session, newest first", async () => {
+    const host = new Host();
+    const index = new ThreadIndexObject(host);
+    await index.remember(linearThread("sess-1"), "linear:org-1:issue-1:sess-1");
+    await index.remember(linearThread("sess-2"), "linear:org-1:issue-1:sess-2");
+    expect(await index.recent("linear")).toEqual([
+      "linear:org-1:issue-1:sess-2",
+      "linear:org-1:issue-1:sess-1",
+    ]);
+  });
+
+  test("a repeat moves to the front, so the newest delivery is first", async () => {
+    const host = new Host();
+    const index = new ThreadIndexObject(host);
+    await index.remember(linearThread("a"), "sess-a");
+    await index.remember(linearThread("b"), "sess-b");
+    await index.remember(linearThread("a"), "sess-a");
+    expect(await index.recent("linear")).toEqual(["sess-a", "sess-b"]);
+  });
+
+  test("a provider with no delivery yet has seen nothing", async () => {
+    const host = new Host();
+    expect(await new ThreadIndexObject(host).recent("linear")).toEqual([]);
+  });
+
+  test("the list is capped, so it stays a hint rather than a record", async () => {
+    const host = new Host();
+    const index = new ThreadIndexObject(host);
+    for (let i = 0; i < 30; i++) await index.remember(linearThread(`s${i}`), `sess-${i}`);
+    const recent = await index.recent("linear");
+    expect(recent).toHaveLength(25);
+    expect(recent[0]).toBe("sess-29");
+  });
+
+  test("each provider's sessions are kept apart", async () => {
+    const host = new Host();
+    const index = new ThreadIndexObject(host);
+    await index.remember(linearThread("l"), "linear-sess");
+    await index.remember(
+      { provider: "slack", workspaceId: "T", channelId: "C", threadId: "t" },
+      "slack-sess",
+    );
+    expect(await index.recent("linear")).toEqual(["linear-sess"]);
+    expect(await index.recent("slack")).toEqual(["slack-sess"]);
+  });
+});
+
 describe("index writes", () => {
   test("a lookup stores the id it returns", async () => {
     const host = new Host();

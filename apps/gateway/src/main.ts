@@ -49,8 +49,35 @@ supervisor.start(agentCommand, agentArgs, {
 });
 
 let acpSessionId: string | undefined;
+/** The session this connection serves, once the control plane has named it. */
+let serving: string | undefined = sessionId;
+
+/**
+ * The control plane's answer to a hello. A gateway that asked for `auto` did not
+ * know the session's id, so this is how it learns which one it reached; the
+ * reply is sent as a gateway command, the same envelope as every other frame.
+ */
+function adoptIdentity(text: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  const record = parsed as { params?: { type?: string; sessionId?: unknown } };
+  if (record?.params?.type !== "hello" || typeof record.params.sessionId !== "string") {
+    return false;
+  }
+  serving = record.params.sessionId;
+  console.error(`gateway: serving session ${serving}`);
+  // The gateway has just learned its id, so it asks again: the queued turn is
+  // dispatched against the session it serves rather than the word "auto".
+  socket?.send(JSON.stringify({ type: "hello", sessionId: serving }));
+  return true;
+}
 
 async function handleCommand(text: string): Promise<void> {
+  if (adoptIdentity(text)) return;
   const frame = parseEdgeFrame(text);
   if (frame === undefined) return;
   switch (frame.type) {
@@ -79,12 +106,14 @@ async function handleCommand(text: string): Promise<void> {
   }
 }
 
-function connect(): void {
+const connect = (): void => {
   const opened = new WebSocket(edgeUrl);
   opened.addEventListener("open", () => {
     socket = opened;
-    // Announce which session this gateway serves, so the control plane sends
-    // that session's queued turn rather than waiting to be asked.
+    // A gateway that names a session announces it, so the control plane sends
+    // that session's queued turn rather than waiting to be asked. The control
+    // plane answers the hello with the session it resolved, which is how a
+    // gateway that asked for `auto` learns the id it is serving.
     if (sessionId !== undefined) {
       opened.send(JSON.stringify({ type: "hello", sessionId }));
     }
@@ -93,11 +122,19 @@ function connect(): void {
   opened.addEventListener("message", (message) => {
     void handleCommand(String(message.data));
   });
-  opened.addEventListener("close", () => {
+  opened.addEventListener("close", (event) => {
     socket = undefined;
-    setTimeout(connect, 1000);
+    // A control plane that answered "no session is waiting" closes the socket
+    // until a delegation creates one, so a fixed wait is right for that case
+    // and for a network drop alike: retrying sooner would only repeat it.
+    const code = (event as CloseEvent).code;
+    const wait = code === 4004 || code === 1008 ? 5_000 : 1_000;
+    if (code === 4004) {
+      console.error("gateway: waiting for a session; no delegation has created one yet");
+    }
+    setTimeout(connect, wait);
   });
-}
+};
 
 connect();
 

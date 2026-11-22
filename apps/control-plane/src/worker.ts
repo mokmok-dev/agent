@@ -49,6 +49,8 @@ export interface ModelEnv {
 
 interface SessionRpc {
   active(sessionId: string): Promise<Turn | undefined>;
+  /** The oldest queued turn, which is what a gateway waiting for work serves. */
+  next(sessionId: string): Promise<Turn | undefined>;
   /**
    * A delivery either reaches a turn, which carries the run it produced, or is
    * refused, which carries no run.
@@ -73,6 +75,8 @@ interface SessionRpc {
 
 interface IndexRpc {
   lookup(thread: ThreadRef): Promise<string>;
+  remember(thread: ThreadRef, sessionId: string): Promise<void>;
+  recent(provider: ThreadRef["provider"]): Promise<string[]>;
 }
 
 export function deliveryBody(
@@ -111,17 +115,34 @@ export async function fetch(request: Request, env: Env, now = Date.now()): Promi
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return Response.json({ error: "expected a WebSocket upgrade" }, { status: 426 });
     }
-    const sessionId = url.searchParams.get("session");
-    if (sessionId === null || sessionId === "") {
+    const requested = url.searchParams.get("session");
+    if (requested === null || requested === "") {
       return Response.json(
         { error: "name the session a gateway serves with ?session=<id>" },
         { status: 400 },
       );
     }
+    // `auto` is a gateway that connected before the delegation it serves: a
+    // Linear agent session does not exist until someone delegates, so there is
+    // no id to name yet. The newest session with a queued turn is the one
+    // waiting for a gateway, which is what the answer names.
+    const sessionId = requested === "auto" ? await waitingSessionFor(env) : requested;
+    if (sessionId === undefined) {
+      return Response.json(
+        { error: "no session is waiting for a gateway; delegate an issue first" },
+        { status: 404 },
+      );
+    }
     const object = env.SESSIONS.getByName(sessionId) as {
       fetch(request: Request): Promise<Response>;
     };
-    return object.fetch(request);
+    // The object is named by its id, but a gateway that asked for `auto` needs
+    // to be told which one it reached. The header carries that across the
+    // handoff, because the upgrade request itself is the only channel.
+    const forwarded = new Request(request, {
+      headers: new Headers([...request.headers, ["x-agent-session", sessionId]]),
+    });
+    return object.fetch(forwarded);
   }
   if (route.kind === "providers-status") {
     return providersStatus(env);
@@ -157,6 +178,26 @@ export async function fetch(request: Request, env: Env, now = Date.now()): Promi
 }
 
 /**
+ * The newest session that has a queued turn, for a gateway that connected
+ * before the delegation it serves.
+ *
+ * A Linear agent session id is created by Linear at delegation time, so a
+ * gateway cannot name it up front. It asks for the session that is actually
+ * waiting, which is the newest one with a `queued` turn. An older session's
+ * stale turn does not shadow a newer one.
+ */
+async function waitingSessionFor(env: Env): Promise<string | undefined> {
+  const index = env.THREAD_INDEX.getByName("index") as IndexRpc;
+  const candidates = await index.recent("linear");
+  for (const sessionId of candidates) {
+    const sessions = env.SESSIONS.getByName(sessionId) as SessionRpc;
+    const queued = await sessions.next(sessionId);
+    if (queued !== undefined) return sessionId;
+  }
+  return undefined;
+}
+
+/**
  * Route one inbound event to its session. The thread index names the session,
  * so a delivery that races another for the same thread lands on one object.
  *
@@ -173,6 +214,10 @@ export async function accept(
   const thread: ThreadRef = { provider: event.provider, ...event.thread };
   const index = env.THREAD_INDEX.getByName("index") as IndexRpc;
   const sessionId = await index.lookup(thread);
+  // A gateway that connected before this delivery needs to find it, so the
+  // session is recorded where a gateway looks. It is written before the turn,
+  // so a gateway that attaches now waits for a turn rather than missing it.
+  await index.remember(thread, sessionId);
   const sessions = env.SESSIONS.getByName(sessionId) as SessionRpc;
   if (event.kind === "cancel") {
     const active = await sessions.active(sessionId);

@@ -1,11 +1,5 @@
 import type { AgentCapability } from "@agent/protocol";
-import {
-  NO_MODEL_REASON,
-  offersModel,
-  type Session,
-  type Turn,
-  type TurnUpdate,
-} from "@agent/store";
+import type { Session, Turn, TurnUpdate } from "@agent/store";
 import { effectOf, helloOf, nextPrompt, reportOf } from "./gateway-plane.ts";
 
 /**
@@ -93,13 +87,15 @@ export async function onMessage(
     return { send: [], connection: { sessionId } };
   }
   if (effect.kind === "capability") {
-    const updated = await sessions.capability(sessionId, effect.capability, now);
-    // A `stdio` agent chooses its own model, so a routed model it does not
-    // offer cannot be corrected here. A turn no gateway has claimed yet can
-    // still be stopped, so it fails naming the real cause instead of running
-    // on a model the route never intended.
-    const refusal = await refusedModel(sessions, updated, effect.capability, now);
-    return { send: [], connection: { sessionId }, ...refusal };
+    // What the agent said it can run is kept on the session, including the
+    // model it actually chose. A `stdio` agent picks its own model, so the
+    // route's wish and the agent's reality can differ; recording both is the
+    // honest outcome. Failing the queued turn here would instead report a
+    // mismatch the agent never had, and it would do so only when the report
+    // arrived before the turn was claimed, which made the same inputs behave
+    // differently depending on timing.
+    await sessions.capability(sessionId, effect.capability, now);
+    return { send: [], connection: { sessionId } };
   }
   if (effect.kind === "settle") {
     await sessions.transition(sessionId, effect.turnId, effect.update, now);
@@ -123,38 +119,8 @@ export async function onMessage(
 }
 
 /**
- * Stop a turn the agent's own capability rules out.
- *
- * Only a queued turn is stopped: a `stdio` agent already running a dispatched
- * turn chose its model itself, so rewriting that turn's outcome would report a
- * failure the agent never gave. A queued turn has not started, which is the one
- * moment the record can still say why it will not.
+ * Where a reply goes: the thread the session answers into.
  */
-async function refusedModel(
-  sessions: GatewaySessions,
-  session: Session,
-  capability: AgentCapability,
-  now: number,
-): Promise<{ settled?: { sessionId: string; replyTo: string; error: string } }> {
-  const { selection } = session;
-  // The route is what names the model to check, and without one there is
-  // nothing to refuse.
-  if (selection === null) return {};
-  // An agent that named no models said nothing about what it can run, so its
-  // silence is not a refusal; only a stated list can rule a model out.
-  if (!capability.statesModels) return {};
-  if (offersModel(capability, selection.model.modelId)) return {};
-  const turns = await sessions.turns(session.id);
-  const queued = turns
-    .filter((turn) => turn.status === "queued")
-    .sort((a, b) => a.createdAt - b.createdAt)[0];
-  if (queued === undefined) return {};
-  const error = NO_MODEL_REASON(capability, selection.model.modelId);
-  await sessions.transition(session.id, queued.id, { status: "failed", error }, now);
-  return { settled: { sessionId: session.id, replyTo: replyTargetOf(session), error } };
-}
-
-/** Where a reply goes: the thread the session answers into. */
 function replyTargetOf(session: Session): string {
   return session.thread.threadId;
 }

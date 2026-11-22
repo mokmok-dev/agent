@@ -61,6 +61,10 @@ const envWith = (
           lookups.push(thread);
           return Promise.resolve(sessionIds[lookups.length - 1] ?? sessionIds[0]!);
         },
+        // The delivery records its session so a gateway that connected first
+        // can find it; this double keeps that call out of the assertions.
+        remember: () => Promise.resolve(),
+        recent: () => Promise.resolve([]),
       }),
     },
     SESSIONS: {
@@ -258,6 +262,8 @@ describe("the control plane to session relay", () => {
           seen.push(thread);
           return Promise.resolve("session-1");
         },
+        remember: () => Promise.resolve(),
+        recent: () => Promise.resolve([]),
       }),
     };
     await accept(env, { ...message, provider: "linear" }, 1);

@@ -1,6 +1,7 @@
 import { SessionService } from "./session-service.ts";
 import { durableStorage, type StorageHost } from "./storage.ts";
-import { handleSocketMessage, type GatewaySessions } from "./gateway-connection.ts";
+import { frameText, handleSocketMessage, type GatewaySessions } from "./gateway-connection.ts";
+import { helloOf } from "./gateway-plane.ts";
 import type { TurnRunOutcome } from "./session-service.ts";
 import type { TurnRunner } from "./turn-runner.ts";
 
@@ -157,7 +158,18 @@ export class SessionObject {
     socket: { sessionId: string | undefined; send(frame: string): void },
     raw: string,
     now: number,
+    /** The id this object really is, which differs from `auto` when a gateway asked for one. */
+    resolvedId?: string,
   ): Promise<void> {
+    // A gateway that asked for `auto` does not know the id it reached, so the
+    // hello must be answered with the object's own name. Without this the
+    // connection would try to serve a session literally called "auto".
+    const hello = helloOf(JSON.parse(raw));
+    if (hello === "auto" && resolvedId !== undefined) {
+      socket.send(frameText({ type: "hello", sessionId: resolvedId }));
+      socket.sessionId = resolvedId;
+      return;
+    }
     await handleSocketMessage(this.#sessions(), socket, raw, now, (settled) =>
       this.#replies(
         "text" in settled
@@ -167,7 +179,9 @@ export class SessionObject {
       ),
     );
     // A gateway that has just spoken may have left other turns waiting, and a
-    // connection is the moment a thread learns its agent is present.
+    // connection is the moment a thread learns its agent is present. An
+    // unbound connection names no session, and sweeping an empty id finds
+    // nothing, so the same call serves both.
     await this.expire(socket.sessionId ?? "", now);
   }
 

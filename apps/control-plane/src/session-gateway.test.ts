@@ -445,7 +445,7 @@ describe("a queued turn no gateway claims", () => {
   });
 });
 
-describe("a model the agent does not offer", () => {
+describe("a model the agent does not offer, on the path that pins the model", () => {
   const slack = { provider: "slack" as const, workspaceId: "T", channelId: "C", threadId: "1" };
 
   /** A durable deployment whose runner records the model it was asked for. */
@@ -536,6 +536,113 @@ describe("a model the agent does not offer", () => {
       await settle(() => runs.length > 0);
       expect(runs).toHaveLength(1);
       expect(await turnById(object, "t1")).toMatchObject({ status: "completed" });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a gateway that asked for the next session", () => {
+  test("its hello is answered with the id it actually reached", async () => {
+    // A gateway started before the delegation cannot name the session, so it
+    // asks for one and the object tells it which. Without this answer the
+    // connection would try to serve a session literally called "auto".
+    const { dir, object } = await objectOver();
+    try {
+      await queued(object);
+      const gateway = socket();
+      await object.gateway(
+        gateway,
+        JSON.stringify({ type: "hello", sessionId: "auto" }),
+        2_000,
+        SESSION,
+      );
+      expect(gateway.sessionId).toBe(SESSION);
+      // The answer travels as a gateway command, the same envelope every other
+      // frame uses, so the gateway's own codec reads it.
+      expect(JSON.parse(gateway.sent[0]!)).toEqual({
+        jsonrpc: "2.0",
+        method: "gateway/command",
+        params: { type: "hello", sessionId: SESSION },
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a later message on that connection is served for the resolved session", async () => {
+    const { dir, object, replies } = await objectOver();
+    try {
+      await queued(object);
+      const gateway = socket();
+      await object.gateway(
+        gateway,
+        JSON.stringify({ type: "hello", sessionId: "auto" }),
+        2_000,
+        SESSION,
+      );
+      // The gateway now knows its id, so the next hello is a normal one and the
+      // queued turn is claimed and sent.
+      await object.gateway(
+        gateway,
+        JSON.stringify({ type: "hello", sessionId: SESSION }),
+        2_001,
+        SESSION,
+      );
+      expect((await turnById(object, "t1"))?.status).toBe("dispatched");
+      expect(JSON.parse(gateway.sent[1]!)).toMatchObject({ params: { turnId: "t1" } });
+      expect(replies).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a bound connection sweeps its own session, so its stale turn is reported", async () => {
+    // The sweep is the only moment a thread learns its agent went away, so it
+    // must run for a connection that has named a session.
+    const { dir, object, replies } = await objectOver();
+    try {
+      await queued(object, 1_000);
+      await object.gateway(
+        { sessionId: SESSION, send: () => undefined },
+        JSON.stringify({ type: "ping" }),
+        1_000 + GATEWAY_CLAIM_DEADLINE_MS,
+      );
+      expect(replies).toEqual([{ kind: "failed", error: NO_GATEWAY_REASON, replyTo: "sess" }]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unresolved auto hello is not answered with an invented id", async () => {
+    // The platform class always passes the id it resolved. Without one there is
+    // nothing truthful to answer, so the hello falls through to the normal
+    // handler, which names the empty session and sends no frames.
+    const { dir, object } = await objectOver();
+    try {
+      await queued(object);
+      const gateway = socket();
+      await object.gateway(gateway, JSON.stringify({ type: "hello", sessionId: "auto" }), 2_000);
+      expect(gateway.sessionId).toBe("auto");
+      expect(gateway.sent).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a hello that already names the session is handled as before", async () => {
+    const { dir, object } = await objectOver();
+    try {
+      await queued(object);
+      const gateway = socket();
+      await object.gateway(
+        gateway,
+        JSON.stringify({ type: "hello", sessionId: SESSION }),
+        2_000,
+        SESSION,
+      );
+      // No identity reply is needed when the gateway asked by name.
+      expect(JSON.parse(gateway.sent[0]!)).toMatchObject({ method: "gateway/command" });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

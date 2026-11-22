@@ -123,13 +123,13 @@
     "reason": "equivalent: with no expired turns the loop below writes nothing, so skipping the early return yields the same empty array and the same replies.",
     "where": "src/session-do.ts:80:9 expired.length === 0 -> false"
   },
+  "2cahdn4sgb9": {
+    "reason": "equivalent: an unbound connection names no session, and no session can have the empty id, so sweeping it finds nothing exactly as skipping the sweep does.",
+    "where": "src/session-do.ts:185:43 \"\" -> \"Stryker was here!\""
+  },
   "2d7hwd4ag4q": {
     "reason": "equivalent: open() needs a Durable Object's SQLite and a live pi runtime, so no in-process test reaches it; the credential port it selects is covered by the credential-bridge test, which drives the same wrapper with a stub RPC.",
     "where": "src/pi-runtime.ts:51:23 rpc === undefined -> rpc !== undefined"
-  },
-  "2eji0h3e4vc": {
-    "reason": "equivalent: an anonymous connection names no session, and no session can have the made-up id, so the sweep finds nothing exactly as the empty id does.",
-    "where": "src/session-do.ts:171:43 \"\" -> \"Stryker was here!\""
   },
   "3hdl9m0una": {
     "reason": "equivalent: the two conditions are exclusive in practice (a reply exists only for an existing session), so the || and && forms agree.",
