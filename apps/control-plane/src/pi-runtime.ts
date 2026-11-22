@@ -5,6 +5,7 @@ import type { CredentialStore, MutableModels } from "@earendil-works/pi-ai";
 import type { ModelRef } from "@agent/capability";
 import { ConversationBase } from "@agent/conversation";
 
+import { credentialStoreOver, type ProviderRpc } from "./credentials-rpc.ts";
 import type { Env } from "./worker.ts";
 import { configureProviders, type ProviderConfig, type ProviderRefused } from "./providers.ts";
 import { piTurnRunner } from "./pi-turn-runner.ts";
@@ -44,9 +45,16 @@ export function piRunnerOver(openOnce: () => Promise<ConversationBase>): TurnRun
 export async function open(state: DurableObjectState, env: Env): Promise<ConversationBase> {
   const storage = await openDurableObjectSqliteStorage(state.storage);
   // The credentials live on the `providers` object, not this one, because a
-  // login applies to every session rather than to one conversation.
-  const credentials = env.PROVIDERS?.getByName("providers") as CredentialStore | undefined;
+  // login applies to every session rather than to one conversation. The stub is
+  // wrapped because pi passes an `AbortSignal` that an RPC cannot serialize.
+  const rpc = env.PROVIDERS?.getByName("providers") as ProviderRpc | undefined;
+  const credentials = rpc === undefined ? undefined : credentialStoreOver(rpc);
   const setup = setupFor(env, credentials);
+  // A dynamic provider starts with an empty catalog, so a turn that names one of
+  // its models resolves to nothing and pi reports `no_model`. One refresh fills
+  // it; a provider whose endpoint is unreachable leaves it empty, which the
+  // failed turn then names.
+  await refreshCatalog(setup.models, providerConfigOf(env).providers);
   const conversation = await ConversationBase.open(storage, {
     models: setup.models,
     registry: createRegistry(),
@@ -56,6 +64,36 @@ export async function open(state: DurableObjectState, env: Env): Promise<Convers
   // the operator chose, rather than a provider's own default.
   await conversation.setModel(setup.defaultModel);
   return conversation;
+}
+
+/**
+ * Fill every dynamic provider's catalog before a turn resolves a model.
+ *
+ * A static provider ignores the request, so this is safe for the built-ins.
+ * The refresh is best effort: pi keeps whatever the store already holds, and a
+ * turn that still cannot resolve a model fails with pi's own reason.
+ */
+export async function refreshCatalog(
+  models: MutableModels,
+  providers: readonly string[],
+): Promise<void> {
+  try {
+    const result = await models.refresh({ providers, allowNetwork: true });
+    if (result.errors.size > 0) {
+      console.log(
+        `catalog refresh errors: ${[...result.errors].map(([id, e]) => `${id}: ${e.message}`).join("; ")}`,
+      );
+    }
+    for (const id of providers) {
+      console.log(
+        `catalog ${id}: ${models.getProvider(id)?.getModels().length ?? "absent"} models`,
+      );
+    }
+  } catch (error) {
+    // A refresh that throws leaves the catalog as it was; the turn names the
+    // model it could not resolve.
+    console.log(`catalog refresh threw: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /**

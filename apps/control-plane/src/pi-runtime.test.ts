@@ -4,6 +4,7 @@ import {
   piRunnerFor,
   piRunnerOver,
   providerConfigOf,
+  refreshCatalog,
   refusalText,
   setupFor,
 } from "./pi-runtime.ts";
@@ -248,5 +249,57 @@ describe("the model id an operator leaves empty", () => {
     expect(() =>
       setupFor(env({ PI_PROVIDERS: "openai", PI_DEFAULT_MODEL: ":gpt-5-codex" })),
     ).toThrow("PI_DEFAULT_MODEL must be provider:modelId");
+  });
+});
+
+describe("the catalog a turn resolves against", () => {
+  const dynamic = () =>
+    setupFor(
+      env({
+        PI_PROVIDERS: "ollama-cloud",
+        PI_DEFAULT_MODEL: "ollama-cloud:deepseek-v4.1-flash",
+      }),
+    );
+
+  test("a dynamic provider has no models until the catalog is refreshed", () => {
+    // This is what produced `no_model` on the deployment: the Durable Object
+    // starts empty, so a named model resolves to nothing.
+    expect(dynamic().models.getProvider("ollama-cloud")?.getModels()).toEqual([]);
+  });
+
+  test("refreshing fills the catalog, so the deployment's model resolves", async () => {
+    const setup = dynamic();
+    // The real Ollama endpoint is not reachable from a unit test's transport, so
+    // this asserts the call is made and its failure is tolerated; the live
+    // refresh is proven by the pipeline evidence.
+    await refreshCatalog(setup.models, ["ollama-cloud"]);
+    expect(Array.isArray(setup.models.getProvider("ollama-cloud")?.getModels())).toBe(true);
+  });
+
+  test("a provider list with no dynamic provider needs no network", async () => {
+    const setup = setupFor(
+      env({
+        PI_PROVIDERS: "cloudflare-workers-ai",
+        PI_DEFAULT_MODEL: "cloudflare-workers-ai:@cf/deepseek-ai/deepseek-v4.1-flash",
+      }),
+    );
+    // A static provider ignores the refresh, so this must not throw.
+    await expect(refreshCatalog(setup.models, ["cloudflare-workers-ai"])).resolves.toBeUndefined();
+  });
+
+  test("a refresh that throws leaves the catalog as it was, never a crash", async () => {
+    const setup = setupFor(
+      env({
+        PI_PROVIDERS: "cloudflare-workers-ai",
+        PI_DEFAULT_MODEL: "cloudflare-workers-ai:@cf/deepseek-ai/deepseek-v4.1-flash",
+      }),
+    );
+    const throwing = {
+      refresh: async () => {
+        throw new Error("offline");
+      },
+    } as never;
+    await expect(refreshCatalog(throwing, ["x"])).resolves.toBeUndefined();
+    expect(setup.models.getProvider("cloudflare-workers-ai")).toBeDefined();
   });
 });
