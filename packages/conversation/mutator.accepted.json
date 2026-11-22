@@ -1,0 +1,26 @@
+{
+  "1by0ejvqjic": {
+    "reason": "Pi's assistant entry carries only text and thinking blocks, and text comes from a string field, so dropping the role or block filter cannot change the reply.",
+    "where": "src/conversation.ts:141:33 [] -> [\"Stryker was here!\"]"
+  },
+  "1e97tsgbkgc": {
+    "reason": "Pi's decoder and scheduler make these branches unobservable: the submission type is validated before it writes, and resume on an already-scheduling harness is a no-op.",
+    "where": "src/conversation.ts:96:18 { this.#harness.resume(); } -> {}"
+  },
+  "1oyizruegsr": {
+    "reason": "Pi's assistant entry carries only text and thinking blocks, and text comes from a string field, so dropping the role or block filter cannot change the reply.",
+    "where": "src/conversation.ts:144:24 block.type === \"text\" -> true"
+  },
+  "kgy4s4a87t": {
+    "reason": "Pi's decoder and scheduler make these branches unobservable: the submission type is validated before it writes, and resume on an already-scheduling harness is a no-op.",
+    "where": "src/conversation.ts:97:5 this.#harness.resume(); -> ;"
+  },
+  "tpm3543f8a": {
+    "reason": "Pi's decoder and scheduler make these branches unobservable: the submission type is validated before it writes, and resume on an already-scheduling harness is a no-op.",
+    "where": "src/conversation.ts:88:56 \"input\" -> \"\""
+  },
+  "wd8r8pfi2e": {
+    "reason": "Pi's assistant entry carries only text and thinking blocks, and text comes from a string field, so dropping the role or block filter cannot change the reply.",
+    "where": "src/conversation.ts:141:17 (entry.model ?? []) .filter((message) => message.role === \"… -> (entry.model ?? []) .filter((message) => message.role === \"…"
+  }
+}

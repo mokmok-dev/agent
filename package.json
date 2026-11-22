@@ -12,7 +12,7 @@
     "check": "bun check -b",
     "fmt": "bun fmt",
     "fmt:check": "bun fmt --check",
-    "mutate": "bun --cwd packages/protocol $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2 && bun --cwd packages/store $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2 && bun --cwd packages/adapters $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2 && bun --cwd packages/capability $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2 && bun --cwd packages/execution $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2 && bun --cwd apps/control-plane $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2 && bun --cwd apps/gateway $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2"
+    "mutate": "bun --cwd packages/protocol $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2 && bun --cwd packages/store $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2 && bun --cwd packages/adapters $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2 && bun --cwd packages/capability $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2 && bun --cwd packages/execution $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2 && bun --cwd packages/conversation $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2 && bun --cwd apps/control-plane $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2 && bun --cwd apps/gateway $PWD/node_modules/@mizchi/mutator/dist/cli.js --concurrency 2"
   },
   "devDependencies": {
     "@cloudflare/codemode": "^0.5.6",

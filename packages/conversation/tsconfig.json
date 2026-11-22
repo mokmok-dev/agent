@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "types": ["bun"] },
+  "include": ["src/**/*.ts", "../../node_modules/@earendil-works/*/dist/**/*.d.ts"]
+}

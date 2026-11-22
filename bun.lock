@@ -50,6 +50,15 @@
       "name": "@agent/capability",
       "version": "0.0.0",
     },
+    "packages/conversation": {
+      "name": "@agent/conversation",
+      "version": "0.0.0",
+      "dependencies": {
+        "@earendil-works/chord": "^1.6.0",
+        "@earendil-works/pi-ai": "^1.6.0",
+        "@earendil-works/pi-durable": "^1.6.0",
+      },
+    },
     "packages/execution": {
       "name": "@agent/execution",
       "version": "0.0.0",
@@ -69,6 +78,8 @@
     "@agent/capability": ["@agent/capability@workspace:packages/capability"],
 
     "@agent/control-plane": ["@agent/control-plane@workspace:apps/control-plane"],
+
+    "@agent/conversation": ["@agent/conversation@workspace:packages/conversation"],
 
     "@agent/execution": ["@agent/execution@workspace:packages/execution"],
 
