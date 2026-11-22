@@ -28,6 +28,7 @@ const sessionBody = (overrides: Record<string, unknown> = {}) => ({
   type: "AgentSessionEvent",
   action: "created",
   webhookId: "wh-1",
+  organizationId: "org-1",
   agentSession: { id: "sess-9" },
   issue: { id: "issue-3", teamId: "team-1" },
   actor: { id: "user-7" },
@@ -67,10 +68,11 @@ describe("parseLinearEvent", () => {
         kind: "message",
         provider: "linear",
         eventId: "wh-1",
-        thread: { workspaceId: "team-1", channelId: "issue-3", threadId: "sess-9" },
+        thread: { workspaceId: "org-1", channelId: "issue-3", threadId: "sess-9" },
         authorId: "user-7",
         text: "add retries to the uploader",
         replyTo: { channelId: "issue-3", threadId: "sess-9" },
+        stage: "start",
       },
     });
   });
@@ -120,13 +122,45 @@ describe("parseLinearEvent", () => {
     expect(result.kind === "event" && result.event.authorId).toBe("");
   });
 
-  test("rejects a payload that is not an object or has no session or issue", () => {
+  test("rejects a payload that is not an object or has no session", () => {
     expect(() => parseLinearEvent(null)).toThrow(AdapterError);
     expect(() => parseLinearEvent([])).toThrow(AdapterError);
     expect(() => parseLinearEvent({ type: "AgentSessionEvent" })).toThrow(AdapterError);
     expect(() => parseLinearEvent(sessionBody({ agentSession: {} }))).toThrow(AdapterError);
-    expect(() => parseLinearEvent(sessionBody({ issue: {} }))).toThrow(AdapterError);
-    expect(() => parseLinearEvent(sessionBody({ issue: { id: "i" } }))).toThrow(AdapterError);
+  });
+
+  test("a prompted event has no issue, so the session is the thread", () => {
+    const result = parseLinearEvent(sessionBody({ action: "prompted", issue: undefined }));
+    expect(result.kind === "event" && result.event).toMatchObject({
+      stage: "prompt",
+      thread: { channelId: "sess-9", threadId: "sess-9" },
+      replyTo: { channelId: "sess-9", threadId: "sess-9" },
+    });
+  });
+
+  test("a created event starts a session", () => {
+    const result = parseLinearEvent(sessionBody({ action: "created" }));
+    expect(result.kind === "event" && "stage" in result.event && result.event.stage).toBe("start");
+  });
+
+  test("an unknown action starts a session, because a session exists either way", () => {
+    const result = parseLinearEvent(sessionBody({ action: undefined }));
+    expect(result.kind === "event" && "stage" in result.event && result.event.stage).toBe("start");
+  });
+
+  test("an issue with an empty id falls back to the session, so the thread is never empty", () => {
+    const result = parseLinearEvent(sessionBody({ issue: { id: "" } }));
+    expect(result.kind === "event" && result.event.thread.channelId).toBe("sess-9");
+  });
+
+  test("an event with no organization has an empty workspace rather than a missing field", () => {
+    const result = parseLinearEvent(sessionBody({ organizationId: undefined }));
+    expect(result.kind === "event" && result.event.thread.workspaceId).toBe("");
+  });
+
+  test("an issue with an empty id falls back to the session, so the thread is never empty", () => {
+    const result = parseLinearEvent(sessionBody({ issue: undefined }));
+    expect(result.kind === "event" && result.event.thread.channelId).toBe("sess-9");
   });
 });
 

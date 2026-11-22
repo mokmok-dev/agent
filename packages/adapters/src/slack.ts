@@ -124,6 +124,7 @@ function messageResult(
     authorId: event.user ?? "",
     text,
     replyTo: { channelId: thread.channelId, threadId: thread.threadId },
+    stage: "message",
   };
   return { kind: "event", event: message };
 }

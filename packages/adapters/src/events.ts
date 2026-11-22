@@ -31,6 +31,11 @@ export type InboundMessage = {
   text: string;
   /** Where a reply should go when it differs from the thread. */
   replyTo: { channelId: string; threadId: string };
+  /**
+   * What kind of delivery this is. `start` opens a session, `prompt` adds to
+   * one that is open; a provider without sessions sends `message`.
+   */
+  stage: "start" | "prompt" | "message";
 };
 
 export type InboundCancel = {

@@ -334,16 +334,12 @@ describe("linear diagnostics", () => {
     });
   });
 
-  test("a missing session, issue, or team names itself", () => {
+  test("a missing session names itself, and a session without an issue still parses", () => {
     expect(failure(() => parseLinearEvent({ type: "AgentSessionEvent" })).message).toBe(
       "Linear event has no agent session",
     );
-    expect(failure(() => parseLinearEvent({ ...base, issue: undefined })).message).toBe(
-      "Linear event has no issue",
-    );
-    expect(failure(() => parseLinearEvent({ ...base, issue: { id: "i" } })).message).toBe(
-      "Linear event has no team",
-    );
+    expect(parseLinearEvent({ ...base, issue: undefined }).kind).toBe("event");
+    expect(parseLinearEvent({ ...base, issue: { id: "i" } }).kind).toBe("event");
   });
 
   test("linearPrompt tries each carrier in order and skips blanks", () => {

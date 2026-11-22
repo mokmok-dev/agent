@@ -23,16 +23,16 @@ export function parseLinearEvent(body: unknown): AdapterResult {
   }
   const session = event.agentSession;
   if (session === undefined) throw new AdapterError(400, "Linear event has no agent session");
-  const issue = event.issue;
-  if (issue === undefined) throw new AdapterError(400, "Linear event has no issue");
-  const teamId = issue.teamId;
-  if (teamId === undefined) throw new AdapterError(400, "Linear event has no team");
   if (event.agentActivity?.type === "thought") {
     return { kind: "ignored", reason: "Linear activity echo" };
   }
   const text = promptOf(event);
   if (text === undefined) return { kind: "ignored", reason: "Linear event has no prompt" };
-  const thread = { workspaceId: teamId, channelId: issue.id, threadId: session.id };
+  const thread = {
+    workspaceId: event.organizationId ?? "",
+    channelId: issueIdOf(event.issue?.id, session.id),
+    threadId: session.id,
+  };
   const message: InboundMessage = {
     kind: "message",
     provider: "linear",
@@ -40,9 +40,19 @@ export function parseLinearEvent(body: unknown): AdapterResult {
     thread,
     authorId: authorOf(event),
     text,
-    replyTo: { channelId: issue.id, threadId: session.id },
+    replyTo: { channelId: issueIdOf(event.issue?.id, session.id), threadId: session.id },
+    stage: event.action === "prompted" ? "prompt" : "start",
   };
   return { kind: "event", event: message };
+}
+
+/**
+ * The issue a session belongs to, or the session id when Linear sends no issue.
+ * A `prompted` event carries the session and no issue, so the session id is the
+ * only stable thread key in that case.
+ */
+function issueIdOf(issueId: string | undefined, sessionId: string): string {
+  return issueId === undefined || issueId === "" ? sessionId : issueId;
 }
 
 export async function adaptLinear(

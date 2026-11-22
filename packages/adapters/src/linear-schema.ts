@@ -15,6 +15,7 @@ export const decodeLinearEvent = object({
   type: optional(str),
   action: optional(str),
   webhookId: optional(str),
+  organizationId: optional(str),
   agentSession: optional(object({ id: str })),
   issue: optional(object({ id: str, teamId: optional(str) })),
   actor: optional(object({ id: str })),

@@ -130,6 +130,7 @@ describe("parseSlackEvent", () => {
         authorId: "U1",
         text: "please fix the build",
         replyTo: { channelId: "C1", threadId: "100.1" },
+        stage: "message",
       },
     });
   });

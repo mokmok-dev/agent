@@ -120,6 +120,7 @@ describe("responseFor", () => {
           authorId: "U",
           text: "x",
           replyTo: { channelId: "C", threadId: "1" },
+          stage: "message",
         },
       }),
     ).toEqual({ status: 202, body: { ok: true, eventId: "Ev1" } });
@@ -495,6 +496,7 @@ describe("accept", () => {
     authorId: "U",
     text: "hi",
     replyTo: { channelId: "C", threadId: "1" },
+    stage: "message" as const,
   };
 
   test("routes a message to the session the index names", async () => {

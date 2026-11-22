@@ -128,6 +128,7 @@ describe("parseDiscordInteraction", () => {
         authorId: "U1",
         text: "write the tests",
         replyTo: { channelId: "C1", threadId: "C1" },
+        stage: "message",
       },
     });
   });

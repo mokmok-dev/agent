@@ -11,6 +11,7 @@ import {
   type ProviderConfig,
 } from "./routes.ts";
 import { finishLogin, loginStatus, startLogin, type LinearOAuthPort } from "./linear-oauth-port.ts";
+import { linearReplies, type LinearReplyPort } from "./linear-reply.ts";
 
 export interface Namespace {
   getByName(name: string): unknown;
@@ -92,11 +93,16 @@ export async function fetch(request: Request, env: Env, now = Date.now()): Promi
 /**
  * Route one inbound event to its session. The thread index names the session,
  * so a delivery that races another for the same thread lands on one object.
+ *
+ * Linear opens a session with a `created` event and expects a thought within ten
+ * seconds; the acknowledgement is sent before the turn is recorded, so a slow
+ * turn cannot make the session look unresponsive.
  */
 export async function accept(
   env: Env,
   event: Extract<InboundEvent, { kind: "message" | "cancel" }>,
   now: number,
+  replies?: LinearReplyPort,
 ): Promise<unknown> {
   const thread: ThreadRef = { provider: event.provider, ...event.thread };
   const index = env.THREAD_INDEX.getByName("index") as IndexRpc;
@@ -106,6 +112,10 @@ export async function accept(
     const active = await sessions.active(sessionId);
     if (active === undefined) return { kind: "refused", reason: "no-active-turn" };
     return sessions.transition(sessionId, active.id, { status: "cancelled" }, now);
+  }
+  if (event.provider === "linear" && event.stage === "start") {
+    const port = replies ?? linearReplies(env.LINEAR_OAUTH.getByName("linear") as LinearOAuthPort);
+    await port.acknowledge(event.thread.threadId, now);
   }
   return sessions.deliver(sessionId, thread, event.text, event.eventId, now);
 }

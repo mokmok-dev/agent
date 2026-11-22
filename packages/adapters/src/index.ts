@@ -4,3 +4,4 @@ export * from "./slack.ts";
 export * from "./discord.ts";
 export * from "./linear.ts";
 export * from "./linear-oauth.ts";
+export * from "./linear-activity.ts";

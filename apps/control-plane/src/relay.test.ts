@@ -24,7 +24,11 @@ class FakeSessions {
   }
 }
 
-const envWith = (sessions: FakeSessions, sessionIds: string[] = ["session-1"]): Env => {
+const envWith = (
+  sessions: FakeSessions,
+  sessionIds: string[] = ["session-1"],
+  overrides: Partial<Env> = {},
+): Env => {
   const lookups: ThreadRef[] = [];
   const env: Env = {
     slack: { signingSecret: "s", botUserId: "B" },
@@ -47,6 +51,7 @@ const envWith = (sessions: FakeSessions, sessionIds: string[] = ["session-1"]): 
         transition: (...args: unknown[]) => sessions.transition(...args),
       }),
     },
+    ...overrides,
   };
   return env;
 };
@@ -59,9 +64,108 @@ const message = {
   authorId: "U",
   text: "hello",
   replyTo: { channelId: "C", threadId: "1" },
+  stage: "message" as const,
 };
 
 describe("the control plane to session relay", () => {
+  test("a Linear start acknowledges before the turn is recorded", async () => {
+    const sessions = new FakeSessions();
+    const acks: string[] = [];
+    const names: string[] = [];
+    const replies = {
+      acknowledge: async (sessionId: string) => {
+        acks.push(sessionId);
+        return { kind: "sent" as const, activityId: null };
+      },
+      answer: async () => ({ kind: "sent" as const, activityId: null }),
+    };
+    const env = envWith(sessions, ["session-1"], {
+      LINEAR_OAUTH: {
+        getByName: (name: string) => {
+          names.push(name);
+          return { status: async () => undefined };
+        },
+      },
+    });
+    await accept(env, { ...message, provider: "linear", stage: "start" }, 1, replies);
+    expect(acks).toEqual([message.thread.threadId]);
+    expect(names).toEqual([]);
+    expect(sessions.calls.map((call) => call.method)).toEqual(["deliver"]);
+  });
+
+  test("without a reply port, a Linear start addresses the object named linear", async () => {
+    const sessions = new FakeSessions();
+    const names: string[] = [];
+    const env = envWith(sessions, ["session-1"], {
+      LINEAR_OAUTH: {
+        getByName: (name: string) => {
+          names.push(name);
+          return { status: async () => undefined };
+        },
+      },
+    });
+    await accept(env, { ...message, provider: "linear", stage: "start" }, 1);
+    expect(names).toEqual(["linear"]);
+    expect(sessions.calls.map((call) => call.method)).toEqual(["deliver"]);
+  });
+
+  test("a Linear prompt does not acknowledge, because the session is already open", async () => {
+    const sessions = new FakeSessions();
+    const acks: string[] = [];
+    const replies = {
+      acknowledge: async (sessionId: string) => {
+        acks.push(sessionId);
+        return { kind: "sent" as const, activityId: null };
+      },
+      answer: async () => ({ kind: "sent" as const, activityId: null }),
+    };
+    await accept(
+      envWith(sessions),
+      { ...message, provider: "linear", stage: "prompt" },
+      1,
+      replies,
+    );
+    expect(acks).toEqual([]);
+    expect(sessions.calls.map((call) => call.method)).toEqual(["deliver"]);
+  });
+
+  test("a Slack delivery never touches Linear", async () => {
+    const sessions = new FakeSessions();
+    const acks: string[] = [];
+    const names: string[] = [];
+    const replies = {
+      acknowledge: async (sessionId: string) => {
+        acks.push(sessionId);
+        return { kind: "sent" as const, activityId: null };
+      },
+      answer: async () => ({ kind: "sent" as const, activityId: null }),
+    };
+    await accept(
+      envWith(sessions, ["session-1"], {
+        LINEAR_OAUTH: {
+          getByName: (name: string) => {
+            names.push(name);
+            return {
+              status: async () => ({
+                accessToken: "at",
+                refreshToken: "rt",
+                expiresIn: 1,
+                issuedAt: 0,
+                scope: "",
+                organizationId: null,
+              }),
+            };
+          },
+        },
+      }),
+      { ...message, stage: "start" },
+      1,
+      replies,
+    );
+    expect(acks).toEqual([]);
+    expect(names).toEqual([]);
+  });
+
   test("a message reaches deliver with the indexed session id", async () => {
     const sessions = new FakeSessions();
     await accept(envWith(sessions), message, 1234);

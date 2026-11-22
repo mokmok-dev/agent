@@ -73,6 +73,7 @@ export function parseDiscordInteraction(body: unknown): AdapterResult {
     authorId: authorOf(interaction),
     text,
     replyTo: { channelId, threadId: channelId },
+    stage: "message",
   };
   return { kind: "event", event: message };
 }
