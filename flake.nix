@@ -113,6 +113,7 @@
             packages = with pkgs; [
               ni
               bun
+              skills
             ];
           };
 

@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "skills": {
+    "mutation-test-loop": {
+      "source": "mizchi/mutator",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/mutation-test-loop/SKILL.md",
+      "computedHash": "9c9f985fff92cc6fdf26326620fbb1a3cbb6d4cf001a1537e806185f2fe0aaa3"
+    }
+  }
+}
