@@ -88,6 +88,24 @@ describe("the transition table", () => {
     ]);
   });
 
+  test("a dispatched turn can fail before it runs, because a dispatch itself can fail", () => {
+    const result = transitionTurn(
+      turn({ status: "dispatched" }),
+      session(),
+      { status: "failed", error: "no key" },
+      60,
+    );
+    expect(result).toEqual({
+      ok: true,
+      next: expect.objectContaining({ status: "failed", error: "no key" }),
+    });
+  });
+
+  test("a queued turn cannot jump straight to failed, so a dispatch is always the first step", () => {
+    const result = transitionTurn(turn(), session(), { status: "failed", error: "x" }, 60);
+    expect(result).toEqual({ ok: false, reason: "illegal-transition" });
+  });
+
   test("the terminal statuses are the ones with no outgoing edge", () => {
     const computed = (Object.keys(TURN_TRANSITIONS) as TurnStatus[]).filter(
       (status) => TURN_TRANSITIONS[status].length === 0,

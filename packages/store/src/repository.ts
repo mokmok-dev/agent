@@ -128,14 +128,38 @@ export class SessionRepository {
     update: TurnUpdate,
     now: number,
   ): Promise<TransitionOutcome> {
-    const session = await this.session(sessionId);
-    if (session === undefined) throw new MissingSession(sessionId);
-    const turn = await this.#storage.get<Turn>(turnKey(sessionId, turnId));
-    if (turn === undefined) return { ok: false, reason: "not-found" };
-    const result = transitionTurn(turn, session, update, now);
-    if (!result.ok) return result;
-    await this.#storage.put(turnKey(sessionId, turnId), result.next);
-    return result;
+    return this.#serialized(async () => {
+      const session = await this.session(sessionId);
+      if (session === undefined) throw new MissingSession(sessionId);
+      const turn = await this.#storage.get<Turn>(turnKey(sessionId, turnId));
+      if (turn === undefined) return { ok: false, reason: "not-found" } as const;
+      const result = transitionTurn(turn, session, update, now);
+      if (!result.ok) return result;
+      await this.#storage.put(turnKey(sessionId, turnId), result.next);
+      return result;
+    });
+  }
+
+  /**
+   * Claim a queued turn for one runner. The read and the write happen under one
+   * lock, so two callers racing for the same turn cannot both see `queued`; one
+   * gets the claim and the other is told it lost.
+   */
+  async claimTurn(sessionId: string, turnId: string, now: number): Promise<TransitionOutcome> {
+    return this.transition(sessionId, turnId, { status: "dispatched" }, now);
+  }
+
+  /**
+   * Run one read-modify-write at a time. A Durable Object serializes calls to
+   * one object, so a queue here is the same guarantee in a test host, and it
+   * keeps a claim atomic without a second storage primitive.
+   */
+  #queue: Promise<unknown> = Promise.resolve();
+
+  #serialized<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.#queue.then(work, work);
+    this.#queue = run.catch(() => undefined);
+    return run;
   }
 
   async bindAgentSession(sessionId: string, acpSessionId: string, gatewayId: string, now: number) {

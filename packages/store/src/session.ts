@@ -61,7 +61,8 @@ export type Turn = {
 
 export const TURN_TRANSITIONS: Record<TurnStatus, readonly TurnStatus[]> = {
   queued: ["dispatched", "cancelled"],
-  dispatched: ["running", "cancelled", "queued"],
+  // A dispatch may fail before the agent ever runs, so `failed` is legal here.
+  dispatched: ["running", "failed", "cancelled", "queued"],
   running: ["completed", "failed", "cancelled"],
   completed: [],
   failed: [],

@@ -17,6 +17,7 @@ import {
   type RoutingPolicy,
   type RoutingRequest,
 } from "@agent/capability";
+import type { TurnRunner } from "./turn-runner.ts";
 
 /** What a delivery asks the router for. An empty request takes the policy's choice. */
 export type DeliveryRequest = RoutingRequest;
@@ -38,6 +39,13 @@ export type RouteDeps = {
 type RouteResult =
   | { ok: true; session: Session; selection: SessionSelection }
   | { ok: false; reason: "unroutable"; refusal: string };
+
+/** How one turn ended. */
+export type TurnRunOutcome =
+  | { kind: "answered"; text: string }
+  | { kind: "failed"; error: string }
+  | { kind: "not-queued"; status: Turn["status"] }
+  | { kind: "missing" };
 
 /**
  * One conversation's records: its route, its turns, and the idempotency keys
@@ -128,6 +136,60 @@ export class SessionService {
 
   transition(sessionId: string, turnId: string, update: TurnUpdate, now: number) {
     return this.#repo.transition(sessionId, turnId, update, now);
+  }
+
+  /**
+   * Run one accepted turn to a terminal state.
+   *
+   * The turn moves to `dispatched` before the agent sees it, so a crash leaves
+   * evidence rather than a turn that looks queued forever, and the claim is a
+   * compare-and-set: two deliveries racing for the same turn see one winner.
+   * The runner's answer completes the turn, and a runner that cannot answer
+   * fails it with the reason it gave.
+   */
+  async run(
+    sessionId: string,
+    turnId: string,
+    conversationId: string,
+    model: { provider: string; modelId: string },
+    runner: TurnRunner,
+    now: number,
+  ): Promise<TurnRunOutcome> {
+    const claimed = await this.#repo.claimTurn(sessionId, turnId, now);
+    if (!claimed.ok) {
+      const current = (await this.#repo.turns(sessionId)).find((it) => it.id === turnId);
+      return current === undefined
+        ? { kind: "missing" }
+        : { kind: "not-queued", status: current.status };
+    }
+    const turn = claimed.next;
+    const result = await runner.run({
+      sessionId,
+      conversationId,
+      prompt: turn.prompt,
+      operationId: turn.idempotencyKey,
+      model,
+      now,
+    });
+    return result.kind === "answered"
+      ? this.#complete(sessionId, turnId, result.text, now)
+      : this.#fail(sessionId, turnId, result.reason, now);
+  }
+
+  async #complete(sessionId: string, turnId: string, text: string, now: number) {
+    await this.#repo.transition(sessionId, turnId, { status: "running" }, now);
+    await this.#repo.transition(
+      sessionId,
+      turnId,
+      { status: "completed", stopReason: "stop" },
+      now,
+    );
+    return { kind: "answered" as const, text };
+  }
+
+  async #fail(sessionId: string, turnId: string, error: string, now: number) {
+    await this.#repo.transition(sessionId, turnId, { status: "failed", error }, now);
+    return { kind: "failed" as const, error };
   }
 
   bind(sessionId: string, acpSessionId: string, gatewayId: string, now: number) {

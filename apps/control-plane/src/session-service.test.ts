@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { SessionService } from "./session-service.ts";
+import { unavailableRunner } from "./turn-runner.ts";
 import { indexKey } from "./thread-index.ts";
 import { SessionObject } from "./session-do.ts";
 import { ThreadIndexObject } from "./thread-index-do.ts";
@@ -39,6 +40,8 @@ const thread: ThreadRef = {
   channelId: "C1",
   threadId: "1.5",
 };
+
+const model = { provider: "cloudflare-workers-ai", modelId: "m" };
 
 const service = () => {
   const host = new Host();
@@ -83,6 +86,162 @@ describe("thread index", () => {
     await index.forget(thread);
     expect(host.values.has(indexKey(thread))).toBe(false);
     expect(await index.lookup(thread)).toBe("slack:T1:C1:1.5");
+  });
+});
+
+describe("running a turn", () => {
+  const queued = async (sessions: ReturnType<typeof service>["service"]) => {
+    const outcome = await sessions.deliver("s1", thread, "hello", "evt-1", 10);
+    if (outcome.kind === "refused") throw new Error(outcome.refusal);
+    return outcome.turn;
+  };
+
+  const runner = (
+    result: { kind: "answered"; text: string } | { kind: "unanswered"; reason: string },
+  ) => {
+    const inputs: unknown[] = [];
+    return {
+      inputs,
+      executions: () => inputs.length,
+      run: async (input: unknown) => {
+        inputs.push(input);
+        return result;
+      },
+    };
+  };
+
+  test("an answered turn moves to completed and returns the text", async () => {
+    const { service: sessions } = service();
+    const turn = await queued(sessions);
+    const answer = runner({ kind: "answered", text: "the answer" });
+    const outcome = await sessions.run("s1", turn.id, "conv-1", model, answer, 20);
+    expect(outcome).toEqual({ kind: "answered", text: "the answer" });
+    expect((await sessions.turns("s1"))[0]?.status).toBe("completed");
+  });
+
+  test("the runner sees the prompt, the operation id, and the chosen model", async () => {
+    const { service: sessions } = service();
+    const turn = await queued(sessions);
+    const answer = runner({ kind: "answered", text: "x" });
+    await sessions.run("s1", turn.id, "conv-9", model, answer, 20);
+    expect(answer.inputs[0]).toEqual({
+      sessionId: "s1",
+      conversationId: "conv-9",
+      prompt: "hello",
+      operationId: "evt-1",
+      model,
+      now: 20,
+    });
+  });
+
+  test("the runner runs after the turn is dispatched, so a crash leaves evidence", async () => {
+    const { service: sessions } = service();
+    const turn = await queued(sessions);
+    let statusWhenRun: string | undefined;
+    const observed = {
+      run: async () => {
+        statusWhenRun = (await sessions.turns("s1"))[0]?.status;
+        return { kind: "answered" as const, text: "x" };
+      },
+    };
+    await sessions.run("s1", turn.id, "c", model, observed, 20);
+    expect(statusWhenRun).toBe("dispatched");
+  });
+
+  test("an unanswered run fails the turn with the runner's reason", async () => {
+    const { service: sessions } = service();
+    const turn = await queued(sessions);
+    const outcome = await sessions.run(
+      "s1",
+      turn.id,
+      "c",
+      model,
+      runner({ kind: "unanswered", reason: "no key" }),
+      20,
+    );
+    expect(outcome).toEqual({ kind: "failed", error: "no key" });
+    const [run] = await sessions.turns("s1");
+    expect(run?.status).toBe("failed");
+    expect(run?.error).toBe("no key");
+  });
+
+  test("a turn that already ran is not run again", async () => {
+    const { service: sessions } = service();
+    const turn = await queued(sessions);
+    const answer = runner({ kind: "answered", text: "x" });
+    await sessions.run("s1", turn.id, "c", model, answer, 20);
+    const again = await sessions.run("s1", turn.id, "c", model, answer, 21);
+    expect(again).toEqual({ kind: "not-queued", status: "completed" });
+    expect(answer.inputs).toHaveLength(1);
+  });
+
+  test("a completed turn records the reason the model stopped", async () => {
+    const { service: sessions } = service();
+    const turn = await queued(sessions);
+    await sessions.run("s1", turn.id, "c", model, runner({ kind: "answered", text: "x" }), 20);
+    expect((await sessions.turns("s1"))[0]?.stopReason).toBe("stop");
+  });
+
+  test("a turn that is not queued is refused without running", async () => {
+    const { service: sessions } = service();
+    const turn = await queued(sessions);
+    await sessions.transition("s1", turn.id, { status: "cancelled" }, 11);
+    const answer = runner({ kind: "answered", text: "x" });
+    const outcome = await sessions.run("s1", turn.id, "c", model, answer, 20);
+    expect(outcome).toEqual({ kind: "not-queued", status: "cancelled" });
+    expect(answer.inputs).toEqual([]);
+  });
+
+  test("a turn id the session does not have is missing", async () => {
+    const { service: sessions } = service();
+    await queued(sessions);
+    const outcome = await sessions.run(
+      "s1",
+      "nope",
+      "c",
+      model,
+      runner({ kind: "answered", text: "x" }),
+      20,
+    );
+    expect(outcome).toEqual({ kind: "missing" });
+  });
+
+  test("a cancelled turn is refused before the runner is asked", async () => {
+    const { service: sessions } = service();
+    const turn = await queued(sessions);
+    await sessions.transition("s1", turn.id, { status: "cancelled" }, 11);
+    const answer = runner({ kind: "answered", text: "x" });
+    expect(await sessions.run("s1", turn.id, "c", model, answer, 20)).toEqual({
+      kind: "not-queued",
+      status: "cancelled",
+    });
+    expect(answer.executions()).toBe(0);
+  });
+
+  test("a turn a race already claimed is not run twice", async () => {
+    const { service: sessions } = service();
+    const turn = await queued(sessions);
+    const answer = runner({ kind: "answered", text: "x" });
+    const [first, second] = await Promise.all([
+      sessions.run("s1", turn.id, "c", model, answer, 20),
+      sessions.run("s1", turn.id, "c", model, answer, 20),
+    ]);
+    expect([first.kind, second.kind].sort()).toEqual(["answered", "not-queued"]);
+    expect(answer.executions()).toBe(1);
+  });
+});
+
+describe("the runner a deployment without an agent gets", () => {
+  test("refuses every turn and names the reason, so the turn fails rather than hangs", async () => {
+    const outcome = await unavailableRunner("no agent is configured").run({
+      sessionId: "s",
+      conversationId: "c",
+      prompt: "hi",
+      operationId: "o",
+      model,
+      now: 0,
+    });
+    expect(outcome).toEqual({ kind: "unanswered", reason: "no agent is configured" });
   });
 });
 

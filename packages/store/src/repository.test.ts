@@ -376,6 +376,29 @@ describe("storage details", () => {
     expect(await storage.get(idemKey("s1", "once"))).toEqual(result.turn);
   });
 
+  test("a claim takes a queued turn exactly once, even when two callers race", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    const { turn } = await repo.appendTurn("s1", "hello", "evt-1", 6);
+    const [first, second] = await Promise.all([
+      repo.claimTurn("s1", turn.id, 7),
+      repo.claimTurn("s1", turn.id, 7),
+    ]);
+    expect([first.ok, second.ok].sort()).toEqual([false, true]);
+    expect((await repo.turns("s1"))[0]?.status).toBe("dispatched");
+  });
+
+  test("a claim on a turn that is not queued loses", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    const { turn } = await repo.appendTurn("s1", "hello", "evt-1", 6);
+    await repo.transition("s1", turn.id, { status: "cancelled" }, 7);
+    expect(await repo.claimTurn("s1", turn.id, 8)).toEqual({
+      ok: false,
+      reason: "already-terminal",
+    });
+  });
+
   test("a transition with no turn but a session reports not-found", async () => {
     const { repo } = repository();
     await repo.createSession("s1", thread, 0);
