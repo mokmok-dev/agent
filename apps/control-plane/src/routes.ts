@@ -8,11 +8,32 @@ import {
   type LinearOAuthConfig,
 } from "@agent/adapters";
 
+/** The provider secrets and ids, as the platform exposes them. */
+export type ProviderEnv = {
+  SLACK_SIGNING_SECRET: string;
+  SLACK_BOT_USER_ID: string;
+  DISCORD_PUBLIC_KEY: string;
+  LINEAR_WEBHOOK_SECRET: string;
+};
+
+/** The nested config the adapters take. */
 export type ProviderConfig = {
   slack: { signingSecret: string; botUserId: string };
   discord: { publicKey: string };
   linear: { webhookSecret: string };
 };
+
+/**
+ * The flat platform names as the nested config the adapters read. Without this
+ * the Worker would look for `env.slack`, which a Worker never has.
+ */
+export function providerConfigOf(env: ProviderEnv): ProviderConfig {
+  return {
+    slack: { signingSecret: env.SLACK_SIGNING_SECRET, botUserId: env.SLACK_BOT_USER_ID },
+    discord: { publicKey: env.DISCORD_PUBLIC_KEY },
+    linear: { webhookSecret: env.LINEAR_WEBHOOK_SECRET },
+  };
+}
 
 /**
  * The Linear OAuth application, as the platform exposes it: two secrets and a

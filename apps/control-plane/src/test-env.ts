@@ -1,10 +1,11 @@
 import type { Env } from "./worker.ts";
 
-/** The provider config every test shares. */
+/** The provider secrets every test shares, in the platform's flat names. */
 export const CONFIG = {
-  slack: { signingSecret: "shhh", botUserId: "UBOT" },
-  discord: { publicKey: "aa" },
-  linear: { webhookSecret: "linear" },
+  SLACK_SIGNING_SECRET: "shhh",
+  SLACK_BOT_USER_ID: "UBOT",
+  DISCORD_PUBLIC_KEY: "aa",
+  LINEAR_WEBHOOK_SECRET: "linear",
 };
 
 /** The Linear OAuth application a test authorizes against. */
@@ -15,7 +16,7 @@ export const OAUTH = {
 };
 
 /**
- * An `Env` with the provider config and the OAuth application filled in. A test
+ * An `Env` with the provider secrets and the OAuth application filled in. A test
  * overrides only the bindings it is exercising.
  */
 export function envWith(overrides: Partial<Env> = {}): Env {

@@ -31,9 +31,10 @@ const envWith = (
 ): Env => {
   const lookups: ThreadRef[] = [];
   const env: Env = {
-    slack: { signingSecret: "s", botUserId: "B" },
-    discord: { publicKey: "p" },
-    linear: { webhookSecret: "l" },
+    SLACK_SIGNING_SECRET: "s",
+    SLACK_BOT_USER_ID: "B",
+    DISCORD_PUBLIC_KEY: "p",
+    LINEAR_WEBHOOK_SECRET: "l",
     ...OAUTH,
     LINEAR_OAUTH: { getByName: () => ({}) },
     THREAD_INDEX: {

@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { errorResponse, handleWebhook, rawRequestOf, responseFor, routeOf } from "./routes.ts";
+import {
+  errorResponse,
+  handleWebhook,
+  providerConfigOf,
+  rawRequestOf,
+  responseFor,
+  routeOf,
+} from "./routes.ts";
 import worker, { accept, deliveryBody, fetch, type Env } from "./worker.ts";
 import { AdapterError, type AdapterResult } from "@agent/adapters";
 import type { ThreadRef, Turn } from "@agent/store";
@@ -7,10 +14,49 @@ import { signSha256 } from "@agent/adapters";
 import { envWith, OAUTH } from "./test-env.ts";
 
 const config = {
-  slack: { signingSecret: "shhh", botUserId: "UBOT" },
-  discord: { publicKey: "aa" },
-  linear: { webhookSecret: "linear" },
+  SLACK_SIGNING_SECRET: "shhh",
+  SLACK_BOT_USER_ID: "UBOT",
+  DISCORD_PUBLIC_KEY: "aa",
+  LINEAR_WEBHOOK_SECRET: "linear",
 };
+
+describe("the platform env", () => {
+  test("the flat names a Worker has become the nested config the adapters read", () => {
+    expect(providerConfigOf(config)).toEqual({
+      slack: { signingSecret: "shhh", botUserId: "UBOT" },
+      discord: { publicKey: "aa" },
+      linear: { webhookSecret: "linear" },
+    });
+  });
+
+  test("the flat names reach the adapter: an unsigned Slack body is a 401, not a crash", async () => {
+    const response = await fetch(
+      new Request("https://x/webhooks/slack", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "url_verification", challenge: "abc" }),
+      }),
+      envWith(),
+    );
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: { message: "missing Slack timestamp header" },
+    });
+  });
+
+  test("a wrong signature is a 401 through the Worker, not a crash on a missing field", async () => {
+    const response = await fetch(
+      new Request("https://x/webhooks/linear", {
+        method: "POST",
+        headers: { "x-linear-signature": "bad" },
+        body: "{}",
+      }),
+      envWith(),
+    );
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: { message: "missing Linear signature" } });
+  });
+});
 
 describe("routeOf", () => {
   test("maps each webhook path and health", () => {
@@ -67,7 +113,12 @@ describe("handleWebhook", () => {
         text: "<@UBOT> hi",
       },
     };
-    const result = await handleWebhook("slack", await slackRequest(body, 100), config, 100);
+    const result = await handleWebhook(
+      "slack",
+      await slackRequest(body, 100),
+      providerConfigOf(config),
+      100,
+    );
     expect(result.kind).toBe("event");
   });
 
@@ -75,7 +126,7 @@ describe("handleWebhook", () => {
     const error = await handleWebhook(
       "slack",
       { method: "GET", headers: {}, body: "" },
-      config,
+      providerConfigOf(config),
       0,
     ).catch((reason: unknown) => reason);
     expect(error).toBeInstanceOf(AdapterError);
@@ -86,7 +137,7 @@ describe("handleWebhook", () => {
     const error = await handleWebhook(
       "health",
       { method: "POST", headers: {}, body: "{}" },
-      config,
+      providerConfigOf(config),
       0,
     ).catch((reason: unknown) => reason);
     expect((error as AdapterError).status).toBe(404);
@@ -575,7 +626,7 @@ describe("diagnostics", () => {
     const error = await handleWebhook(
       "slack",
       { method: "PUT", headers: {}, body: "" },
-      config,
+      providerConfigOf(config),
       0,
     ).catch((reason: unknown) => reason);
     expect((error as AdapterError).message).toBe("only POST is accepted");
@@ -585,7 +636,7 @@ describe("diagnostics", () => {
     const error = await handleWebhook(
       "health",
       { method: "POST", headers: {}, body: "{}" },
-      config,
+      providerConfigOf(config),
       0,
     ).catch((reason: unknown) => reason);
     expect((error as AdapterError).message).toBe("no adapter for this route");
@@ -595,7 +646,7 @@ describe("diagnostics", () => {
     const result = await handleWebhook(
       "discord",
       { method: "POST", headers: {}, body: "{}" },
-      config,
+      providerConfigOf(config),
       0,
     ).catch((reason: unknown) => reason);
     expect((result as AdapterError).status).toBe(401);
@@ -605,7 +656,7 @@ describe("diagnostics", () => {
     const result = await handleWebhook(
       "linear",
       { method: "POST", headers: {}, body: "{}" },
-      config,
+      providerConfigOf(config),
       0,
     ).catch((reason: unknown) => reason);
     expect((result as AdapterError).message).toBe("missing Linear signature");

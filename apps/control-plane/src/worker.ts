@@ -8,7 +8,8 @@ import {
   responseFor,
   routeOf,
   type LinearOAuthEnv,
-  type ProviderConfig,
+  providerConfigOf,
+  type ProviderEnv,
 } from "./routes.ts";
 import { finishLogin, loginStatus, startLogin, type LinearOAuthPort } from "./linear-oauth-port.ts";
 import { linearReplies, type LinearReplyPort } from "./linear-reply.ts";
@@ -18,7 +19,7 @@ export interface Namespace {
 }
 
 /** The bindings the Worker needs. Names match `wrangler.toml`. */
-export interface Env extends ProviderConfig, LinearOAuthEnv {
+export interface Env extends ProviderEnv, LinearOAuthEnv {
   SESSIONS: Namespace;
   THREAD_INDEX: Namespace;
   LINEAR_OAUTH: Namespace;
@@ -75,7 +76,7 @@ export async function fetch(request: Request, env: Env, now = Date.now()): Promi
     const result = await handleWebhook(
       route.kind,
       await rawRequestOf(request),
-      env,
+      providerConfigOf(env),
       Math.floor(now / 1000),
     );
     if (result.kind !== "event") {

@@ -12,12 +12,10 @@ function namespace(build: (host: StorageHost) => unknown, root: string): Namespa
 
 const root = process.env.STATE_DIR ?? ".agent-state";
 export const env: Env = {
-  slack: {
-    signingSecret: process.env.SLACK_SIGNING_SECRET ?? "dev-slack-secret",
-    botUserId: process.env.SLACK_BOT_USER_ID ?? "UBOT",
-  },
-  discord: { publicKey: process.env.DISCORD_PUBLIC_KEY ?? "" },
-  linear: { webhookSecret: process.env.LINEAR_WEBHOOK_SECRET ?? "dev-linear-secret" },
+  SLACK_SIGNING_SECRET: process.env.SLACK_SIGNING_SECRET ?? "dev-slack-secret",
+  SLACK_BOT_USER_ID: process.env.SLACK_BOT_USER_ID ?? "UBOT",
+  DISCORD_PUBLIC_KEY: process.env.DISCORD_PUBLIC_KEY ?? "",
+  LINEAR_WEBHOOK_SECRET: process.env.LINEAR_WEBHOOK_SECRET ?? "dev-linear-secret",
   LINEAR_CLIENT_ID: process.env.LINEAR_CLIENT_ID ?? "",
   LINEAR_CLIENT_SECRET: process.env.LINEAR_CLIENT_SECRET ?? "",
   LINEAR_REDIRECT_URI:
