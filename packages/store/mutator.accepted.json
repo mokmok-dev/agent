@@ -1,0 +1,6 @@
+{
+  "26rfs5qvbf1": {
+    "reason": "equivalent: a missing session has no turn records, so the turn guard below returns undefined and the caller sees the same answer with or without the earlier session check.",
+    "where": "src/repository.ts:122:9 session === undefined -> false"
+  }
+}

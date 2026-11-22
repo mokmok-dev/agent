@@ -1,22 +1,54 @@
 {
+  "16x8sp1hkbj": {
+    "reason": "equivalent: the mutated code is inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun cannot construct either, so no local test can reach it. The integration is proven by the deployment, not here.",
+    "where": "src/pi-runtime.ts:60:31 false -> true"
+  },
   "1g6r9c17sws": {
     "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
     "where": "src/disk-host.ts:13:31 \"utf8\" -> \"\""
+  },
+  "1gln0a8j3jw": {
+    "reason": "equivalent: a refused delivery carries no run and created no turn, so reading its run yields undefined and runNext finds nothing to run; the guards are defensive and the tests pin the observable results, no reply field and the runner never called.",
+    "where": "src/session-do.ts:46:26 \"refused\" -> \"\""
+  },
+  "1lup8lt6hqe": {
+    "reason": "equivalent: the mutated code is inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun cannot construct either, so no local test can reach it. The integration is proven by the deployment, not here.",
+    "where": "src/pi-runtime.ts:42:92 { const storage = await openDurableObjectSqliteStorage(stat… -> {}"
+  },
+  "1nf0vzbbd88": {
+    "reason": "equivalent: a refused delivery carries no run and created no turn, so reading its run yields undefined and runNext finds nothing to run; the guards are defensive and the tests pin the observable results, no reply field and the runner never called.",
+    "where": "src/worker.ts:137:24 \"refused\" -> \"\""
   },
   "1omqkceg0f": {
     "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
     "where": "src/disk-host.ts:19:11 { return undefined; } -> {}"
   },
+  "1wamfoqvgt1": {
+    "reason": "equivalent: a refused delivery carries no run and created no turn, so reading its run yields undefined and runNext finds nothing to run; the guards are defensive and the tests pin the observable results, no reply field and the runner never called.",
+    "where": "src/session-do.ts:46:9 outcome.kind === \"refused\" -> false"
+  },
+  "1yxkyyqlsbi": {
+    "reason": "equivalent: a refused delivery carries no run and created no turn, so reading its run yields undefined and runNext finds nothing to run; the guards are defensive and the tests pin the observable results, no reply field and the runner never called.",
+    "where": "src/worker.ts:137:7 outcome.kind === \"refused\" -> false"
+  },
   "2bkg5m5thrn": {
     "reason": "The final return handles linear, and the Discord test covers the branch above it, so a mutant that makes the Discord comparison false only falls through to an adapter that refuses the same unsigned body with the same 401.",
     "where": "src/worker.ts:89:19 { return errorResponse(error); } -> {}"
   },
-  "2g681ouj2qz": {
-    "reason": "The non-event branch only carries a challenge or an ignored delivery, and both answer 200, so dropping the status from the response is unobservable.",
-    "where": "src/worker.ts:78:34 { status } -> {}"
-  },
   "j4hc1r8ola": {
-    "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
-    "where": "src/disk-host.ts:14:11 { return undefined; } -> {}"
+    "reason": "Reading a property an object does not have yields undefined either way, so the presence check and the direct read agree for both branches.",
+    "where": "src/disk-host.ts:9:11 { return undefined; } -> {}"
+  },
+  "ow6bfysfqa": {
+    "reason": "equivalent: the mutated code is inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun cannot construct either, so no local test can reach it. The integration is proven by the deployment, not here.",
+    "where": "src/pi-runtime.ts:44:41 { models: modelsFor(env), registry: createRegistry(), conte… -> {}"
+  },
+  "vjqvy4t7fb": {
+    "reason": "equivalent: the mutated code is inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun cannot construct either, so no local test can reach it. The integration is proven by the deployment, not here.",
+    "where": "src/pi-runtime.ts:24:29 open(state, env) -> undefined"
+  },
+  "yz5xarkywe": {
+    "reason": "Reading a property an object does not have yields undefined either way, so a presence check and a direct read agree on both branches.",
+    "where": "src/pi-runtime.ts:51:31 false -> undefined"
   }
 }

@@ -112,6 +112,18 @@ export class SessionRepository {
     return nextQueued(await this.turns(sessionId));
   }
 
+  /**
+   * The oldest queued turn together with the session that owns it. The two come
+   * from one read, so a caller cannot see a turn whose route it then has to
+   * look up and hope exists.
+   */
+  async nextWork(sessionId: string): Promise<{ turn: Turn; session: Session } | undefined> {
+    const session = await this.session(sessionId);
+    if (session === undefined) return undefined;
+    const turn = nextQueued(await this.turns(sessionId));
+    return turn === undefined ? undefined : { turn, session };
+  }
+
   async activeTurn(sessionId: string): Promise<Turn | undefined> {
     const turns = await this.turns(sessionId);
     const live = turns.find((turn) => turn.status === "running" || turn.status === "dispatched");

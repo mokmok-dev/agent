@@ -6,6 +6,7 @@ import { SessionObject } from "./session-do.ts";
 import { ThreadIndexObject } from "./thread-index-do.ts";
 import { oauthConfigOf } from "./routes.ts";
 import type { AccessToken, Completed } from "./linear-oauth-do.ts";
+import { piRunnerFor } from "./pi-runtime.ts";
 import { fetch as handle, type Env } from "./worker.ts";
 
 /**
@@ -19,7 +20,15 @@ export class SessionDurableObject extends DurableObject<Env> {
 
   constructor(state: DurableObjectState, env: Env) {
     super(state, env);
-    this.#object = new SessionObject(objectStorage(state.storage));
+    this.#object = new SessionObject(
+      objectStorage(state.storage),
+      undefined,
+      piRunnerFor(state, env),
+    );
+  }
+
+  accept(...args: Parameters<SessionObject["accept"]>) {
+    return this.#object.accept(...args);
   }
 
   deliver(...args: Parameters<SessionObject["deliver"]>) {

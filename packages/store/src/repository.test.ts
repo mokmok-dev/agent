@@ -469,3 +469,36 @@ describe("activeTurn", () => {
     expect((await repo.activeTurn("s1"))?.id).toBe("t2");
   });
 });
+
+describe("nextWork", () => {
+  test("returns the oldest queued turn with the session that owns it", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    const { turn } = await repo.appendTurn("s1", "first", "evt-1", 6);
+    const work = await repo.nextWork("s1");
+    expect(work?.turn.id).toBe(turn.id);
+    expect(work?.session.id).toBe("s1");
+  });
+
+  test("returns undefined for a session that does not exist", async () => {
+    const { repo } = repository();
+    // The mutant that treats a missing session as present reaches
+    // `session.id` and throws, so resolving without a throw is the signal.
+    await expect(repo.nextWork("missing")).resolves.toBeUndefined();
+  });
+
+  test("returns undefined when the session has no queued turn", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    expect(await repo.nextWork("s1")).toBeUndefined();
+  });
+
+  test("skips a turn that is already dispatched and takes the next queued one", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    const { turn: first } = await repo.appendTurn("s1", "first", "evt-1", 6);
+    await repo.transition("s1", first.id, { status: "dispatched" }, 7);
+    const { turn: second } = await repo.appendTurn("s1", "second", "evt-2", 8);
+    expect((await repo.nextWork("s1"))?.turn.id).toBe(second.id);
+  });
+});

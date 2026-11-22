@@ -12,7 +12,7 @@ import {
   type ProviderEnv,
 } from "./routes.ts";
 import { finishLogin, loginStatus, startLogin, type LinearOAuthPort } from "./linear-oauth-port.ts";
-import { linearReplies, type LinearReplyPort } from "./linear-reply.ts";
+import { linearReplies, type LinearReplyPort, type ReplyOutcome } from "./linear-reply.ts";
 
 export interface Namespace {
   getByName(name: string): unknown;
@@ -27,14 +27,23 @@ export interface Env extends ProviderEnv, LinearOAuthEnv {
 
 interface SessionRpc {
   active(sessionId: string): Promise<Turn | undefined>;
-  deliver(
+  /**
+   * A delivery either reaches a turn, which carries the run it produced, or is
+   * refused, which carries no run.
+   */
+  accept(
     sessionId: string,
     thread: ThreadRef,
     prompt: string,
     idempotencyKey: string,
     now: number,
   ): Promise<
-    | { kind: "accepted" | "replayed"; session: Session; turn: Turn }
+    | {
+        kind: "accepted" | "replayed";
+        session: Session;
+        turn: Turn;
+        run?: { kind: string; text?: string; error?: string };
+      }
     | { kind: "refused"; reason: string }
   >;
   transition(sessionId: string, turnId: string, update: TurnUpdate, now: number): Promise<unknown>;
@@ -114,11 +123,39 @@ export async function accept(
     if (active === undefined) return { kind: "refused", reason: "no-active-turn" };
     return sessions.transition(sessionId, active.id, { status: "cancelled" }, now);
   }
-  if (event.provider === "linear" && event.stage === "start") {
-    const port = replies ?? linearReplies(env.LINEAR_OAUTH.getByName("linear") as LinearOAuthPort);
+  const port =
+    event.provider === "linear"
+      ? (replies ?? linearReplies(env.LINEAR_OAUTH.getByName("linear") as LinearOAuthPort))
+      : undefined;
+  if (port !== undefined && event.stage === "start") {
     await port.acknowledge(event.thread.threadId, now);
   }
-  return sessions.deliver(sessionId, thread, event.text, event.eventId, now);
+  const outcome = await sessions.accept(sessionId, thread, event.text, event.eventId, now);
+  if (port === undefined) return outcome;
+  // A refusal is passed through as it is; a delivery that reached a turn
+  // carries the run its agent produced, which is what the reply is made of.
+  if (outcome.kind === "refused") return outcome;
+  const reply = await replyFor(port, event.thread.threadId, outcome.run, now);
+  return reply === undefined ? outcome : { ...outcome, reply };
+}
+
+/**
+ * Answer the thread with the agent's words. A turn that failed says so, because
+ * a silence looks like a hung agent; a turn that never ran returns `undefined`
+ * so a deployment with no runner does not send an empty answer.
+ */
+async function replyFor(
+  port: LinearReplyPort,
+  sessionId: string,
+  run: { kind: string; text?: string; error?: string } | undefined,
+  now: number,
+): Promise<ReplyOutcome | undefined> {
+  if (run === undefined) return undefined;
+  if (run.kind === "answered") return port.answer(sessionId, run.text ?? "", now);
+  if (run.kind === "failed") {
+    return port.answer(sessionId, `The run failed: ${run.error ?? "no reason given"}`, now);
+  }
+  return undefined;
 }
 
 export default { fetch };

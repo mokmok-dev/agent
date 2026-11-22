@@ -480,3 +480,88 @@ describe("index writes", () => {
     expect(host.writes).toBe(writes + 1);
   });
 });
+
+describe("the work a runner is handed", () => {
+  test("runNext takes the oldest queued turn and the route its session chose", async () => {
+    const { service: sessions } = service();
+    const delivered = await sessions.deliver("s1", thread, "hello", "evt-1", 10);
+    if (delivered.kind === "refused") throw new Error(delivered.refusal);
+    const turn = delivered.turn;
+    const seen: unknown[] = [];
+    const outcome = await sessions.runNext(
+      "s1",
+      {
+        run: async (input) => {
+          seen.push(input);
+          return { kind: "answered", text: "ok" };
+        },
+      },
+      20,
+    );
+    expect(outcome).toEqual({ kind: "answered", text: "ok" });
+    expect(seen[0]).toMatchObject({ sessionId: "s1", prompt: turn.prompt });
+  });
+
+  test("runNext does nothing when no turn is queued", async () => {
+    const { service: sessions } = service();
+    expect(
+      await sessions.runNext("s1", { run: async () => ({ kind: "answered", text: "" }) }, 1),
+    ).toBeUndefined();
+  });
+
+  test("runNext refuses to guess a model when the session was never routed", async () => {
+    const host = new Host();
+    const sessions = new SessionService(durableStorage(host));
+    // A turn written without a route is a state the router cannot produce; the
+    // runner must not invent a model for it.
+    await host.put("session:s1", {
+      id: "s1",
+      thread: { provider: "slack", workspaceId: "T", channelId: "C", threadId: "1" },
+      status: "active",
+      acpSessionId: null,
+      gatewayId: null,
+      selection: null,
+      conversationId: null,
+      turnSeq: 1,
+      createdAt: 0,
+      updatedAt: 0,
+    });
+    await host.put("turn:s1:t1", {
+      id: "t1",
+      sessionId: "s1",
+      seq: 1,
+      prompt: "hello",
+      status: "queued",
+      idempotencyKey: "evt-1",
+      stopReason: null,
+      error: null,
+      createdAt: 0,
+      updatedAt: 0,
+    });
+    expect(
+      sessions.runNext("s1", { run: async () => ({ kind: "answered", text: "" }) }, 1),
+    ).rejects.toThrow("has a turn but no route");
+  });
+});
+
+describe("the conversation a run uses", () => {
+  test("a routed session runs in the conversation the router stored", async () => {
+    const host = new Host();
+    const sessions = new SessionService(durableStorage(host), {
+      conversationOf: () => "conv-9",
+    });
+    await sessions.deliver("s1", thread, "hello", "evt-1", 10);
+    const seen: { conversationId?: string }[] = [];
+    await sessions.runNext(
+      "s1",
+      {
+        run: async (input) => {
+          seen.push(input);
+          return { kind: "answered", text: "ok" };
+        },
+      },
+      20,
+    );
+    expect(seen[0]?.conversationId).toBe("conv-9");
+  });
+});

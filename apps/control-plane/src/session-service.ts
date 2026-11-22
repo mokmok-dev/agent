@@ -176,6 +176,33 @@ export class SessionService {
       : this.#fail(sessionId, turnId, result.reason, now);
   }
 
+  /**
+   * Run the next queued turn of a session, if it has one. The model comes from
+   * the route the session already chose, so a turn never runs on a model the
+   * router did not pick.
+   */
+  async runNext(
+    sessionId: string,
+    runner: TurnRunner,
+    now: number,
+  ): Promise<TurnRunOutcome | undefined> {
+    const work = await this.#repo.nextWork(sessionId);
+    if (work === undefined) return undefined;
+    const { turn, session } = work;
+    // A queued turn exists only after its session was routed, so the route it
+    // carries here is the one the model comes from.
+    const selection = session.selection;
+    if (selection === null) throw new Error(`session ${sessionId} has a turn but no route`);
+    return this.run(
+      sessionId,
+      turn.id,
+      session.conversationId ?? sessionId,
+      selection.model,
+      runner,
+      now,
+    );
+  }
+
   async #complete(sessionId: string, turnId: string, text: string, now: number) {
     await this.#repo.transition(sessionId, turnId, { status: "running" }, now);
     await this.#repo.transition(

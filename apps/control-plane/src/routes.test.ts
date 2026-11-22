@@ -221,7 +221,7 @@ describe("fetch", () => {
       SESSIONS: {
         getByName: () => ({
           active: async () => ({ id: "t1", status: "running" }) as Turn,
-          deliver: async () => outcome,
+          accept: async () => outcome,
           transition: async () => ({ ok: true, next: { id: "t1", status: "cancelled" } }),
         }),
       },
@@ -424,7 +424,7 @@ describe("fetch", () => {
         };
       },
     };
-    base.env.SESSIONS = { getByName: () => ({ deliver: async () => ({ kind: "accepted" }) }) };
+    base.env.SESSIONS = { getByName: () => ({ accept: async () => ({ kind: "accepted" }) }) };
     const body = {
       type: "event_callback",
       event_id: "Ev9",
@@ -506,7 +506,7 @@ describe("fetch", () => {
       SESSIONS: {
         getByName: () => ({
           active: async () => undefined,
-          deliver: async () => ({}),
+          accept: async () => ({}),
           transition: async () => ({}),
         }),
       },
@@ -571,7 +571,7 @@ describe("accept", () => {
       SESSIONS: {
         getByName: () => ({
           active: async () => undefined,
-          deliver: async (...args: unknown[]) => {
+          accept: async (...args: unknown[]) => {
             seen.push(args);
             return { kind: "accepted" };
           },
@@ -593,7 +593,7 @@ describe("accept", () => {
       SESSIONS: {
         getByName: () => ({
           active: async () => undefined,
-          deliver: async (_id: string, thread: ThreadRef) => {
+          accept: async (_id: string, thread: ThreadRef) => {
             captured = thread;
             return { kind: "accepted" };
           },
