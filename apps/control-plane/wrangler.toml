@@ -7,9 +7,15 @@ compatibility_flags = ["nodejs_compat"]
 bindings = [
   { name = "SESSIONS", class_name = "SessionDurableObject" },
   { name = "THREAD_INDEX", class_name = "ThreadIndexDurableObject" },
-  { name = "GATEWAYS", class_name = "GatewayDurableObject" },
 ]
+
+# The sandbox target runs an agent in a Container attached to the session
+# object, on the durable_object scheduling policy so the object chooses the
+# image when it starts the sandbox. The local VM target needs none of this.
+[[containers]]
+class_name = "SessionDurableObject"
+scheduling_policy = "durable_object"
 
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["SessionDurableObject", "ThreadIndexDurableObject", "GatewayDurableObject"]
+new_sqlite_classes = ["SessionDurableObject", "ThreadIndexDurableObject"]

@@ -1,7 +1,6 @@
 import { AcpBridge } from "./bridge.ts";
 import { encodeEvent, EventLog, parseEdgeFrame } from "./edge.ts";
-import { spawnProcess } from "@agent/runtime";
-import { AgentSupervisor } from "@agent/runtime";
+import { AgentSupervisor, localVmTarget } from "@agent/runtime";
 
 const edgeUrl = process.env.EDGE_URL ?? "ws://localhost:8787/gateway";
 const agentCommand = process.env.AGENT_COMMAND ?? "bun";
@@ -10,8 +9,16 @@ const agentArgs = (process.env.AGENT_ARGS ?? "apps/gateway/src/agent/stdio-agent
   .filter(Boolean);
 const cwd = process.env.AGENT_CWD ?? process.cwd();
 
+/**
+ * Where this gateway hosts its agent. A gateway runs on the VM, so it always
+ * uses the VM target. The sandbox target is for a Durable Object that hosts
+ * the agent directly; both targets satisfy the same port, so the supervisor
+ * and the bridge below are identical either way.
+ */
+const target = localVmTarget();
+
 const log = new EventLog(500);
-const supervisor = new AgentSupervisor({ spawn: spawnProcess });
+const supervisor = new AgentSupervisor({ spawn: target.spawn });
 let socket: WebSocket | undefined;
 
 function flush(): void {
