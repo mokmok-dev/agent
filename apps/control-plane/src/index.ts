@@ -137,6 +137,16 @@ export class ThreadIndexDurableObject extends DurableObject<Env> {
   forget(thread: ThreadRef): Promise<void> {
     return this.#object.forget(thread);
   }
+
+  /** Record that a delivery created this session, so a waiting gateway finds it. */
+  remember(thread: ThreadRef, sessionId: string): Promise<void> {
+    return this.#object.remember(thread, sessionId);
+  }
+
+  /** The sessions a provider has seen, newest first, for a gateway asking for work. */
+  recent(provider: ThreadRef["provider"]): Promise<string[]> {
+    return this.#object.recent(provider);
+  }
 }
 
 export default {

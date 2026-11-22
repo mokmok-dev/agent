@@ -1328,6 +1328,25 @@ describe("the deployed entry exposes the gateway socket", () => {
     expect(source).toContain("this.#object.gateway(");
   });
 
+  test("every index method the Worker calls is exposed by the platform class", async () => {
+    // A Durable Object's RPC only sees methods on the class, so a method on the
+    // pure object is invisible until it is forwarded here. Omitting one is a
+    // production-only 500 that no pure test reaches, which is exactly how this
+    // was first missed.
+    const worker = await Bun.file(new URL("./worker.ts", import.meta.url)).text();
+    const entry = await Bun.file(new URL("./index.ts", import.meta.url)).text();
+    const rpc = /interface IndexRpc \{([\s\S]*?)\n\}/.exec(worker);
+    if (rpc === null) throw new Error("the Worker has no IndexRpc interface");
+    const methods = [...rpc[1]!.matchAll(/^\s+(\w+)\(/gm)].map((match) => match[1]!);
+    expect(methods.length).toBeGreaterThan(0);
+    const classBody = /export class ThreadIndexDurableObject[\s\S]*?\n\}/.exec(entry);
+    if (classBody === null) throw new Error("the entry has no ThreadIndexDurableObject");
+    for (const method of methods) {
+      // A declaration, not a mention: `recentRenamed(` must not satisfy `recent`.
+      expect(classBody[0]).toMatch(new RegExp("\\n  " + method + "\\("));
+    }
+  });
+
   test("the Worker's gateway route hands the request to the session object", async () => {
     const source = await Bun.file(new URL("./worker.ts", import.meta.url)).text();
     // The route resolves the session's object and forwards the upgrade to it;
