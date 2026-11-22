@@ -19,6 +19,15 @@ export const REVOKE_URL = "https://api.linear.app/oauth/revoke";
 /** The scopes this deployment asks for: read the workspace, and write agent activity. */
 export const DEFAULT_SCOPES = ["read", "write", "app:mentionable", "app:assignable"] as const;
 
+/**
+ * Whose identity the application acts as. An agent installs as the app, which
+ * is also what makes the app-only scopes above legal; a user actor with an
+ * app-only scope is refused by Linear.
+ */
+export type LinearActor = "app" | "user";
+
+export const DEFAULT_ACTOR: LinearActor = "app";
+
 /** The token an authorization returns, plus when it was issued. */
 export type LinearTokens = {
   accessToken: string;
@@ -36,6 +45,11 @@ export type LinearOAuthConfig = {
   /** The exact redirect URI registered on the Linear application. */
   redirectUri: string;
   scopes?: readonly string[];
+  /**
+   * Whose identity the token carries. Defaults to `app`, because the default
+   * scopes include app-only ones; use `user` only with user-only scopes.
+   */
+  actor?: LinearActor;
 };
 
 /**
@@ -48,6 +62,7 @@ export function authorizeUrl(config: LinearOAuthConfig, state: string): string {
   url.searchParams.set("client_id", config.clientId);
   url.searchParams.set("redirect_uri", config.redirectUri);
   url.searchParams.set("scope", (config.scopes ?? DEFAULT_SCOPES).join(","));
+  url.searchParams.set("actor", config.actor ?? DEFAULT_ACTOR);
   url.searchParams.set("state", state);
   return url.toString();
 }

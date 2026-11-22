@@ -4,6 +4,7 @@ import {
   authorizeUrl,
   callbackOf,
   bearer,
+  DEFAULT_ACTOR,
   DEFAULT_SCOPES,
   exchangeCode,
   exchangeForm,
@@ -67,6 +68,18 @@ describe("the consent URL", () => {
     expect(url.searchParams.get("client_id")).toBe("client-1");
     expect(url.searchParams.get("redirect_uri")).toBe(config.redirectUri);
     expect(url.searchParams.get("state")).toBe("state-1");
+  });
+
+  test("installs as the app, because the default scopes are app-only", () => {
+    const url = new URL(authorizeUrl(config, "s"));
+    expect(url.searchParams.get("actor")).toBe("app");
+    expect(DEFAULT_ACTOR).toBe("app");
+  });
+
+  test("a user actor is available for a deployment that only needs user scopes", () => {
+    const url = new URL(authorizeUrl({ ...config, actor: "user", scopes: ["read"] }, "s"));
+    expect(url.searchParams.get("actor")).toBe("user");
+    expect(url.searchParams.get("scope")).toBe("read");
   });
 
   test("asks for the documented scopes by default, comma separated", () => {
