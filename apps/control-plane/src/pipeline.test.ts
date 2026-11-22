@@ -9,7 +9,12 @@ import { SessionObject } from "./session-do.ts";
 import { ThreadIndexObject } from "./thread-index-do.ts";
 import { DiskHost } from "./disk-host.ts";
 import { routingPolicyOf } from "./routing.ts";
-import { fetch as controlPlane, type Env, type Namespace } from "./worker.ts";
+import {
+  fetch as controlPlane,
+  resolveGatewaySession,
+  type Env,
+  type Namespace,
+} from "./worker.ts";
 import { replyFor } from "./worker.ts";
 import { linearReplies as _ } from "./linear-reply.ts";
 import type { LinearOAuthPort } from "./linear-oauth-port.ts";
@@ -1366,5 +1371,39 @@ describe("the deployed entry exposes the gateway socket", () => {
     // The default agent is the one the VM gateway starts, so the stored route
     // names what actually answered rather than a stale default.
     expect(config).toMatch(/^AGENT_DEFAULT = "grok-build"$/m);
+  });
+});
+
+describe("resolving the session a gateway asked for", () => {
+  test("a named session is answered as given, so a gateway is never redirected", async () => {
+    const { dir, env } = await deployment();
+    try {
+      // A gateway serving one known session must reach that session. Resolving
+      // it through the index would hand it whichever session is newest instead,
+      // which is a different conversation.
+      await controlPlane(signedSession(sessionEvent("for the gateway")), env);
+      expect(await resolveGatewaySession(env, SESSION)).toBe(SESSION);
+      expect(await resolveGatewaySession(env, "linear:org:other:sess")).toBe(
+        "linear:org:other:sess",
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("auto resolves to the session with a queued turn, and to nothing when none waits", async () => {
+    const { dir, env, sessionObjects } = await deployment();
+    try {
+      // Nothing is queued yet, so there is no session for a gateway to serve.
+      expect(await resolveGatewaySession(env, "auto")).toBeUndefined();
+      await controlPlane(signedSession(sessionEvent("work")), env);
+      expect(await resolveGatewaySession(env, "auto")).toBe(SESSION);
+      // A claimed turn is no longer waiting, so a second gateway is not handed
+      // the prompt the first one is running.
+      await sessionObjects().transition(SESSION, "t1", { status: "dispatched" }, 2_000);
+      expect(await resolveGatewaySession(env, "auto")).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

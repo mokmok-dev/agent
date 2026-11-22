@@ -2,7 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { AgentRecorder, until } from "./recorder.ts";
 import { AcpBridge, errorMessage, type GatewayEvent } from "./bridge.ts";
 import { ProtocolError } from "@agent/protocol";
-import { encodeEvent, EventLog, helloFrame, identityOf, parseEdgeFrame } from "./edge.ts";
+import {
+  agentExitFailure,
+  agentStartFailureFor,
+  encodeEvent,
+  EventLog,
+  helloFrame,
+  identityOf,
+  parseEdgeFrame,
+} from "./edge.ts";
 import { decodeMessage } from "@agent/protocol";
 
 const bridge = (options: { mcpServers?: "array" | "record" } = {}) => {
@@ -983,5 +991,183 @@ describe("the hello a gateway sends on open", () => {
     expect(
       identityOf(JSON.stringify({ params: { type: "hello", sessionId: null } })),
     ).toBeUndefined();
+  });
+});
+
+describe("continuing a session the agent already holds", () => {
+  /**
+   * Begin a resume and answer `initialize` with the capability the agent states.
+   * The load request is the caller's to answer, so a test can refuse it as an
+   * agent with no such session would.
+   */
+  const begin = (harness: ReturnType<typeof bridge>, loadSession: boolean) => {
+    const resumed = harness.bridge.resume("linear:org:issue:sess", "acp-stored", "/work");
+    harness.agent.answer(1, { protocolVersion: 1, agentCapabilities: { loadSession } });
+    return resumed;
+  };
+
+  test("a stored id is loaded, so a second mention continues the conversation", async () => {
+    const harness = bridge();
+    const resumed = begin(harness, true);
+    await until(() => harness.agent.outbound().length === 2);
+    expect(harness.agent.last()).toEqual({
+      kind: "request",
+      id: 2,
+      method: "session/load",
+      params: { sessionId: "acp-stored", cwd: "/work", mcpServers: [] },
+    });
+    harness.agent.answer(2, {});
+    // The agent loaded the id it was given, so the caller keeps that id rather
+    // than inventing a second one.
+    expect(await resumed).toBe("acp-stored");
+  });
+
+  test("the capability a load reports replaces what was known", async () => {
+    const harness = bridge();
+    const resumed = begin(harness, true);
+    await until(() => harness.agent.outbound().length === 2);
+    harness.agent.answer(2, {
+      models: { currentModelId: "m", availableModels: [{ modelId: "m", name: "M" }] },
+    });
+    await resumed;
+    // A restarted agent may reach different models, so the route's model is
+    // checked against the list this run reports.
+    expect(harness.events).toEqual([
+      {
+        type: "session.capability",
+        sessionId: "linear:org:issue:sess",
+        capability: { currentModelId: "m", availableModels: ["m"], statesModels: true },
+      },
+    ]);
+  });
+
+  test("an agent that does not advertise loading is not asked", async () => {
+    const harness = bridge();
+    expect(await begin(harness, false)).toBeUndefined();
+    // Only `initialize` was sent: a `session/load` it does not implement would
+    // produce an error the turn would then carry as the reason it failed.
+    expect(harness.agent.outbound()).toHaveLength(1);
+  });
+
+  test("a load the agent refuses yields no session, so the caller opens a new one", async () => {
+    const harness = bridge();
+    const resumed = begin(harness, true);
+    await until(() => harness.agent.outbound().length === 2);
+    harness.agent.fail(2, -32602, "unknown session");
+    expect(await resumed).toBeUndefined();
+  });
+
+  test("an echo of the id is used, and its absence keeps the stored one", async () => {
+    const echoing = bridge();
+    const echoed = begin(echoing, true);
+    await until(() => echoing.agent.outbound().length === 2);
+    echoing.agent.answer(2, { sessionId: "acp-echoed" });
+    expect(await echoed).toBe("acp-echoed");
+  });
+});
+
+describe("the failure an agent exit owes a turn", () => {
+  test("the turn fails with the agent's own exit code", () => {
+    // A prompt response only arrives if the agent lives to send one. An agent
+    // that exits mid-turn leaves the turn running with nothing to settle it,
+    // so the exit becomes the reason the thread reads.
+    expect(agentExitFailure({ sessionId: "linear:org:issue:sess", turnId: "t1" }, 1)).toEqual({
+      type: "turn.failed",
+      sessionId: "linear:org:issue:sess",
+      turnId: "t1",
+      error: "the agent exited with code 1 before answering",
+    });
+  });
+
+  test("a zero exit is still a failure, because no answer was sent", () => {
+    // Exiting cleanly is not answering: the turn never got its prompt result,
+    // so the same failure applies and the code says which exit happened.
+    expect((agentExitFailure({ sessionId: "s", turnId: "t" }, 0) as { error: string }).error).toBe(
+      "the agent exited with code 0 before answering",
+    );
+  });
+
+  test("an agent killed by a signal names the signal instead of a made-up code", () => {
+    // The supervisor reports no code when a signal ended the process; reporting
+    // `null` as a number would claim an exit code that never existed.
+    expect(
+      (agentExitFailure({ sessionId: "s", turnId: "t" }, null) as { error: string }).error,
+    ).toBe("the agent exited from a signal before answering");
+  });
+});
+
+describe("what a load reply says the agent can run", () => {
+  const begin = (harness: ReturnType<typeof bridge>) => {
+    const resumed = harness.bridge.resume("linear:org:issue:sess", "acp-stored", "/work");
+    harness.agent.answer(1, { protocolVersion: 1, agentCapabilities: { loadSession: true } });
+    return resumed;
+  };
+
+  test("an initialize with no capabilities at all is not asked to load", async () => {
+    const harness = bridge();
+    // `agentCapabilities` absent is the same answer as a capability without
+    // `loadSession`: nothing says a stored session can be continued.
+    const resumed = harness.bridge.resume("linear:org:issue:sess", "acp-stored", "/work");
+    harness.agent.answer(1, { protocolVersion: 1 });
+    expect(await resumed).toBeUndefined();
+    expect(harness.agent.outbound()).toHaveLength(1);
+  });
+
+  test("models and settings are both read, so neither is assumed away", async () => {
+    const byModels = bridge();
+    const fromModels = begin(byModels);
+    await until(() => byModels.agent.outbound().length === 2);
+    byModels.agent.answer(2, {
+      models: { currentModelId: "m", availableModels: [{ modelId: "m", name: "M" }] },
+    });
+    await fromModels;
+    expect(byModels.events.at(-1)).toMatchObject({
+      capability: { currentModelId: "m", availableModels: ["m"], statesModels: true },
+    });
+
+    const byConfig = bridge();
+    const fromConfig = begin(byConfig);
+    await until(() => byConfig.agent.outbound().length === 2);
+    // A reply that names the model only in `configOptions` is the shape most
+    // agents use, so the load path reads it the same way `session/new` does.
+    byConfig.agent.answer(2, {
+      configOptions: [
+        { id: "model", name: "Model", category: "model", options: [{ value: "c", name: "C" }] },
+      ],
+    });
+    await fromConfig;
+    expect(byConfig.events.at(-1)).toMatchObject({
+      capability: { availableModels: ["c"], statesModels: true },
+    });
+  });
+});
+
+describe("a gateway whose agent never started", () => {
+  test("the turn fails with the start error, so the thread is not left waiting", () => {
+    // No process reads the prompt, so no prompt response ever comes. Without
+    // this the turn waits on an agent that does not exist.
+    expect(
+      agentStartFailureFor({ sessionId: "linear:org:issue:sess", turnId: "t1" }, "ENOENT"),
+    ).toEqual({
+      type: "turn.failed",
+      sessionId: "linear:org:issue:sess",
+      turnId: "t1",
+      error: "the agent could not start: ENOENT",
+    });
+  });
+
+  test("the reason states that the agent did not start, and names the error", () => {
+    expect(
+      agentStartFailureFor(
+        { sessionId: "s", turnId: "t" },
+        "ENOENT: no such file or directory, posix_spawn '/nonexistent'",
+      ),
+    ).toEqual({
+      type: "turn.failed",
+      sessionId: "s",
+      turnId: "t",
+      error:
+        "the agent could not start: ENOENT: no such file or directory, posix_spawn '/nonexistent'",
+    });
   });
 });

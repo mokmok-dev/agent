@@ -1,5 +1,13 @@
 import { AcpBridge } from "./bridge.ts";
-import { encodeEvent, EventLog, helloFrame, identityOf, parseEdgeFrame } from "./edge.ts";
+import {
+  agentExitFailure,
+  agentStartFailureFor,
+  encodeEvent,
+  EventLog,
+  helloFrame,
+  identityOf,
+  parseEdgeFrame,
+} from "./edge.ts";
 import { AgentSupervisor, localVmTarget } from "@agent/runtime";
 
 const edgeUrl = process.env.EDGE_URL ?? "ws://localhost:8787/gateway";
@@ -52,6 +60,21 @@ const bridge = new AcpBridge({
 });
 
 /**
+ * The turn this gateway is running, so an agent that dies mid-turn can fail it
+ * rather than leave the thread waiting on a process that is gone.
+ */
+let inFlight: { sessionId: string; turnId: string } | undefined;
+
+/**
+ * Why the agent could not be started, when that is what happened.
+ *
+ * A gateway with no agent answers no prompt, so every turn it receives has to
+ * fail with this reason. Recording it at startup is what turns a silent hang
+ * into a sentence the thread can read.
+ */
+let agentStartFailure: string | undefined;
+
+/**
  * Start the agent, reporting a binary that cannot run instead of dying.
  *
  * `spawn` throws synchronously when the command does not exist, and an
@@ -65,12 +88,20 @@ function startAgent(): void {
       onLine: (line) => bridge.receive(line),
       onExit: (code) => {
         socket?.send(JSON.stringify({ type: "gateway.agent_exited", code }));
+        // An agent that exits while a turn is running leaves that turn
+        // `running` forever: the prompt response never arrives, and nothing
+        // else settles it. The exit is the only evidence of what happened, so
+        // it becomes the turn's failure.
+        const turn = inFlight;
+        if (turn !== undefined) {
+          inFlight = undefined;
+          emit(agentExitFailure(turn, code));
+        }
       },
     });
   } catch (error) {
-    console.error(
-      `gateway: cannot start ${agentCommand}: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    agentStartFailure = error instanceof Error ? error.message : String(error);
+    console.error(`gateway: cannot start ${agentCommand}: ${agentStartFailure}`);
   }
 }
 
@@ -96,15 +127,45 @@ function adoptIdentity(text: string): boolean {
   return true;
 }
 
+/**
+ * The ACP session this prompt runs in.
+ *
+ * The control plane stores the id the gateway reported, and sends it with every
+ * later prompt, which is what makes a second mention continue the same agent
+ * conversation. A gateway that restarted has no session of its own, so it tries
+ * that id first. `session/load` is an agent's own decision: an agent that
+ * refuses it, or no longer has the session, earns a fresh `session/new` rather
+ * than a failed turn.
+ */
+async function adopt(frame: { sessionId: string; acpSessionId: string }): Promise<string> {
+  if (frame.acpSessionId !== "") {
+    const resumed = await bridge.resume(frame.sessionId, frame.acpSessionId, cwd);
+    if (resumed !== undefined) {
+      console.error(`gateway: resumed ACP session ${resumed}`);
+      return resumed;
+    }
+    console.error(`gateway: agent did not resume ${frame.acpSessionId}; opening a new session`);
+  }
+  return bridge.open(frame.sessionId, cwd);
+}
+
 async function handleCommand(text: string): Promise<void> {
   if (adoptIdentity(text)) return;
   const frame = parseEdgeFrame(text);
   if (frame === undefined) return;
   switch (frame.type) {
     case "prompt":
+      // A gateway whose agent never started can answer nothing. Saying so is
+      // the difference between a thread that learns the agent is missing and
+      // one that waits on a prompt no process will ever read.
+      if (agentStartFailure !== undefined) {
+        console.error(`gateway: turn ${frame.turnId} cannot run: ${agentStartFailure}`);
+        emit(agentStartFailureFor(frame, agentStartFailure));
+        return;
+      }
       try {
         console.error(`gateway: turn ${frame.turnId} received`);
-        if (acpSessionId === undefined) acpSessionId = await bridge.open(frame.sessionId, cwd);
+        if (acpSessionId === undefined) acpSessionId = await adopt(frame);
         console.error(`gateway: turn ${frame.turnId} running in ${acpSessionId}`);
         // The agent picked its own model when it opened the session; the route
         // may have chosen another, which only an agent that lists models takes.
@@ -116,6 +177,7 @@ async function handleCommand(text: string): Promise<void> {
             }`,
           );
         }
+        inFlight = { sessionId: frame.sessionId, turnId: frame.turnId };
         await bridge.run(frame.sessionId, acpSessionId, frame.turnId, frame.text);
       } catch (error) {
         // A session that cannot open is a failed turn, not a dead gateway: the
@@ -133,6 +195,10 @@ async function handleCommand(text: string): Promise<void> {
           turnId: frame.turnId,
           error: error instanceof Error ? error.message : String(error),
         });
+      } finally {
+        // A run that reported its own failure has already settled the turn, so
+        // clearing this only stops the exit handler failing it a second time.
+        inFlight = undefined;
       }
       return;
     case "cancel":

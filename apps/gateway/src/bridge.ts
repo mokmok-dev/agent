@@ -103,6 +103,45 @@ export class AcpBridge {
   }
 
   /**
+   * Continue a session the agent already holds, so a restarted gateway answers
+   * a second mention in the same conversation rather than starting a new one.
+   *
+   * The control plane stores the ACP session id the gateway reported, which is
+   * the only record that survives a gateway restart. The agent decides whether
+   * it still has that session: a load it refuses is `undefined`, and the caller
+   * then opens a fresh one rather than failing the turn.
+   */
+  async resume(sessionId: string, stored: string, cwd: string): Promise<string | undefined> {
+    const initialized = await this.#client.initialize(this.#client.defaultInitializeParams());
+    // An agent that does not advertise `loadSession` has no session to continue,
+    // so asking would only produce an error the turn would carry.
+    if (initialized.agentCapabilities?.loadSession !== true) return undefined;
+    let loaded;
+    try {
+      loaded = await this.#client.loadSession({
+        sessionId: stored,
+        cwd,
+        mcpServers: emptyMcpServers(this.#mcpServers),
+      });
+    } catch {
+      // A session the agent no longer has is not a fault of this side: the
+      // conversation is gone, so the caller opens a new one and the thread
+      // still gets an answer.
+      return undefined;
+    }
+    const adopted = loaded.sessionId ?? stored;
+    // A load reply carries the same model and setting fields as `session/new`,
+    // so the capability is read by the same function rather than a second copy
+    // of the rules. grok answers with both `models` and `configOptions`, and an
+    // agent may answer with neither.
+    this.#capability = agentCapabilityOf(initialized, { ...loaded, sessionId: adopted });
+    // The agent may have restarted with different credentials, so what it
+    // offers now is reported again rather than assumed from the last run.
+    this.#emit({ type: "session.capability", sessionId, capability: this.#capability });
+    return adopted;
+  }
+
+  /**
    * Tell the agent which model the route chose, when the agent lets the client
    * pick one. An agent that names its models takes the id it lists; an agent
    * that names none has nothing to select, so the call is skipped rather than

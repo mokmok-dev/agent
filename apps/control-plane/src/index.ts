@@ -78,15 +78,57 @@ export class SessionDurableObject extends DurableObject<Env> {
       const raw = typeof event.data === "string" ? event.data : "";
       // Messages are serialized by chaining, so a bind and a completed event that
       // arrive together cannot both read the session as it was before the bind.
-      this.#gatewayQueue = this.#gatewayQueue.then(() =>
-        this.#object.gateway(gateway, raw, Date.now(), resolved),
-      );
+      this.#gatewayQueue = this.#gatewayQueue
+        .then(() => this.#object.gateway(gateway, raw, Date.now(), resolved))
+        // A message can claim the only queued turn, which removes the deadline
+        // it was armed for. Re-arming after every message keeps the alarm in
+        // step with what is actually waiting.
+        .then(() => this.#armDeadline(resolved ?? gateway.sessionId ?? ""));
     });
     return new Response(null, { status: 101, webSocket: client });
   }
 
   accept(...args: Parameters<SessionObject["accept"]>) {
-    return this.#object.accept(...args);
+    return this.#object.accept(...args).then(async (outcome) => {
+      // A delivery creates the turn, so this is the moment its deadline starts.
+      // Arming here rather than on a timer is what makes an idle session sweep
+      // itself: without it a queued turn waited for a later delivery or a
+      // gateway connection that never came.
+      await this.#armDeadline(args[0]);
+      return outcome;
+    });
+  }
+
+  /**
+   * Schedule this object to wake at its next claim deadline, if it has one.
+   *
+   * The platform delivers `alarm` to the same object, so the sweep and the
+   * turns it reads are the same single-threaded context. A deadline already in
+   * the past is due now, and `setAlarm` accepts a past time.
+   */
+  async #armDeadline(sessionId: string): Promise<void> {
+    const at = await this.#object.deadline(sessionId, Date.now());
+    if (at === undefined) {
+      // Nothing is waiting, so disarm rather than leave a wake-up that would
+      // find an empty queue.
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    // A Durable Object takes one alarm, so the soonest deadline wins: scheduling
+    // a later one would delay an earlier turn's failure.
+    const armed = await this.ctx.storage.getAlarm();
+    if (armed !== null && armed <= at) return;
+    await this.ctx.storage.setAlarm(at);
+  }
+
+  /** The deadline this object was armed for. */
+  override async alarm(): Promise<void> {
+    // The alarm names no session, because it belongs to the object that armed
+    // it; `this.ctx.id.name` is the session id the Worker resolved.
+    const sessionId = this.ctx.id.name ?? "";
+    const now = Date.now();
+    await this.#object.expire(sessionId, now);
+    await this.#armDeadline(sessionId);
   }
 
   deliver(...args: Parameters<SessionObject["deliver"]>) {

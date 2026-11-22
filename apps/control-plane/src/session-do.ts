@@ -70,7 +70,6 @@ export class SessionObject {
     await this.expire(sessionId, now);
     return outcome;
   }
-
   /**
    * Fail the queued turns no gateway claimed in time. Called on a delivery and
    * on a gateway connection, which are the two moments a thread can learn that
@@ -78,6 +77,9 @@ export class SessionObject {
    */
   async expire(sessionId: string, now: number): Promise<unknown[]> {
     const expired = await this.#service.expire(sessionId, now);
+    // Nothing is waiting any more, so a scheduled wake-up would sweep an empty
+    // queue. Clearing it here keeps one queued turn from leaving a timer armed
+    // for the life of the object.
     if (expired.length === 0) return expired;
     const session = await this.#service.session(sessionId);
     if (session === undefined) return expired;
@@ -88,6 +90,18 @@ export class SessionObject {
       );
     }
     return expired;
+  }
+
+  /**
+   * When the session next owes a decision about a waiting turn.
+   *
+   * The platform class turns this into a Durable Object alarm, which is what
+   * makes the five-minute claim deadline real on an idle session: a delivery
+   * alone cannot fail a turn, because the only events that swept it were a
+   * later delivery or a gateway connection.
+   */
+  deadline(sessionId: string, now: number): Promise<number | undefined> {
+    return this.#service.deadline(sessionId, now);
   }
 
   /**

@@ -14,6 +14,7 @@ import { AgentMethod, ClientMethod, PROTOCOL_VERSION } from "./types.ts";
 import {
   decodeCreateTerminalParams,
   decodeInitializeResult,
+  decodeLoadSessionResult,
   decodeNewSessionResult,
   decodePromptResult,
   decodeReadTextFileParams,
@@ -28,6 +29,8 @@ import {
   type CreateTerminalResult,
   type InitializeParams,
   type InitializeResult,
+  type LoadSessionParams,
+  type LoadSessionResult,
   type NewSessionParams,
   type NewSessionResult,
   type PromptResult,
@@ -194,6 +197,18 @@ export class AcpClient {
   newSession(params: NewSessionParams): Promise<NewSessionResult> {
     return this.request(AgentMethod.NewSession, params).then((result) =>
       unwrap(decodeNewSessionResult(result)),
+    );
+  }
+
+  /**
+   * Adopt a session the agent already holds, which is what a restarted gateway
+   * needs to answer a second mention in the same conversation. An agent that
+   * cannot load one answers with an error, which the caller reports rather than
+   * ignores.
+   */
+  loadSession(params: LoadSessionParams): Promise<LoadSessionResult> {
+    return this.request(AgentMethod.LoadSession, params).then((result) =>
+      unwrap(decodeLoadSessionResult(result)),
     );
   }
 

@@ -248,3 +248,31 @@ export function expireTurn(
   const result = transitionTurn(turn, session, { status: "failed", error }, now);
   return result.ok ? result.next : undefined;
 }
+
+/**
+ * When a session next owes a decision about a waiting turn, or `undefined`
+ * when nothing is waiting.
+ *
+ * Expiry is a deadline, so something has to wake up at it. A caller that only
+ * swept on a delivery or a gateway connection left an idle session silent: the
+ * webhook answered `202`, no gateway ever came, and nothing ever revisited the
+ * turn. This is the instant to revisit, so a host can schedule it rather than
+ * poll.
+ */
+export function nextDeadline(
+  turns: readonly Turn[],
+  now: number,
+  deadline = GATEWAY_CLAIM_DEADLINE_MS,
+): number | undefined {
+  let soonest: number | undefined;
+  for (const turn of turns) {
+    // Only a queued turn has a deadline. A dispatched or running one belongs to
+    // a gateway that claimed it, and failing it would cut off a slow agent.
+    if (turn.status !== "queued") continue;
+    const at = turn.createdAt + deadline;
+    if (soonest === undefined || at < soonest) soonest = at;
+  }
+  // A deadline already in the past is due now, which is what makes a sweep that
+  // ran late still sweep rather than schedule a wake-up in the past.
+  return soonest === undefined ? undefined : Math.max(soonest, now);
+}

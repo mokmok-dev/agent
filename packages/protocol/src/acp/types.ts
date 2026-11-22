@@ -208,6 +208,13 @@ export type NewSessionParams = {
   mcpServers?: McpServer[] | Readonly<Record<string, unknown>>;
 };
 
+/**
+ * The parameters of `session/load`, which continues a session the agent
+ * already has. The fields are the ones `session/new` takes, plus the id the
+ * agent gave when it opened it.
+ */
+export type LoadSessionParams = NewSessionParams & { sessionId: string };
+
 /** How the empty `mcpServers` is sent, which differs by agent. */
 export type McpServersShape = "array" | "record";
 
@@ -499,6 +506,26 @@ const decodeSessionModels: Decoder<SessionModels> = object({
 
 export const decodeNewSessionResult: Decoder<NewSessionResult> = object({
   sessionId: str,
+  modes: optional(lenient(decodeSessionModeState)),
+  models: optional(lenient(decodeSessionModels)),
+  configOptions: optional(arrayLenient(decodeConfigOption)),
+});
+
+/**
+ * What `session/load` answers. grok returns the same model and setting fields
+ * as `session/new` without repeating the id, because the caller supplied it;
+ * an agent that does echo the id is accepted too, so the two shapes cannot
+ * disagree about which session was loaded.
+ */
+export type LoadSessionResult = {
+  sessionId?: string;
+  modes?: SessionModeState;
+  models?: SessionModels;
+  configOptions?: SessionConfigOption[];
+};
+
+export const decodeLoadSessionResult: Decoder<LoadSessionResult> = object({
+  sessionId: optional(lenient(str)),
   modes: optional(lenient(decodeSessionModeState)),
   models: optional(lenient(decodeSessionModels)),
   configOptions: optional(arrayLenient(decodeConfigOption)),

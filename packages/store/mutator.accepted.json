@@ -1,4 +1,12 @@
 {
+  "1pnmaojyh1x": {
+    "reason": "equivalent: assigning an equal deadline again leaves `soonest` at that same instant, so `<` and `<=` both answer with the earliest queued turn's deadline.",
+    "where": "src/session.ts:248:34 at < soonest -> at <= soonest"
+  },
+  "26bkhckz0ep": {
+    "reason": "equivalent: a refused transition carries only a reason and no next turn, so reading next without the guard yields undefined, the same answer the guard gives.",
+    "where": "src/session.ts:187:10 result.ok -> true"
+  },
   "26rfs5qvbf1": {
     "reason": "equivalent: a missing session has no turn records, so the turn guard below returns undefined and the caller sees the same answer with or without the earlier session check.",
     "where": "src/repository.ts:122:9 session === undefined -> false"

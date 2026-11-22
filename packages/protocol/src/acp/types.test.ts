@@ -15,6 +15,7 @@ import {
   modelValueFor,
   decodeInitializeResult,
   decodeNewSessionResult,
+  decodeLoadSessionResult,
   decodeSetConfigOptionResult,
 } from "./types.ts";
 
@@ -407,5 +408,42 @@ describe("an agent that names no models", () => {
     // confirmed against it; reading its empty list as agreement would run a
     // model it never named.
     expect(offersModel({ availableModels: ["a"], statesModels: false }, "a")).toBe(false);
+  });
+});
+
+describe("what a load reply carries", () => {
+  test("every field of a load reply is read, so none is silently dropped", () => {
+    // grok answers a load with the models and settings it would answer a new
+    // session with. A decoder that dropped one of them would leave the caller
+    // checking a routed model against nothing.
+    const decoded = decodeLoadSessionResult({
+      sessionId: "acp-stored",
+      modes: { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }] },
+      models: { currentModelId: "m", availableModels: [{ modelId: "m", name: "M" }] },
+      configOptions: [{ id: "model", name: "Model", currentValue: "m" }],
+    });
+    expect(decoded).toEqual({
+      kind: "decoded",
+      value: {
+        sessionId: "acp-stored",
+        modes: { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }] },
+        models: { currentModelId: "m", availableModels: [{ modelId: "m", name: "M" }] },
+        configOptions: [{ id: "model", name: "Model", currentValue: "m" }],
+      },
+    });
+  });
+
+  test("a load reply with no fields is an empty object, because grok echoes no id", () => {
+    // The id the caller sent is the id that was loaded, so an absent one is a
+    // valid answer rather than a malformed one.
+    expect(decodeLoadSessionResult({})).toEqual({ kind: "decoded", value: {} });
+  });
+
+  test("an id that is not a string is dropped, so it cannot be read as a session", () => {
+    expect(decodeLoadSessionResult({ sessionId: 7 })).toEqual({ kind: "decoded", value: {} });
+  });
+
+  test("a reply that is not an object is refused", () => {
+    expect(decodeLoadSessionResult(7).kind).toBe("rejected");
   });
 });

@@ -178,6 +178,34 @@ export async function fetch(request: Request, env: Env, now = Date.now()): Promi
 }
 
 /**
+ * The session a gateway's `?session=` names, once `auto` is resolved.
+ *
+ * A gateway that connected before the delegation it serves asked for
+ * `auto`: a Linear agent session id is created at delegation time, so it has
+ * no id to name yet. The newest session with a queued turn is the one waiting
+ * for a gateway, and that is what the answer names.
+ *
+ * The Worker and the local dev server both call this, so the deployed path and
+ * the local path cannot disagree about which session a gateway reached. A
+ * requested id that is not `auto` is answered as given, because a gateway
+ * serving one known session must not be redirected to another.
+ */
+export async function resolveGatewaySession(
+  env: Env,
+  requested: string,
+): Promise<string | undefined> {
+  if (requested !== "auto") return requested;
+  const index = env.THREAD_INDEX.getByName("index") as IndexRpc;
+  const candidates = await index.recent("linear");
+  for (const sessionId of candidates) {
+    const sessions = env.SESSIONS.getByName(sessionId) as SessionRpc;
+    const queued = await sessions.next(sessionId);
+    if (queued !== undefined) return sessionId;
+  }
+  return undefined;
+}
+
+/**
  * The newest session that has a queued turn, for a gateway that connected
  * before the delegation it serves.
  *
@@ -187,14 +215,7 @@ export async function fetch(request: Request, env: Env, now = Date.now()): Promi
  * stale turn does not shadow a newer one.
  */
 async function waitingSessionFor(env: Env): Promise<string | undefined> {
-  const index = env.THREAD_INDEX.getByName("index") as IndexRpc;
-  const candidates = await index.recent("linear");
-  for (const sessionId of candidates) {
-    const sessions = env.SESSIONS.getByName(sessionId) as SessionRpc;
-    const queued = await sessions.next(sessionId);
-    if (queued !== undefined) return sessionId;
-  }
-  return undefined;
+  return resolveGatewaySession(env, "auto");
 }
 
 /**

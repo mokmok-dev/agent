@@ -1024,3 +1024,40 @@ describe("a gateway message on a bound connection", () => {
     }
   });
 });
+
+describe("the deadline a session owes its waiting turn", () => {
+  test("a delivery leaves a deadline for the platform to wake at", async () => {
+    const { dir, object } = await objectOver();
+    try {
+      // This is what makes the five-minute claim real without a later request:
+      // the host arms an alarm from this instant, so an idle session sweeps
+      // itself instead of waiting for a delivery or a gateway that never comes.
+      await queued(object, 1_000);
+      expect(await object.deadline(SESSION, 1_000)).toBe(1_000 + GATEWAY_CLAIM_DEADLINE_MS);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a claimed turn leaves no deadline, because a gateway is answering it", async () => {
+    const { dir, object } = await objectOver();
+    try {
+      await queued(object, 1_000);
+      await object.transition(SESSION, "t1", { status: "dispatched" }, 1_001);
+      expect(await object.deadline(SESSION, 1_001)).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a settled turn leaves no deadline, so no alarm stays armed for nothing", async () => {
+    const { dir, object } = await objectOver();
+    try {
+      await queued(object, 1_000);
+      await object.expire(SESSION, 1_000 + GATEWAY_CLAIM_DEADLINE_MS);
+      expect(await object.deadline(SESSION, 1_000 + GATEWAY_CLAIM_DEADLINE_MS)).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -96,6 +96,52 @@ export function encodeEvent(event: GatewayEvent): string {
 }
 
 /**
+ * The failure owed to a turn when the agent never started.
+ *
+ * A gateway that could not spawn its agent has no process to read the prompt,
+ * so the prompt response never comes and the turn would wait forever. The
+ * reason is the agent's own start error, which names the missing binary rather
+ * than a timeout this side invented.
+ */
+export function agentStartFailureFor(
+  turn: { sessionId: string; turnId: string },
+  reason: string,
+): GatewayEvent {
+  return {
+    type: "turn.failed",
+    sessionId: turn.sessionId,
+    turnId: turn.turnId,
+    error: `the agent could not start: ${reason}`,
+  };
+}
+
+/**
+ * The failure owed to a turn when its agent process exits mid-turn.
+ *
+ * A prompt response arrives only if the agent lives to send one. An agent that
+ * exits first leaves the turn `running` with nothing to settle it, so the exit
+ * becomes the turn's failure and the thread learns what happened. The code is
+ * the agent's own, which is the difference between "the agent crashed" and a
+ * timeout this side invented.
+ */
+export function agentExitFailure(
+  turn: { sessionId: string; turnId: string },
+  code: number | null,
+): GatewayEvent {
+  return {
+    type: "turn.failed",
+    sessionId: turn.sessionId,
+    turnId: turn.turnId,
+    // A signal leaves no exit code. Reporting `null` as a number would invent
+    // one; the signal is the fact, so it is named when there is no code.
+    error:
+      code === null
+        ? "the agent exited from a signal before answering"
+        : `the agent exited with code ${code} before answering`,
+  };
+}
+
+/**
  * The `hello` a gateway sends as soon as its socket opens.
  *
  * Every gateway announces itself, whatever it was configured with. A gateway

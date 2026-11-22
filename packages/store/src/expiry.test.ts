@@ -5,6 +5,7 @@ import {
   expireTurn,
   GATEWAY_CLAIM_DEADLINE_MS,
   hasExpired,
+  nextDeadline,
   NO_GATEWAY_REASON,
   NO_MODEL_REASON,
   offersModel,
@@ -183,6 +184,72 @@ describe("expiring a turn", () => {
       1_000 + GATEWAY_CLAIM_DEADLINE_MS,
     );
     expect(expired?.updatedAt).toBe(1_000 + GATEWAY_CLAIM_DEADLINE_MS);
+  });
+});
+
+describe("when a session next owes a decision", () => {
+  test("a queued turn is due at its own deadline", () => {
+    // The turn was created at 0, so its deadline is the deadline itself. A host
+    // that wakes then finds it expired, which is what makes the wait observable.
+    expect(nextDeadline([turn()], 0)).toBe(GATEWAY_CLAIM_DEADLINE_MS);
+  });
+
+  test("the soonest of several queued turns is the one that matters", () => {
+    const turns = [
+      turn({ id: "late", createdAt: 1_000 }),
+      turn({ id: "early", createdAt: 100, idempotencyKey: "evt-2" }),
+    ];
+    // The later turn alone would schedule a wake-up after the earlier one's
+    // deadline, leaving the earlier turn waiting past its own failure.
+    expect(nextDeadline(turns, 0)).toBe(100 + GATEWAY_CLAIM_DEADLINE_MS);
+  });
+
+  test("two turns with the same deadline still produce that deadline", () => {
+    // A tie is not a reason to schedule nothing: both turns expire at that
+    // instant, so a host that skipped it would leave both waiting.
+    const turns = [turn({ id: "a" }), turn({ id: "b", idempotencyKey: "evt-2" })];
+    expect(nextDeadline(turns, 0)).toBe(GATEWAY_CLAIM_DEADLINE_MS);
+  });
+
+  test("a later turn does not replace an earlier deadline it was compared against", () => {
+    // Ordered so the second turn is the later one: if the comparison let it
+    // win, the first turn would wait past its deadline to be failed.
+    const turns = [turn({ id: "early", createdAt: 0 }), turn({ id: "late", createdAt: 9_000 })];
+    expect(nextDeadline(turns, 0)).toBe(GATEWAY_CLAIM_DEADLINE_MS);
+  });
+
+  test("a claimed turn has no deadline, because its gateway is answering", () => {
+    for (const status of ["dispatched", "running"] as const) {
+      expect(nextDeadline([turn({ status })], 0)).toBeUndefined();
+    }
+  });
+
+  test("a settled turn has no deadline", () => {
+    for (const status of ["completed", "failed", "cancelled"] as const) {
+      expect(nextDeadline([turn({ status })], 0)).toBeUndefined();
+    }
+  });
+
+  test("an empty session has nothing to schedule", () => {
+    expect(nextDeadline([], 0)).toBeUndefined();
+  });
+
+  test("a deadline already past is due now, so a late sweep still sweeps", () => {
+    // A host that arms an alarm for a time in the past would wait for nothing;
+    // the answer is the current instant, which fires at once.
+    expect(nextDeadline([turn({ createdAt: 0 })], 10 * GATEWAY_CLAIM_DEADLINE_MS)).toBe(
+      10 * GATEWAY_CLAIM_DEADLINE_MS,
+    );
+  });
+
+  test("the deadline is when the turn was created plus the wait, not the clock plus it", () => {
+    // A turn created at 900, with the clock at 1_000, is due at 900 + the
+    // deadline. Measuring from the clock instead would push it a whole wait out.
+    expect(nextDeadline([turn({ createdAt: 900 })], 1_000, 500)).toBe(1_400);
+  });
+
+  test("a caller may state its own deadline, which is what a test does", () => {
+    expect(nextDeadline([turn()], 0, 100)).toBe(100);
   });
 });
 

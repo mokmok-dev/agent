@@ -1,5 +1,6 @@
 import {
   acceptsTurns,
+  nextDeadline,
   NO_MODEL_REASON,
   offersModel,
   SessionRepository,
@@ -140,6 +141,16 @@ export class SessionService {
    */
   expire(sessionId: string, now: number): Promise<Turn[]> {
     return this.#repo.expireStaleTurns(sessionId, now);
+  }
+
+  /**
+   * When this session must be swept again, or `undefined` when no turn is
+   * waiting. A host schedules a wake-up from this, so a `stdio` delivery that no
+   * gateway claims fails at its deadline rather than staying queued until some
+   * unrelated request happens to sweep it.
+   */
+  async deadline(sessionId: string, now: number): Promise<number | undefined> {
+    return nextDeadline(await this.turns(sessionId), now);
   }
 
   active(sessionId: string): Promise<Turn | undefined> {

@@ -15,10 +15,6 @@
     "reason": "A tagged variant's name is read through a string-keyed map, so a non-string name is absent from the map and refused either way.",
     "where": "src/decode.ts:35:5 typeof value === \"string\" -> true"
   },
-  "21wxe0urr5a": {
-    "reason": "The message reader returns a discriminated union whose only other case is the refusal, so both branches agree on a valid message.",
-    "where": "src/acp/client.ts:283:7 decoded.kind === \"decoded\" -> true"
-  },
   "2f6xhocrweg": {
     "reason": "The message reader returns a discriminated union whose only other case is the refusal, so both branches agree on a valid message.",
     "where": "src/decode.ts:138:10 decoded.kind === \"decoded\" -> true"

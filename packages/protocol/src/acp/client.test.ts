@@ -16,6 +16,7 @@ import {
   decodeSessionUpdate,
   decodeTerminalOutputResult,
   decodeTerminalRefParams,
+  emptyMcpServers,
   isStopReason,
 } from "./types.ts";
 import { decodeMessage, ProtocolError, RpcErrorCode, type RpcMessage } from "../jsonrpc.ts";
@@ -1160,5 +1161,57 @@ describe("a frame that is not a message reaches no handler", () => {
     const client = new AcpClient({ channel: recorder });
     client.receive(JSON.stringify({ jsonrpc: "2.0", id: 99, result: 1 }));
     expect(recorder.sent).toEqual([]);
+  });
+});
+
+describe("adopting a session the agent already holds", () => {
+  test("sends session/load with the stored id and the same empty-servers shape", async () => {
+    const recorder = new Recorder();
+    const client = new AcpClient({ channel: recorder });
+    const loaded = client.loadSession({
+      sessionId: "acp-stored",
+      cwd: "/work",
+      mcpServers: emptyMcpServers("array"),
+    });
+    // The id travels with the request, which is what makes the agent continue
+    // that conversation rather than open a second one.
+    expect(recorder.last()).toEqual({
+      kind: "request",
+      id: 1,
+      method: AgentMethod.LoadSession,
+      params: { sessionId: "acp-stored", cwd: "/work", mcpServers: [] },
+    });
+    client.receive(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { models: { currentModelId: "m", availableModels: [{ modelId: "m", name: "M" }] } },
+      }),
+    );
+    expect(await loaded).toEqual({
+      models: { currentModelId: "m", availableModels: [{ modelId: "m", name: "M" }] },
+    });
+  });
+
+  test("an id the agent echoes back is kept, and one it omits leaves the field absent", async () => {
+    const recorder = new Recorder();
+    const client = new AcpClient({ channel: recorder });
+    const echoed = client.loadSession({ sessionId: "acp-stored", cwd: "/work" });
+    expect(recorder.last()).toMatchObject({ method: AgentMethod.LoadSession });
+    client.receive(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { sessionId: "acp-echoed" } }));
+    // An agent that echoes the id confirmed which session it loaded; keeping it
+    // is how the caller knows the conversation is the one it asked for.
+    expect(await echoed).toEqual({ sessionId: "acp-echoed" });
+  });
+
+  test("a result that is not an object is refused rather than handed back", async () => {
+    const recorder = new Recorder();
+    const client = new AcpClient({ channel: recorder });
+    const loaded = client.loadSession({ sessionId: "acp-stored", cwd: "/work" });
+    recorder.last();
+    client.receive(JSON.stringify({ jsonrpc: "2.0", id: 1, result: 7 }));
+    // A malformed answer cannot be told apart from a successful load, so it is
+    // an error at the seam the caller awaits.
+    await expect(loaded).rejects.toBeDefined();
   });
 });
