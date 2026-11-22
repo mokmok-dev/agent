@@ -1,7 +1,7 @@
 import type { AdapterResult, InboundMessage, RawRequest } from "./events.ts";
 import { decoded, jsonOf, refuse, refuseSignature } from "./events.ts";
 import { headerOf, verifyHmac, type Verified } from "./signature.ts";
-import { authorOf, decodeLinearEvent, promptOf } from "./linear-schema.ts";
+import { authorOf, decodeLinearEvent, issueOf, promptOf } from "./linear-schema.ts";
 
 export type LinearConfig = { webhookSecret: string };
 
@@ -15,6 +15,13 @@ export async function verifyLinear(request: RawRequest, config: LinearConfig): P
   return verifyHmac(config.webhookSecret, request.body, signature.value, "sha256");
 }
 
+/**
+ * Read one Linear delivery.
+ *
+ * Only an `AgentSessionEvent` opens a turn. Linear also sends `Issue` and
+ * `Comment` events for the same resources, and those carry no agent session, so
+ * they are ignored by name rather than treated as a failure.
+ */
 export function parseLinearEvent(body: unknown): AdapterResult {
   return decoded(decodeLinearEvent(body), (event) => {
     if (event.type !== "AgentSessionEvent") {
@@ -22,14 +29,19 @@ export function parseLinearEvent(body: unknown): AdapterResult {
     }
     const session = event.agentSession;
     if (session === undefined) return refuse(400, "Linear event has no agent session");
+    // A thought we emitted ourselves comes back as a webhook; answering it would
+    // make the agent talk to itself.
     if (event.agentActivity?.type === "thought") {
       return { kind: "ignored", reason: "Linear activity echo" };
     }
     const text = promptOf(event);
     if (text === undefined) return { kind: "ignored", reason: "Linear event has no prompt" };
+    // The issue is nested under the session, which is where Linear's published
+    // payload puts it; the session id is the fallback thread key.
+    const issue = issueOf(event);
     const thread = {
       workspaceId: event.organizationId ?? "",
-      channelId: issueIdOf(event.issue?.id, session.id),
+      channelId: issueIdOf(issue?.id, session.id),
       threadId: session.id,
     };
     const message: InboundMessage = {
@@ -39,7 +51,7 @@ export function parseLinearEvent(body: unknown): AdapterResult {
       thread,
       authorId: authorOf(event),
       text,
-      replyTo: { channelId: issueIdOf(event.issue?.id, session.id), threadId: session.id },
+      replyTo: { channelId: issueIdOf(issue?.id, session.id), threadId: session.id },
       stage: event.action === "prompted" ? "prompt" : "start",
     };
     return { kind: "event", event: message };

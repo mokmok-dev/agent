@@ -41,6 +41,8 @@ export interface Env extends ProviderEnv, LinearOAuthEnv, ModelEnv, RoutingEnv {
  * deploy of new code.
  */
 export interface ModelEnv {
+  /** `1` logs each webhook's outcome and body, for diagnosing an ignored one. */
+  DEBUG_WEBHOOKS?: string;
   PI_PROVIDERS?: string;
   PI_DEFAULT_MODEL?: string;
 }
@@ -111,12 +113,23 @@ export async function fetch(request: Request, env: Env, now = Date.now()): Promi
     return providersStatus(env);
   }
   try {
+    const raw = await rawRequestOf(request);
     const result = await handleWebhook(
       route.kind as "slack" | "discord" | "linear",
-      await rawRequestOf(request),
+      raw,
       providerConfigOf(env),
       Math.floor(now / 1000),
     );
+    // A webhook that is ignored is invisible otherwise: the provider sees 200,
+    // and nothing records why no turn was created. `DEBUG_WEBHOOKS` answers that
+    // without logging a body that may carry a person's message by default.
+    if (env.DEBUG_WEBHOOKS === "1") {
+      console.log(
+        `webhook ${route.kind} kind=${result.kind}` +
+          (result.kind === "ignored" ? ` reason=${result.reason}` : "") +
+          ` body=${raw.body.slice(0, 1500)}`,
+      );
+    }
     if (result.kind !== "event") {
       const { status, body } = responseFor(result);
       return Response.json(body, { status });

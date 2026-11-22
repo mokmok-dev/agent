@@ -199,3 +199,129 @@ describe("adaptLinear", () => {
     expect(refused(await adaptLinear(request, config)).status).toBe(400);
   });
 });
+
+/**
+ * Linear's published `AgentSessionEventWebhookPayload`. These fixtures come from
+ * the schema and from a payload the deployed Worker received, so a decoder that
+ * only reads a hand-written shape fails here.
+ */
+const realSessionEvent = (overrides: Record<string, unknown> = {}) => ({
+  type: "AgentSessionEvent",
+  action: "created",
+  webhookId: "wh-real",
+  organizationId: "org-6d72de72",
+  appUserId: "app-1de62928",
+  promptContext:
+    "Issue MOK-279: test issue\n\nthis is test. if you have seen this issue, reply `echo for you`.",
+  agentSession: {
+    id: "sess-real",
+    issue: {
+      id: "7cc41723-f197-47b7-b67e-0a7d8a5a216c",
+      identifier: "MOK-279",
+      title: "test issue",
+    },
+    creatorId: "user-91c61c96",
+  },
+  actor: { id: "user-91c61c96", type: "user" },
+  ...overrides,
+});
+
+describe("the payload Linear actually sends", () => {
+  test("a created session reads the issue from inside the session, not the top level", () => {
+    const result = parseLinearEvent(realSessionEvent());
+    if (result.kind !== "event") throw new Error("expected an event");
+    expect(result.event.thread.channelId).toBe("7cc41723-f197-47b7-b67e-0a7d8a5a216c");
+    expect(result.event.thread.threadId).toBe("sess-real");
+    if (result.event.kind !== "message") throw new Error("expected a message");
+    expect(result.event.replyTo.channelId).toBe("7cc41723-f197-47b7-b67e-0a7d8a5a216c");
+  });
+
+  test("a created session uses promptContext as the task, because it carries the issue and its guidance", () => {
+    const result = parseLinearEvent(realSessionEvent());
+    if (result.kind !== "event" || result.event.kind !== "message")
+      throw new Error("expected a message");
+    expect(result.event.text).toBe(realSessionEvent().promptContext);
+    expect(result.event.stage).toBe("start");
+  });
+
+  test("a prompted session reads the person's message from agentActivity.body", () => {
+    const result = parseLinearEvent(
+      realSessionEvent({
+        action: "prompted",
+        promptContext: undefined,
+        agentActivity: { type: "prompt", body: "now add a comment" },
+      }),
+    );
+    if (result.kind !== "event" || result.event.kind !== "message") {
+      throw new Error("expected a message");
+    }
+    expect(result.event.text).toBe("now add a comment");
+    expect(result.event.stage).toBe("prompt");
+  });
+
+  test("the actor is the author, and the session creator is the fallback", () => {
+    const withActor = parseLinearEvent(realSessionEvent());
+    if (withActor.kind !== "event") throw new Error("expected an event");
+    expect(withActor.event.authorId).toBe("user-91c61c96");
+
+    const withoutActor = parseLinearEvent(realSessionEvent({ actor: undefined }));
+    if (withoutActor.kind !== "event") throw new Error("expected an event");
+    expect(withoutActor.event.authorId).toBe("user-91c61c96");
+  });
+
+  test("an Issue event carries no session, so it is ignored by name", () => {
+    // The state change that triggered this work arrived as an Issue event.
+    expect(
+      parseLinearEvent({
+        type: "Issue",
+        action: "update",
+        organizationId: "org-1",
+        webhookId: "wh-issue",
+        actor: { id: "user-1", type: "user" },
+        data: {
+          id: "7cc41723-f197-47b7-b67e-0a7d8a5a216c",
+          identifier: "MOK-279",
+          title: "test issue",
+        },
+      }),
+    ).toEqual({ kind: "ignored", reason: "unsupported Linear event: Issue" });
+  });
+
+  test("a session with no prompt anywhere is ignored rather than opening an empty turn", () => {
+    expect(parseLinearEvent(realSessionEvent({ promptContext: undefined }))).toEqual({
+      kind: "ignored",
+      reason: "Linear event has no prompt",
+    });
+  });
+
+  test("a thought we emitted ourselves is not answered", () => {
+    expect(
+      parseLinearEvent(
+        realSessionEvent({ agentActivity: { type: "thought", body: "Working on it." } }),
+      ),
+    ).toEqual({ kind: "ignored", reason: "Linear activity echo" });
+  });
+
+  test("a session the payload does not name is refused with a 400", () => {
+    expect(
+      refused(parseLinearEvent({ type: "AgentSessionEvent", action: "created" })).message,
+    ).toBe("Linear event has no agent session");
+  });
+
+  test("a session with no issue answers on the session id, so nothing is dropped", () => {
+    const result = parseLinearEvent(
+      realSessionEvent({ agentSession: { id: "sess-only", creatorId: "user-1" } }),
+    );
+    if (result.kind !== "event") throw new Error("expected an event");
+    expect(result.event.thread.channelId).toBe("sess-only");
+  });
+
+  test("a title alone is not a prompt, because the task is in promptContext", () => {
+    // An issue in the payload without promptContext has no task text; the turn
+    // must not be created from a title the agent cannot act on.
+    const result = parseLinearEvent(
+      realSessionEvent({ promptContext: undefined, agentActivity: undefined }),
+    );
+    expect(result).toEqual({ kind: "ignored", reason: "Linear event has no prompt" });
+  });
+});
