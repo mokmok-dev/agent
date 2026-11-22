@@ -122,17 +122,17 @@ const connect = (): void => {
   opened.addEventListener("message", (message) => {
     void handleCommand(String(message.data));
   });
-  opened.addEventListener("close", (event) => {
+  opened.addEventListener("close", () => {
     socket = undefined;
-    // A control plane that answered "no session is waiting" closes the socket
-    // until a delegation creates one, so a fixed wait is right for that case
-    // and for a network drop alike: retrying sooner would only repeat it.
-    const code = (event as CloseEvent).code;
-    const wait = code === 4004 || code === 1008 ? 5_000 : 1_000;
-    if (code === 4004) {
+    // A gateway that asked for `auto` and never got a session was told there is
+    // nothing waiting. The platform reports that as a plain close, so the
+    // cadence follows what happened rather than a code: retrying a refusal once
+    // a second would hammer the route until someone delegates.
+    const refused = serving === undefined || serving === "auto";
+    if (refused) {
       console.error("gateway: waiting for a session; no delegation has created one yet");
     }
-    setTimeout(connect, wait);
+    setTimeout(connect, refused ? 5_000 : 1_000);
   });
 };
 
