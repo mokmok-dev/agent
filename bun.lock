@@ -11,6 +11,7 @@
       },
       "devDependencies": {
         "@cloudflare/codemode": "^0.5.6",
+        "@cloudflare/workers-types": "^5.20261121.1",
         "@mizchi/mutator": "0.5.2",
         "@types/bun": "1.4.5",
         "agents": "^0.34.0",
@@ -191,7 +192,7 @@
 
     "@cloudflare/codemode": ["@cloudflare/codemode@0.5.6", "", { "dependencies": { "@types/json-schema": "^7.0.15", "acorn": "^8.17.0" }, "peerDependencies": { "@modelcontextprotocol/sdk": "^1.25.0", "@tanstack/ai": ">=0.8.0 <2.0.0", "ai": "^6.0.0 || ^7.0.0", "zod": "^4.0.0" }, "optionalPeers": ["@modelcontextprotocol/sdk", "@tanstack/ai", "ai", "zod"] }, "sha512-86CoZvDrXWpcmieDoFqHvt1NWt3F75LnsxlUteIzftbU2GZCoLn3yB4n7Jd+7OcMfsA4lNxDBrNcOYcBuINv7A=="],
 
-    "@cloudflare/workers-types": ["@cloudflare/workers-types@4.20260101.0", "", {}, "sha512-C28o4U1T4dPe8avLv1xMQ4MtSE6G4skbVA3VfVZIrpTqklvO+homKB1uFEtNbuZlaKg+Znv8sjmGQUInTH17gA=="],
+    "@cloudflare/workers-types": ["@cloudflare/workers-types@5.20261121.1", "", {}, "sha512-eLzyhm8/Qn+yshOObNIVsV8YJyWR9BOBCnnuqmrqY5uhsVDlLMdCmOQ34oC3eoVLkav94Dc7MWcfC+FuaxdNjA=="],
 
     "@earendil-works/chord": ["@earendil-works/chord@1.6.0", "", { "dependencies": { "@earendil-works/pi-schema": "1.6.0", "@earendil-works/pi-telemetry": "1.6.0" }, "peerDependencies": { "esbuild": "^0.28.2", "react": "^19.3.0", "ws": "^8.21.0" }, "optionalPeers": ["esbuild", "react", "ws"] }, "sha512-8dQXEKUR6qQPc4zNEblmv6hEfr2JAAU+nUprt+mhtdfRRZzl1At5ZhnJqTqesElAdR7RpAyaRIAilyteNHzyWA=="],
 
@@ -598,6 +599,8 @@
     "yaml": ["yaml@2.9.1", "", { "bin": { "yaml": "bin.mjs" } }, "sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw=="],
 
     "zod": ["zod@4.6.7", "", {}, "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg=="],
+
+    "@agent/control-plane/@cloudflare/workers-types": ["@cloudflare/workers-types@4.20260101.0", "", {}, "sha512-C28o4U1T4dPe8avLv1xMQ4MtSE6G4skbVA3VfVZIrpTqklvO+homKB1uFEtNbuZlaKg+Znv8sjmGQUInTH17gA=="],
 
     "@aws-sdk/client-bedrock-runtime/@smithy/node-http-handler": ["@smithy/node-http-handler@4.14.2", "", { "dependencies": { "@smithy/core": "^3.39.0", "@smithy/types": "^4.20.0", "tslib": "^2.6.2" } }, "sha512-i1uORV1v3qBqP43ayRKzIdm1q5x14tf8N4Dd06/QUX1Szm6VxHMrTsu20X5E63UFsaNZCRjI4SXG0jDmqYa+3w=="],
 

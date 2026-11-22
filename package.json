@@ -16,6 +16,7 @@
   },
   "devDependencies": {
     "@cloudflare/codemode": "^0.5.6",
+    "@cloudflare/workers-types": "^5.20261121.1",
     "@mizchi/mutator": "0.5.2",
     "@types/bun": "1.4.5",
     "agents": "^0.34.0",

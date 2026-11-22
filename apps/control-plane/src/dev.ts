@@ -1,6 +1,6 @@
 import { fetch as handle, type Env, type Namespace } from "./worker.ts";
-import { SessionDurableObject } from "./session-do.ts";
-import { ThreadIndexDurableObject } from "./thread-index-do.ts";
+import { SessionObject } from "./session-do.ts";
+import { ThreadIndexObject } from "./thread-index-do.ts";
 import { DiskHost } from "./disk-host.ts";
 import type { StorageHost } from "./storage.ts";
 import { join } from "node:path";
@@ -17,8 +17,8 @@ export const env: Env = {
   },
   discord: { publicKey: process.env.DISCORD_PUBLIC_KEY ?? "" },
   linear: { webhookSecret: process.env.LINEAR_WEBHOOK_SECRET ?? "dev-linear-secret" },
-  SESSIONS: namespace((host) => new SessionDurableObject(host), join(root, "sessions")),
-  THREAD_INDEX: namespace((host) => new ThreadIndexDurableObject(host), join(root, "index")),
+  SESSIONS: namespace((host) => new SessionObject(host), join(root, "sessions")),
+  THREAD_INDEX: namespace((host) => new ThreadIndexObject(host), join(root, "index")),
 };
 
 export function serve(port: number): void {

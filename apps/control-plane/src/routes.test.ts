@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { errorResponse, handleWebhook, rawRequestOf, responseFor, routeOf } from "./routes.ts";
-import { accept, deliveryBody, fetch, type Env } from "./worker.ts";
+import worker, { accept, deliveryBody, fetch, type Env } from "./worker.ts";
 import { AdapterError, type AdapterResult } from "@agent/adapters";
 import type { ThreadRef, Turn } from "@agent/store";
 import { signSha256 } from "@agent/adapters";
@@ -181,6 +181,94 @@ describe("fetch", () => {
   test("an unknown path is a 404", async () => {
     const response = await fetch(new Request("https://x/nope"), env().env);
     expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "not found" });
+  });
+
+  test("a delivery the adapter ignores answers 200 and touches no session", async () => {
+    const { env: value, calls } = env();
+    const body = { type: "event_callback", event: { type: "reaction_added", team: "T" } };
+    const request = await slackPost(body, 100);
+    const response = await fetch(request, value, 100_000);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, ignored: expect.any(String) });
+    expect(calls).toEqual([]);
+  });
+
+  test("a route with no adapter refuses the method through the Worker", async () => {
+    const { env: value, calls } = env();
+    const response = await fetch(
+      new Request("https://x/webhooks/slack", { method: "GET" }),
+      value,
+      100_000,
+    );
+    expect(response.status).toBe(405);
+    expect(calls).toEqual([]);
+  });
+
+  test("the health route answers any method, so a deploy check cannot fail on POST", async () => {
+    const { env: value, calls } = env();
+    const response = await fetch(new Request("https://x/health", { method: "POST" }), value);
+    expect(response.status).toBe(200);
+    expect(calls).toEqual([]);
+  });
+
+  test("a refused event still answers with its acknowledged status", async () => {
+    const { env: value } = env();
+    const body = {
+      type: "event_callback",
+      event_id: "Ev-refused",
+      event: {
+        type: "app_mention",
+        team: "T",
+        channel: "C",
+        ts: "1",
+        user: "U",
+        text: "<@UBOT> hi",
+      },
+    };
+    const response = await fetch(await slackPost(body, 100), value, 100_000);
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ ok: true, eventId: "Ev-refused" });
+  });
+
+  test("the Worker default export serves fetch", () => {
+    expect(typeof worker.fetch).toBe("function");
+  });
+
+  test("an ignored delivery answers 200, which differs from an event's 202", async () => {
+    const { env: value } = env();
+    const body = { type: "event_callback", event: { type: "reaction_added", team: "T" } };
+    const response = await fetch(await slackPost(body, 100), value, 100_000);
+    expect(response.status).toBe(200);
+  });
+
+  test("the index is addressed by its one name", async () => {
+    const names: string[] = [];
+    const base = env({ kind: "accepted", session: {}, turn: {} });
+    base.env.THREAD_INDEX = {
+      getByName: (name: string) => {
+        names.push(name);
+        return {
+          lookup: async () => "s1",
+        };
+      },
+    };
+    base.env.SESSIONS = { getByName: () => ({ deliver: async () => ({ kind: "accepted" }) }) };
+    const body = {
+      type: "event_callback",
+      event_id: "Ev9",
+      event: {
+        type: "app_mention",
+        team: "T",
+        channel: "C",
+        ts: "1",
+        user: "U",
+        text: "<@UBOT> hi",
+      },
+    };
+    const response = await fetch(await slackPost(body, 100), base.env, 100_000);
+    expect(response.status).toBe(202);
+    expect(names).toEqual(["index"]);
   });
 
   test("a mention reaches the session and is acknowledged", async () => {

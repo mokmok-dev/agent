@@ -3,5 +3,6 @@
   "compilerOptions": {
     "types": ["bun"]
   },
-  "include": ["packages/*/src/**/*.ts", "apps/*/src/**/*.ts", "scripts/**/*.ts"]
+  "include": ["packages/*/src/**/*.ts", "apps/*/src/**/*.ts", "scripts/**/*.ts"],
+  "files": ["./node_modules/@cloudflare/workers-types/experimental/index.d.ts"]
 }

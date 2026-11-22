@@ -1,5 +1,5 @@
 name = "agent-control-plane"
-main = "src/worker.ts"
+main = "src/index.ts"
 compatibility_date = "2026-01-01"
 compatibility_flags = ["nodejs_compat"]
 
@@ -9,13 +9,10 @@ bindings = [
   { name = "THREAD_INDEX", class_name = "ThreadIndexDurableObject" },
 ]
 
-# The sandbox target runs an agent in a Container attached to the session
-# object, on the durable_object scheduling policy so the object chooses the
-# image when it starts the sandbox. The local VM target needs none of this.
-[[containers]]
-class_name = "SessionDurableObject"
-scheduling_policy = "durable_object"
-
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SessionDurableObject", "ThreadIndexDurableObject"]
+
+[[containers]]
+class_name = "SessionDurableObject"
+scheduling_policy = "durable_object"

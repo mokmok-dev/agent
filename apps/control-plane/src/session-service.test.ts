@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { SessionService } from "./session-service.ts";
 import { indexKey } from "./thread-index.ts";
-import { SessionDurableObject } from "./session-do.ts";
-import { ThreadIndexDurableObject } from "./thread-index-do.ts";
+import { SessionObject } from "./session-do.ts";
+import { ThreadIndexObject } from "./thread-index-do.ts";
 import { durableStorage, type StorageHost } from "./storage.ts";
 import { MissingSession, threadKey, type ThreadRef } from "@agent/store";
 
@@ -69,7 +69,7 @@ describe("thread index", () => {
 
   test("lookup assigns once and returns the same id after that", async () => {
     const host = new Host();
-    const index = new ThreadIndexDurableObject(host);
+    const index = new ThreadIndexObject(host);
     const first = await index.lookup(thread);
     const second = await index.lookup(thread);
     expect(first).toBe("slack:T1:C1:1.5");
@@ -78,7 +78,7 @@ describe("thread index", () => {
 
   test("forget makes the next lookup assign again", async () => {
     const host = new Host();
-    const index = new ThreadIndexDurableObject(host);
+    const index = new ThreadIndexObject(host);
     await index.lookup(thread);
     await index.forget(thread);
     expect(host.values.has(indexKey(thread))).toBe(false);
@@ -289,7 +289,7 @@ describe("turns", () => {
 describe("durable object wrappers", () => {
   test("the session object delegates every method", async () => {
     const host = new Host();
-    const object = new SessionDurableObject(host);
+    const object = new SessionObject(host);
     const outcome = await object.deliver("s1", thread, "hello", "evt-1", 10);
     expect(outcome.kind).toBe("accepted");
     expect((await object.session("s1"))?.id).toBe("s1");
@@ -307,14 +307,14 @@ describe("durable object wrappers", () => {
 describe("index writes", () => {
   test("a lookup stores the id it returns", async () => {
     const host = new Host();
-    const index = new ThreadIndexDurableObject(host);
+    const index = new ThreadIndexObject(host);
     const id = await index.lookup(thread);
     expect(await host.get(indexKey(thread))).toBe(id);
   });
 
   test("a second lookup leaves the stored id untouched", async () => {
     const host = new Host();
-    const index = new ThreadIndexDurableObject(host);
+    const index = new ThreadIndexObject(host);
     await index.lookup(thread);
     const writes = host.writes;
     await index.lookup(thread);

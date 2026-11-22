@@ -2,7 +2,8 @@ import { threadKey, type ThreadRef } from "@agent/store";
 import { indexKey } from "./thread-index.ts";
 import type { StorageHost } from "./storage.ts";
 
-export class ThreadIndexDurableObject {
+/** The thread to session mapping, over one storage host. */
+export class ThreadIndexObject {
   readonly #storage: StorageHost;
 
   constructor(storage: StorageHost) {

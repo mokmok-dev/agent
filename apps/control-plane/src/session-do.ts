@@ -1,11 +1,16 @@
 import { SessionService } from "./session-service.ts";
 import { durableStorage, type StorageHost } from "./storage.ts";
 
-export class SessionDurableObject {
+/**
+ * One object per conversation. It takes a `StorageHost` and its collaborators,
+ * so a test drives the real object and `durable-objects.ts` only adapts the
+ * platform to it.
+ */
+export class SessionObject {
   readonly #service: SessionService;
 
-  constructor(storageHost: StorageHost) {
-    this.#service = new SessionService(durableStorage(storageHost));
+  constructor(storageHost: StorageHost, deps?: ConstructorParameters<typeof SessionService>[1]) {
+    this.#service = new SessionService(durableStorage(storageHost), deps);
   }
 
   deliver(...args: Parameters<SessionService["deliver"]>) {
