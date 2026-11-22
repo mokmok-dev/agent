@@ -705,11 +705,12 @@ describe("what the connection ignores", () => {
     }
   });
 
-  test("a started event for a turn that is not dispatched is ignored", async () => {
+  test("a started event claims a queued turn and moves it to running", async () => {
     const { dir, env, sessionObjects } = await deployment();
     try {
       await controlPlane(signedSession(sessionEvent("hello")), env);
-      // The turn is queued, not dispatched, so a start would be premature.
+      // The gateway reports the start before the hello's claim lands, which is
+      // what the live run did; the turn must reach `running` regardless.
       await onMessage(
         sessionObjects(),
         { sessionId: SESSION },
@@ -720,7 +721,7 @@ describe("what the connection ignores", () => {
         }),
         1_000,
       );
-      expect((await sessionObjects().turns(SESSION))[0]?.status).toBe("queued");
+      expect((await sessionObjects().turns(SESSION))[0]?.status).toBe("running");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

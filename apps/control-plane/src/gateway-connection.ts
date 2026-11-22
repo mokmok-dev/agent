@@ -97,6 +97,13 @@ export async function onMessage(
     await sessions.capability(sessionId, effect.capability, now);
     return { send: [], connection: { sessionId } };
   }
+  if (effect.kind === "start") {
+    // A start claims the turn, then moves it on: claiming and running are two
+    // moves in the state table, and the gateway's next event expects `running`.
+    await sessions.transition(sessionId, effect.turnId, { status: "dispatched" }, now);
+    await sessions.transition(sessionId, effect.turnId, { status: "running" }, now);
+    return { send: [], connection: { sessionId } };
+  }
   if (effect.kind === "settle") {
     await sessions.transition(sessionId, effect.turnId, effect.update, now);
     const replyTo = replyTargetOf(session);

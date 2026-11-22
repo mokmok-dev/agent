@@ -95,12 +95,15 @@ describe("the effect of a gateway report", () => {
     ).toEqual({ kind: "settle", turnId: "t1", update: { status: "running" } });
   });
 
-  test("a start on a queued turn is premature and ignored", () => {
+  test("a start on a queued turn claims it, because the gateway has it", () => {
+    // The re-hello and the prompt travel together, so the start can arrive
+    // before the hello's claim. The gateway holds the turn either way, and
+    // refusing it left the completion with nothing to settle.
     expect(
       effectOf({ type: "turn.started", sessionId: "s1", turnId: "t1" }, session(), [turn()]),
     ).toEqual({
-      kind: "ignore",
-      reason: "turn is queued, not dispatched",
+      kind: "start",
+      turnId: "t1",
     });
   });
 
@@ -382,6 +385,28 @@ describe("a turn id that is present but not first", () => {
       [turn({ status: "running" })],
     );
     expect(effect).not.toHaveProperty("text");
+  });
+});
+
+describe("a start on a turn that is already under way", () => {
+  test("a turn that is already running is refused by name, not settled twice", () => {
+    const started = turn({ status: "running" });
+    expect(
+      effectOf({ type: "turn.started", sessionId: "s1", turnId: "t1" }, session(), [started]),
+    ).toEqual({
+      kind: "ignore",
+      reason: "turn is running, already under way",
+    });
+  });
+
+  test("a settled turn is refused by the state it reached", () => {
+    for (const status of ["completed", "failed", "cancelled"] as const) {
+      expect(
+        effectOf({ type: "turn.started", sessionId: "s1", turnId: "t1" }, session(), [
+          turn({ status }),
+        ]),
+      ).toEqual({ kind: "ignore", reason: `turn is ${status}, already under way` });
+    }
   });
 });
 

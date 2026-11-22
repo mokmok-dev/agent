@@ -95,6 +95,10 @@
     "reason": "equivalent: these guards return the current catalog, so removing one changes nothing while 'current' already equals the published list; the offline and refusal tests pin the observable result.",
     "where": "src/ollama-cloud.ts:163:10 key === undefined -> false"
   },
+  "1xdjw5gxvhn": {
+    "reason": "equivalent: onMessage is called with the connection that already holds this session id, so a step naming it and a step naming nothing produce the same connection object.",
+    "where": "src/gateway-connection.ts:105:36 { sessionId } -> {}"
+  },
   "1xovf7dr9m6": {
     "reason": "equivalent: PROVIDER_KEYS has an entry for every provider that reaches these lines, so the empty-list fallback and the fileExists answer are never taken; pi asks for file existence only in a login flow this deployment does not run.",
     "where": "src/providers.ts:114:86 [] -> [\"Stryker was here!\"]"

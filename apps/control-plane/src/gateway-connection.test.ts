@@ -414,6 +414,28 @@ describe("frame text", () => {
   });
 });
 
+describe("a gateway's start on a turn nothing claimed", () => {
+  test("the start claims the turn and moves it to running, sending nothing back", async () => {
+    // The gateway holds the turn, so its start is the claim. Nothing is sent
+    // back: the gateway is already running the prompt.
+    const sessions = new FakeSessions(session(), [turn({ status: "queued" })]);
+    const socket = new FakeSocket();
+    socket.sessionId = "s1";
+    await handleSocketMessage(
+      sessions,
+      socket,
+      JSON.stringify({ type: "turn.started", sessionId: "s1", turnId: "t1" }),
+      90,
+      recordSettled,
+    );
+    expect(sessions.transitions).toEqual([
+      { sessionId: "s1", turnId: "t1", update: { status: "dispatched" }, now: 90 },
+      { sessionId: "s1", turnId: "t1", update: { status: "running" }, now: 90 },
+    ]);
+    expect(socket.sent).toEqual([]);
+  });
+});
+
 describe("a capability that differs from the route", () => {
   /**
    * A `stdio` agent picks its own model, so the route's wish and the agent's

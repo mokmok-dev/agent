@@ -64,6 +64,8 @@ export type GatewayReport =
 export type GatewayEffect =
   | { kind: "bind"; acpSessionId: string }
   | { kind: "capability"; capability: AgentCapability }
+  /** A gateway's start, which also claims a turn nothing else has claimed. */
+  | { kind: "start"; turnId: string }
   | { kind: "settle"; turnId: string; update: TurnUpdate; text?: string }
   | { kind: "ignore"; reason: string };
 
@@ -94,8 +96,16 @@ export function effectOf(
     case "turn.started": {
       const turn = turns.find((candidate) => candidate.id === report.turnId);
       if (turn === undefined) return { kind: "ignore", reason: "no such turn" };
-      if (turn.status !== "dispatched") {
-        return { kind: "ignore", reason: `turn is ${turn.status}, not dispatched` };
+      // A gateway that reports a turn as started has the turn, so `queued` is
+      // claimed here as well as `dispatched`. Those two arrive close together:
+      // the gateway re-hellos with the id it learned from `auto` and starts the
+      // prompt immediately, so the start can beat the hello's claim. Rejecting
+      // it left the turn `queued` and its completion had nothing to settle.
+      if (turn.status !== "queued" && turn.status !== "dispatched") {
+        return { kind: "ignore", reason: `turn is ${turn.status}, already under way` };
+      }
+      if (turn.status === "queued") {
+        return { kind: "start", turnId: turn.id };
       }
       return { kind: "settle", turnId: turn.id, update: { status: "running" } };
     }
