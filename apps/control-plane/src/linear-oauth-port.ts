@@ -8,8 +8,8 @@ import type { LinearCredential } from "./linear-oauth-do.ts";
  * tested object.
  */
 export interface LinearOAuthPort {
-  /** Store a state for a login and return it. */
-  start(): Promise<string>;
+  /** Store this state, so the callback can prove the flow started here. */
+  start(state: string): Promise<void>;
   /** Finish a login and return the stored credential. */
   complete(params: Record<string, string>, now: number): Promise<LinearCredential>;
 }
@@ -18,6 +18,9 @@ export interface LinearOAuthPort {
  * `GET /oauth/linear`: issue a state, store it, then redirect to Linear's
  * consent screen. A missing client id or secret is reported here, because a
  * consent screen with an empty client id can only fail at Linear.
+ *
+ * The state that goes into the URL is the one this function generated, and it
+ * is the one stored, so the callback's copy matches.
  */
 export async function startLogin(
   port: LinearOAuthPort,
@@ -31,7 +34,7 @@ export async function startLogin(
       { status: 503 },
     );
   }
-  await port.start();
+  await port.start(state);
   return oauthStart(config, state);
 }
 

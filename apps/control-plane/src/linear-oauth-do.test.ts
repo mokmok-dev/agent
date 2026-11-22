@@ -90,24 +90,16 @@ describe("starting a login", () => {
     expect([...host.values.keys()].sort()).toEqual(["linear:credential"]);
   });
 
-  test("writes the state before returning it, so the callback can be checked", async () => {
+  test("stores exactly the state the caller put in the consent URL", async () => {
     const { host, oauth } = object();
-    const state = await oauth.start("state-1");
-    expect(state).toBe("state-1");
+    await oauth.start("state-1");
     expect(await host.get<string>(stateKey())).toBe("state-1");
   });
 
-  test("generates a state when the caller supplies none", async () => {
-    const { host, oauth } = object();
-    const state = await oauth.start();
-    expect(state).toMatch(/^[0-9a-f]{64}$/);
-    expect(await host.get<string>(stateKey())).toBe(state);
-  });
-
-  test("verifies only the state it issued", async () => {
+  test("verifies only the state it stored", async () => {
     const { oauth } = object();
-    const state = await oauth.start("state-1");
-    expect(await oauth.verify(state)).toBe(true);
+    await oauth.start("state-1");
+    expect(await oauth.verify("state-1")).toBe(true);
     expect(await oauth.verify("other")).toBe(false);
   });
 

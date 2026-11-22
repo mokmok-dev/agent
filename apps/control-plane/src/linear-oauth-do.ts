@@ -1,6 +1,5 @@
 import {
   exchangeCode,
-  newState,
   needsRefresh,
   postForm,
   readCallback,
@@ -52,12 +51,11 @@ export class LinearOAuthObject {
   }
 
   /**
-   * Start a login. The state is written before it is returned, so the callback
-   * can prove this object began the flow.
+   * Store the state the caller put in the consent URL. The caller owns the
+   * value, so the URL and the storage cannot disagree.
    */
-  async start(state: string = newState()): Promise<string> {
+  async start(state: string): Promise<void> {
     await this.#storage.put(stateKey(), state);
-    return state;
   }
 
   /**

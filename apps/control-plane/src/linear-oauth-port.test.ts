@@ -8,15 +8,16 @@ import { envWith, OAUTH } from "./test-env.ts";
 class FakePort implements LinearOAuthPort {
   started = 0;
   readonly paramses: Record<string, string>[] = [];
+  readonly stored: string[] = [];
   answer: LinearCredential | Error;
 
   constructor(answer: LinearCredential | Error) {
     this.answer = answer;
   }
 
-  async start(): Promise<string> {
+  async start(state: string): Promise<void> {
     this.started += 1;
-    return "state-1";
+    this.stored.push(state);
   }
 
   async complete(params: Record<string, string>, _now: number): Promise<LinearCredential> {
@@ -37,7 +38,31 @@ const credential = (overrides: Partial<LinearCredential> = {}): LinearCredential
 });
 
 describe("starting the login", () => {
-  test("stores a state and redirects to Linear's consent screen", async () => {
+  test("stores the same state it puts in the URL, so the callback cannot disagree", async () => {
+    const port = new FakePort(credential());
+    const response = await startLogin(port, envWith(), oauthConfigOf(OAUTH));
+    const location = new URL(response.headers.get("location") ?? "");
+    expect(port.stored).toEqual([location.searchParams.get("state") ?? ""]);
+    expect(port.stored[0]).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test("stores the pinned state when a caller supplies one", async () => {
+    const port = new FakePort(credential());
+    const response = await startLogin(port, envWith(), oauthConfigOf(OAUTH), "pinned");
+    const location = new URL(response.headers.get("location") ?? "");
+    expect(port.stored).toEqual(["pinned"]);
+    expect(location.searchParams.get("state")).toBe("pinned");
+  });
+
+  test("a stored state is accepted by a later callback, which is the whole flow", async () => {
+    const port = new FakePort(credential());
+    await startLogin(port, envWith(), oauthConfigOf(OAUTH));
+    const stored = port.stored[0] ?? "";
+    const response = await finishLogin(port, { code: "c1", state: stored }, 0);
+    expect(response.status).toBe(200);
+  });
+
+  test("redirects to Linear's consent screen", async () => {
     const port = new FakePort(credential());
     const response = await startLogin(port, envWith(), oauthConfigOf(OAUTH));
     expect(port.started).toBe(1);
@@ -46,7 +71,7 @@ describe("starting the login", () => {
     expect(location.origin + location.pathname).toBe("https://linear.app/oauth/authorize");
     expect(location.searchParams.get("client_id")).toBe(OAUTH.LINEAR_CLIENT_ID);
     expect(location.searchParams.get("redirect_uri")).toBe(OAUTH.LINEAR_REDIRECT_URI);
-    expect(location.searchParams.get("state")).not.toBe("");
+    expect(location.searchParams.get("actor")).toBe("app");
   });
 
   test("uses the state it was given, so a test can pin it", async () => {
@@ -156,7 +181,7 @@ describe("finishing the login", () => {
 
   test("a thrown non-error still answers with its text", async () => {
     const port: LinearOAuthPort = {
-      start: async () => "",
+      start: async () => undefined,
       complete: async () => {
         throw "plain string";
       },

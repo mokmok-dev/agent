@@ -88,8 +88,8 @@ export class LinearOAuthDurableObject extends DurableObject<Env> {
     this.#object = new LinearOAuthObject(objectStorage(state.storage), oauthConfigOf(env));
   }
 
-  start(): Promise<string> {
-    return this.#object.start();
+  start(state: string): Promise<void> {
+    return this.#object.start(state);
   }
 
   complete(params: Record<string, string>, now: number): Promise<LinearCredential> {
