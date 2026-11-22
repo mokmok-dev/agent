@@ -1,3 +1,6 @@
+/** How long one turn may take before the agent is treated as unresponsive. */
+export const TURN_TIMEOUT_MS = 10 * 60_000;
+
 import {
   AcpClient,
   ProtocolError,
@@ -7,6 +10,7 @@ import {
   type AgentCapability,
   type AgentRequestHandlers,
   type McpServersShape,
+  type PromptResult,
   type SessionUpdate,
 } from "@agent/protocol";
 import { PendingPermission } from "./permission.ts";
@@ -35,6 +39,8 @@ export class AcpBridge {
   readonly #mcpServers: McpServersShape;
   /** What the agent said it can run, which is what a model choice is checked against. */
   #capability: AgentCapability | undefined;
+  /** How long one turn may take, which a test shortens so it need not wait. */
+  readonly #turnTimeoutMs: number;
   #turn: ActiveTurn | undefined;
 
   constructor(options: {
@@ -46,9 +52,12 @@ export class AcpBridge {
      * started rather than the bridge guessing.
      */
     mcpServers?: McpServersShape;
+    /** Defaults to `TURN_TIMEOUT_MS`; a test states a short one. */
+    turnTimeoutMs?: number;
   }) {
     this.#emit = options.emit;
     this.#mcpServers = options.mcpServers ?? "array";
+    this.#turnTimeoutMs = options.turnTimeoutMs ?? TURN_TIMEOUT_MS;
     const handlers: AgentRequestHandlers = {
       onSessionUpdate: (update) => this.#update(update),
       requestPermission: async (params) => {
@@ -127,7 +136,7 @@ export class AcpBridge {
     this.#turn = { turnId, sessionId, text: "" };
     this.#emit({ type: "turn.started", turnId, sessionId });
     try {
-      const result = await this.#client.prompt(acpSessionId, [{ type: "text", text }]);
+      const result = await this.#promptWithin(acpSessionId, [{ type: "text", text }]);
       this.#emit({
         type: "turn.completed",
         turnId,
@@ -140,6 +149,30 @@ export class AcpBridge {
     } finally {
       this.#turn = undefined;
     }
+  }
+
+  /**
+   * Ask the agent for one turn, giving up when it goes quiet.
+   *
+   * An agent that stops answering would otherwise hold the turn in `running`
+   * for ever: the control plane would never learn it failed, and a gateway
+   * asking for the next session would skip it because its turn is not queued.
+   * One delegated session going silent would hide every later delegation.
+   */
+  async #promptWithin(
+    acpSessionId: string,
+    prompt: { type: "text"; text: string }[],
+  ): Promise<PromptResult> {
+    // A loser of `race` cannot change the answer, so the timer needs no
+    // cleanup: a turn that answers before it fires leaves a pending reject that
+    // `race` ignores. One delegated turn every few minutes makes that cheap.
+    const expired = new Promise<never>((_, reject) => {
+      setTimeout(
+        () => reject(new Error(`the agent did not answer within ${this.#turnTimeoutMs}ms`)),
+        this.#turnTimeoutMs,
+      );
+    });
+    return await Promise.race([this.#client.prompt(acpSessionId, prompt), expired]);
   }
 
   cancel(acpSessionId: string): void {

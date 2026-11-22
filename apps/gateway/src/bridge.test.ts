@@ -513,6 +513,35 @@ describe("more attribution cases", () => {
   });
 });
 
+describe("a turn the agent never answers", () => {
+  test("fails with a reason instead of holding the turn for ever", async () => {
+    // An unanswered prompt used to sit in `running` for ever: the control plane
+    // never learned it failed, and a gateway asking for the next session skipped
+    // it because its turn was not queued. One silent session hid every later
+    // delegation, which is exactly what a live run hit.
+    const agent = new AgentRecorder();
+    const events: GatewayEvent[] = [];
+    const acp = new AcpBridge({
+      channel: agent,
+      emit: (event) => events.push(event),
+      turnTimeoutMs: 40,
+    });
+    agent.inbound = (line) => acp.receive(line);
+    void acp.open("sess-1", "/work");
+    agent.answer(1, { protocolVersion: 1 });
+    await until(() => agent.outbound().length === 2);
+    agent.answer(2, { sessionId: "acp-9" });
+    await until(() => events.length === 2);
+    // The agent accepts the prompt and then says nothing at all.
+    await acp.run("sess-1", "acp-9", "turn-1", "hello");
+    const failed = events.find((event) => event.type === "turn.failed");
+    expect(failed).toMatchObject({ turnId: "turn-1" });
+    expect((failed as { error: string }).error).toContain("did not answer within 40ms");
+    // A failed turn, not a silent one: the thread has something to say.
+    expect(events.some((event) => event.type === "turn.completed")).toBe(false);
+  });
+});
+
 describe("error messages", () => {
   test("a JSON-RPC error keeps its code", () => {
     expect(errorMessage(new ProtocolError(-32000, "auth required"))).toBe("-32000: auth required");
