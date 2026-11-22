@@ -10,7 +10,12 @@ import {
   type Storage,
 } from "./repository.ts";
 import type { ThreadRef, TurnStatus, TurnUpdate } from "./session.ts";
-import { GATEWAY_CLAIM_DEADLINE_MS, NO_GATEWAY_REASON } from "./session.ts";
+import {
+  ABANDONED_TURN_REASON,
+  GATEWAY_CLAIM_DEADLINE_MS,
+  NO_GATEWAY_REASON,
+  TURN_ABANDONED_DEADLINE_MS,
+} from "./session.ts";
 
 class MemoryStorage implements Storage {
   readonly values = new Map<string, string>();
@@ -531,13 +536,27 @@ describe("expiring the stale turns of a session", () => {
     expect((await repo.turns("s1"))[0]?.status).toBe("queued");
   });
 
-  test("a claimed turn is left alone, so a slow agent is not failed", async () => {
+  test("a claimed turn is left alone while its gateway is still reporting", async () => {
     const { repo } = repository();
     await repo.createSession("s1", thread, 5);
     const { turn } = await repo.appendTurn("s1", "hello", "evt-1", 1_000);
     await repo.transition("s1", turn.id, { status: "dispatched" }, 1_001);
-    expect(await repo.expireStaleTurns("s1", 1_000 + GATEWAY_CLAIM_DEADLINE_MS * 10)).toEqual([]);
+    // The claim deadline has passed, but the abandonment grace has not.
+    expect(await repo.expireStaleTurns("s1", 1_001 + GATEWAY_CLAIM_DEADLINE_MS)).toEqual([]);
     expect((await repo.turns("s1"))[0]?.status).toBe("dispatched");
+  });
+
+  test("a turn whose gateway stopped reporting is failed as abandoned", async () => {
+    const { repo } = repository();
+    await repo.createSession("s1", thread, 5);
+    const { turn } = await repo.appendTurn("s1", "hello", "evt-1", 1_000);
+    // A turn reaches `running` through `dispatched`, which is what a gateway
+    // claim does.
+    await repo.transition("s1", turn.id, { status: "dispatched" }, 1_001);
+    await repo.transition("s1", turn.id, { status: "running" }, 1_002);
+    const expired = await repo.expireStaleTurns("s1", 1_002 + TURN_ABANDONED_DEADLINE_MS);
+    expect(expired).toHaveLength(1);
+    expect(expired[0]).toMatchObject({ status: "failed", error: ABANDONED_TURN_REASON });
   });
 
   test("a second sweep finds the turn terminal and returns nothing", async () => {

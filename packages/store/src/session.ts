@@ -199,13 +199,35 @@ export const NO_GATEWAY_REASON =
   "no gateway claimed this turn: the runtime that hosts this agent was not connected";
 
 /**
+ * How long a turn that a gateway claimed may stay unsettled before it is
+ * treated as abandoned.
+ *
+ * A gateway that dies mid-turn leaves its turn `running` for ever: nothing
+ * settles it, and a gateway asking for the next session skips that session
+ * because its turn is not queued. One crash then hides every later delegation
+ * on the same thread. The grace is longer than any single turn should take so a
+ * slow agent is not failed early.
+ */
+export const TURN_ABANDONED_DEADLINE_MS = 30 * 60 * 1000;
+
+/** The error a turn carries when the gateway that claimed it stopped reporting. */
+export const ABANDONED_TURN_REASON =
+  "the gateway that claimed this turn stopped reporting; the run did not finish";
+
+/**
  * Whether a queued turn has waited past its claim deadline.
  *
  * Expiry is derived rather than stored, so the rule is a pure function of the
  * turn and the clock and a test can decide it without waiting.
  */
 export function hasExpired(turn: Turn, now: number, deadline = GATEWAY_CLAIM_DEADLINE_MS): boolean {
-  return turn.status === "queued" && now - turn.createdAt >= deadline;
+  if (turn.status === "queued") return now - turn.createdAt >= deadline;
+  // A claimed turn is only abandoned after the longer grace, measured from the
+  // moment the gateway last reported progress.
+  if (turn.status === "dispatched" || turn.status === "running") {
+    return now - turn.updatedAt >= TURN_ABANDONED_DEADLINE_MS;
+  }
+  return false;
 }
 
 /**
@@ -220,6 +242,9 @@ export function expireTurn(
   deadline = GATEWAY_CLAIM_DEADLINE_MS,
 ): Turn | undefined {
   if (!hasExpired(turn, now, deadline)) return undefined;
-  const result = transitionTurn(turn, session, { status: "failed", error: NO_GATEWAY_REASON }, now);
+  // A queued turn never reached a gateway; a claimed one reached it and was
+  // abandoned, which is a different thing to tell the thread.
+  const error = turn.status === "queued" ? NO_GATEWAY_REASON : ABANDONED_TURN_REASON;
+  const result = transitionTurn(turn, session, { status: "failed", error }, now);
   return result.ok ? result.next : undefined;
 }

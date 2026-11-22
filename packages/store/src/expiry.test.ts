@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import type { Session, Turn } from "./session.ts";
 import {
+  ABANDONED_TURN_REASON,
   expireTurn,
   GATEWAY_CLAIM_DEADLINE_MS,
   hasExpired,
   NO_GATEWAY_REASON,
   NO_MODEL_REASON,
   offersModel,
+  TURN_ABANDONED_DEADLINE_MS,
 } from "./session.ts";
 
 /**
@@ -62,15 +64,29 @@ describe("the claim deadline", () => {
     expect(GATEWAY_CLAIM_DEADLINE_MS).toBe(300_000);
   });
 
-  test("a claimed turn never expires, because its gateway is answering", () => {
+  test("a claimed turn outlives the claim deadline, which only governs a queued one", () => {
+    // The claim deadline governs only a turn no gateway took; a claimed turn is
+    // judged against the longer abandonment grace instead.
     for (const status of ["dispatched", "running"] as const) {
-      expect(hasExpired(turn({ status }), GATEWAY_CLAIM_DEADLINE_MS * 10)).toBe(false);
+      const fresh = turn({ status, createdAt: 0, updatedAt: 0 });
+      expect(hasExpired(fresh, GATEWAY_CLAIM_DEADLINE_MS + 1)).toBe(false);
+      expect(hasExpired(turn({ status: "queued" }), GATEWAY_CLAIM_DEADLINE_MS + 1)).toBe(true);
+    }
+  });
+
+  test("a claimed turn expires once its gateway has been silent past the grace", () => {
+    for (const status of ["dispatched", "running"] as const) {
+      const silent = turn({ status, createdAt: 0, updatedAt: 0 });
+      expect(hasExpired(silent, TURN_ABANDONED_DEADLINE_MS)).toBe(true);
+      expect(hasExpired(silent, TURN_ABANDONED_DEADLINE_MS - 1)).toBe(false);
     }
   });
 
   test("a settled turn never expires", () => {
     for (const status of ["completed", "failed", "cancelled"] as const) {
-      expect(hasExpired(turn({ status }), GATEWAY_CLAIM_DEADLINE_MS * 10)).toBe(false);
+      const settled = turn({ status, createdAt: 0, updatedAt: 0 });
+      expect(hasExpired(settled, GATEWAY_CLAIM_DEADLINE_MS * 10)).toBe(false);
+      expect(hasExpired(settled, TURN_ABANDONED_DEADLINE_MS * 10)).toBe(false);
     }
   });
 
@@ -89,6 +105,32 @@ describe("the claim deadline", () => {
   });
 });
 
+describe("an abandoned turn's reason", () => {
+  test("it names the gateway that went quiet, not the one that never arrived", () => {
+    // These are different faults and the thread has to be able to tell them
+    // apart: one is a missing runtime, the other a run that started and died.
+    expect(ABANDONED_TURN_REASON).toContain("claimed this turn");
+    expect(ABANDONED_TURN_REASON).toContain("stopped reporting");
+    expect(ABANDONED_TURN_REASON).not.toBe(NO_GATEWAY_REASON);
+  });
+
+  test("the grace is measured from when the gateway last reported, not from creation", () => {
+    // A turn claimed long after it was created must not be failed on arrival.
+    const claimedLate = turn({ status: "running", createdAt: 0, updatedAt: 500_000 });
+    expect(hasExpired(claimedLate, 500_000 + TURN_ABANDONED_DEADLINE_MS - 1)).toBe(false);
+    expect(hasExpired(claimedLate, 500_000 + TURN_ABANDONED_DEADLINE_MS)).toBe(true);
+  });
+
+  test("a refused transition yields no turn, which is what a closed session gives", () => {
+    // A closed session refuses every move, so the sweep must report nothing
+    // rather than the failed turn it could not store.
+    const abandoned = turn({ status: "running", createdAt: 0, updatedAt: 0 });
+    expect(
+      expireTurn(abandoned, session({ status: "closed" }), TURN_ABANDONED_DEADLINE_MS),
+    ).toBeUndefined();
+  });
+});
+
 describe("expiring a turn", () => {
   test("an unclaimed turn fails with a reason that names the missing gateway", () => {
     const expired = expireTurn(turn(), session(), GATEWAY_CLAIM_DEADLINE_MS);
@@ -101,9 +143,23 @@ describe("expiring a turn", () => {
     expect(expireTurn(turn(), session(), GATEWAY_CLAIM_DEADLINE_MS - 1)).toBeUndefined();
   });
 
-  test("a claimed turn is left alone, so a slow agent is not failed", () => {
-    const claimed = turn({ status: "dispatched" });
-    expect(expireTurn(claimed, session(), GATEWAY_CLAIM_DEADLINE_MS * 10)).toBeUndefined();
+  test("a claimed turn is left alone while its gateway is still reporting", () => {
+    // The claim deadline only governs a turn no gateway took. A claimed turn is
+    // judged against the longer abandonment grace instead.
+    const claimed = turn({ status: "dispatched", createdAt: 0, updatedAt: 0 });
+    expect(expireTurn(claimed, session(), GATEWAY_CLAIM_DEADLINE_MS)).toBeUndefined();
+  });
+
+  test("a claimed turn whose gateway stopped reporting is failed as abandoned", () => {
+    // A gateway that dies mid-turn leaves the turn running for ever, and a
+    // gateway asking for the next session then skips that thread altogether.
+    const abandoned = turn({ status: "running", createdAt: 0, updatedAt: 0 });
+    expect(expireTurn(abandoned, session(), TURN_ABANDONED_DEADLINE_MS)).toMatchObject({
+      status: "failed",
+      error: ABANDONED_TURN_REASON,
+    });
+    // A turn still inside the grace is left alone.
+    expect(expireTurn(abandoned, session(), TURN_ABANDONED_DEADLINE_MS - 1)).toBeUndefined();
   });
 
   test("a turn in a closed session is not failed by the sweep", () => {

@@ -32,6 +32,13 @@ function flush(): void {
 
 /** Queue an event for the control plane, which is how a failure reaches a thread. */
 function emit(event: Parameters<EventLog["append"]>[0]): void {
+  // A turn's end is the one line an operator needs from a live run, so it is
+  // printed whether or not a control plane is listening.
+  if (event.type === "turn.completed") {
+    console.error(`gateway: turn ${event.turnId} completed (${event.stopReason})`);
+  } else if (event.type === "turn.failed") {
+    console.error(`gateway: turn ${event.turnId} failed: ${event.error}`);
+  }
   log.append(event);
   flush();
 }
