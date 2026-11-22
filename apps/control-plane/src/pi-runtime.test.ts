@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { modelsFor, piRunnerFor, piRunnerOver } from "./pi-runtime.ts";
+import {
+  modelsFor,
+  piRunnerFor,
+  piRunnerOver,
+  providerConfigOf,
+  refusalText,
+  setupFor,
+} from "./pi-runtime.ts";
 import type { Env } from "./worker.ts";
 
 /**
@@ -109,5 +116,137 @@ describe("the conversation is opened once", () => {
     };
     expect(await runner.run(input)).toEqual({ kind: "unanswered", reason: "storage is gone" });
     expect(opens).toBe(1);
+  });
+});
+
+describe("the configuration a deployment states", () => {
+  test("PI_PROVIDERS is a comma-separated list, trimmed", () => {
+    expect(providerConfigOf(env({ PI_PROVIDERS: " openai , anthropic " })).providers).toEqual([
+      "openai",
+      "anthropic",
+    ]);
+  });
+
+  test("no provider list falls back to Workers AI, the model this repository ships", () => {
+    expect(providerConfigOf(env()).providers).toEqual(["cloudflare-workers-ai"]);
+  });
+
+  test("an empty or comma-only list falls back rather than registering nothing", () => {
+    expect(providerConfigOf(env({ PI_PROVIDERS: " , " })).providers).toEqual([
+      "cloudflare-workers-ai",
+    ]);
+  });
+
+  test("PI_DEFAULT_MODEL reads provider:modelId", () => {
+    expect(
+      providerConfigOf(env({ PI_DEFAULT_MODEL: "anthropic:claude-opus-4-7" })).defaultModel,
+    ).toEqual({ provider: "anthropic", modelId: "claude-opus-4-7" });
+  });
+
+  test("a model id containing colons keeps everything after the first", () => {
+    expect(
+      providerConfigOf(env({ PI_DEFAULT_MODEL: "cloudflare-workers-ai:@cf/deepseek-ai/x" }))
+        .defaultModel,
+    ).toEqual({ provider: "cloudflare-workers-ai", modelId: "@cf/deepseek-ai/x" });
+  });
+
+  test("a default model with no separator is refused by the setup, not guessed", () => {
+    expect(() => setupFor(env({ PI_DEFAULT_MODEL: "anthropic" }))).toThrow("PI_DEFAULT_MODEL");
+  });
+
+  test("a trailing separator is refused, because the model id would be empty", () => {
+    expect(() => setupFor(env({ PI_DEFAULT_MODEL: "anthropic:" }))).toThrow("PI_DEFAULT_MODEL");
+  });
+
+  test("no default model uses the shipped Workers AI model", () => {
+    expect(providerConfigOf(env()).defaultModel).toEqual({
+      provider: "cloudflare-workers-ai",
+      modelId: "@cf/deepseek-ai/deepseek-v4.1-flash",
+    });
+  });
+});
+
+describe("a misconfiguration is a named failure, not a silent fallback", () => {
+  test("an unknown provider names it", () => {
+    expect(() => setupFor(env({ PI_PROVIDERS: "nope" }))).toThrow(
+      "PI_PROVIDERS names an unknown provider: nope",
+    );
+  });
+
+  test("a default model outside the enabled providers is refused", () => {
+    expect(() =>
+      setupFor(env({ PI_PROVIDERS: "openai", PI_DEFAULT_MODEL: "anthropic:claude-opus-4-7" })),
+    ).toThrow("unknown provider: anthropic");
+  });
+
+  test("a valid configuration returns the collection and the default model", () => {
+    const setup = setupFor(env({ PI_PROVIDERS: "openai", PI_DEFAULT_MODEL: "openai:gpt-5-codex" }));
+    expect(setup.defaultModel).toEqual({ provider: "openai", modelId: "gpt-5-codex" });
+    expect(setup.models.getProvider("openai")).toBeDefined();
+  });
+});
+
+describe("the exact parsing rules", () => {
+  test("whitespace around the whole value is trimmed, so a padded secret works", () => {
+    expect(
+      providerConfigOf(env({ PI_DEFAULT_MODEL: "  openai:gpt-5-codex  " })).defaultModel,
+    ).toEqual({ provider: "openai", modelId: "gpt-5-codex" });
+  });
+
+  test("a leading separator has no provider and is refused", () => {
+    expect(() =>
+      setupFor(env({ PI_PROVIDERS: "openai", PI_DEFAULT_MODEL: ":gpt-5-codex" })),
+    ).toThrow("PI_DEFAULT_MODEL");
+  });
+
+  test("a trailing separator has no model id and is refused", () => {
+    expect(() => setupFor(env({ PI_PROVIDERS: "openai", PI_DEFAULT_MODEL: "openai:" }))).toThrow(
+      "PI_DEFAULT_MODEL",
+    );
+  });
+
+  test("a value of only whitespace falls back to the shipped model", () => {
+    expect(providerConfigOf(env({ PI_DEFAULT_MODEL: "   " })).defaultModel).toEqual({
+      provider: "cloudflare-workers-ai",
+      modelId: "@cf/deepseek-ai/deepseek-v4.1-flash",
+    });
+  });
+});
+
+describe("the message a missing key produces", () => {
+  test("names the provider and every key it needs", () => {
+    expect(refusalText({ kind: "missing-key", provider: "openai", keys: ["OPENAI_API_KEY"] })).toBe(
+      "openai needs OPENAI_API_KEY",
+    );
+    expect(
+      refusalText({
+        kind: "missing-key",
+        provider: "cloudflare-workers-ai",
+        keys: ["CLOUDFLARE_API_KEY", "CLOUDFLARE_ACCOUNT_ID"],
+      }),
+    ).toBe("cloudflare-workers-ai needs CLOUDFLARE_API_KEY and CLOUDFLARE_ACCOUNT_ID");
+  });
+
+  test("names an unknown provider and a bad default model distinctly", () => {
+    expect(refusalText({ kind: "unknown-provider", provider: "nope" })).toBe(
+      "PI_PROVIDERS names an unknown provider: nope",
+    );
+    expect(refusalText({ kind: "no-default-model" })).toBe(
+      "PI_DEFAULT_MODEL must be provider:modelId",
+    );
+  });
+});
+
+describe("the model id an operator leaves empty", () => {
+  test("provider with no model id is refused, so a turn cannot run a nameless model", () => {
+    expect(() => setupFor(env({ PI_PROVIDERS: "openai", PI_DEFAULT_MODEL: "openai:" }))).toThrow(
+      "PI_DEFAULT_MODEL must be provider:modelId",
+    );
+  });
+
+  test("model id with no provider is refused too", () => {
+    expect(() =>
+      setupFor(env({ PI_PROVIDERS: "openai", PI_DEFAULT_MODEL: ":gpt-5-codex" })),
+    ).toThrow("PI_DEFAULT_MODEL must be provider:modelId");
   });
 });

@@ -55,3 +55,8 @@ scheduling_policy = "durable_object"
 # the Linear OAuth application exactly.
 [vars]
 LINEAR_REDIRECT_URI = "https://agent-control-plane.mokmok.workers.dev/oauth/linear/callback"
+# The models a turn may run. PI_PROVIDERS is a comma-separated list of pi-ai
+# providers; PI_DEFAULT_MODEL is `provider:modelId`. A provider's key is a
+# secret named after it, for example OPENAI_API_KEY or ANTHROPIC_API_KEY.
+PI_PROVIDERS = "cloudflare-workers-ai,openai,anthropic"
+PI_DEFAULT_MODEL = "cloudflare-workers-ai:@cf/deepseek-ai/deepseek-v4.1-flash"

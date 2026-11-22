@@ -1,7 +1,7 @@
 {
-  "16x8sp1hkbj": {
-    "reason": "equivalent: the mutated code is inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun cannot construct either, so no local test can reach it. The integration is proven by the deployment, not here.",
-    "where": "src/pi-runtime.ts:60:31 false -> true"
+  "1870u2m76sn": {
+    "reason": "equivalent: with no separator indexOf returns -1, which takes the same branch as the mutated comparison; both read the whole string as a provider with an empty model id, which configureProviders then refuses.",
+    "where": "src/pi-runtime.ts:103:7 separator < 0 -> separator <= 0"
   },
   "1g6r9c17sws": {
     "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
@@ -10,6 +10,10 @@
   "1gln0a8j3jw": {
     "reason": "equivalent: a refused delivery carries no run and created no turn, so reading its run yields undefined and runNext finds nothing to run; the guards are defensive and the tests pin the observable results, no reply field and the runner never called.",
     "where": "src/session-do.ts:46:26 \"refused\" -> \"\""
+  },
+  "1ic2f0p07jk": {
+    "reason": "equivalent: PROVIDER_KEYS has an entry for every provider that reaches these lines, so the empty-list fallback and the fileExists answer are never taken; pi asks for file existence only in a login flow this deployment does not run.",
+    "where": "src/providers.ts:118:31 false -> true"
   },
   "1lup8lt6hqe": {
     "reason": "equivalent: the mutated code is inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun cannot construct either, so no local test can reach it. The integration is proven by the deployment, not here.",
@@ -27,6 +31,14 @@
     "reason": "equivalent: a refused delivery carries no run and created no turn, so reading its run yields undefined and runNext finds nothing to run; the guards are defensive and the tests pin the observable results, no reply field and the runner never called.",
     "where": "src/session-do.ts:46:9 outcome.kind === \"refused\" -> false"
   },
+  "1xovf7dr9m6": {
+    "reason": "equivalent: PROVIDER_KEYS has an entry for every provider that reaches these lines, so the empty-list fallback and the fileExists answer are never taken; pi asks for file existence only in a login flow this deployment does not run.",
+    "where": "src/providers.ts:114:86 [] -> [\"Stryker was here!\"]"
+  },
+  "1yg2xjferm7": {
+    "reason": "equivalent: the mutated line is inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun can construct neither, so the deployment is the only place this runs.",
+    "where": "src/pi-runtime.ts:46:61 { models: setup.models, registry: createRegistry(), context… -> {}"
+  },
   "1yxkyyqlsbi": {
     "reason": "equivalent: a refused delivery carries no run and created no turn, so reading its run yields undefined and runNext finds nothing to run; the guards are defensive and the tests pin the observable results, no reply field and the runner never called.",
     "where": "src/worker.ts:137:7 outcome.kind === \"refused\" -> false"
@@ -35,20 +47,20 @@
     "reason": "The final return handles linear, and the Discord test covers the branch above it, so a mutant that makes the Discord comparison false only falls through to an adapter that refuses the same unsigned body with the same 401.",
     "where": "src/worker.ts:89:19 { return errorResponse(error); } -> {}"
   },
+  "gqi8o6dbvj": {
+    "reason": "equivalent: PROVIDER_KEYS has an entry for every provider that reaches these lines, so the empty-list fallback and the fileExists answer are never taken; pi asks for file existence only in a login flow this deployment does not run.",
+    "where": "src/providers.ts:118:31 false -> undefined"
+  },
+  "hsip3324hr": {
+    "reason": "equivalent: Env values are strings or absent by construction, so treating every value as a string changes no caller; the reader is a type guard, not a runtime filter.",
+    "where": "src/pi-runtime.ts:64:12 typeof value === \"string\" -> true"
+  },
   "j4hc1r8ola": {
     "reason": "Reading a property an object does not have yields undefined either way, so the presence check and the direct read agree for both branches.",
     "where": "src/disk-host.ts:9:11 { return undefined; } -> {}"
   },
-  "ow6bfysfqa": {
-    "reason": "equivalent: the mutated code is inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun cannot construct either, so no local test can reach it. The integration is proven by the deployment, not here.",
-    "where": "src/pi-runtime.ts:44:41 { models: modelsFor(env), registry: createRegistry(), conte… -> {}"
-  },
   "vjqvy4t7fb": {
     "reason": "equivalent: the mutated code is inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun cannot construct either, so no local test can reach it. The integration is proven by the deployment, not here.",
     "where": "src/pi-runtime.ts:24:29 open(state, env) -> undefined"
-  },
-  "yz5xarkywe": {
-    "reason": "Reading a property an object does not have yields undefined either way, so a presence check and a direct read agree on both branches.",
-    "where": "src/pi-runtime.ts:51:31 false -> undefined"
   }
 }

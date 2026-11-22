@@ -19,10 +19,21 @@ export interface Namespace {
 }
 
 /** The bindings the Worker needs. Names match `wrangler.toml`. */
-export interface Env extends ProviderEnv, LinearOAuthEnv {
+export interface Env extends ProviderEnv, LinearOAuthEnv, ModelEnv {
   SESSIONS: Namespace;
   THREAD_INDEX: Namespace;
   LINEAR_OAUTH: Namespace;
+}
+
+/**
+ * The model a deployment runs, stated as configuration. `PI_PROVIDERS` is a
+ * comma-separated list and `PI_DEFAULT_MODEL` is `provider:modelId`, so an
+ * operator changes providers with `wrangler secret put` and a var rather than a
+ * deploy of new code.
+ */
+export interface ModelEnv {
+  PI_PROVIDERS?: string;
+  PI_DEFAULT_MODEL?: string;
 }
 
 interface SessionRpc {
