@@ -1363,6 +1363,8 @@ describe("the deployed entry exposes the gateway socket", () => {
     const config = await Bun.file(new URL("../wrangler.toml", import.meta.url)).text();
     expect(config).toContain('AGENT_RUNTIMES = "local-vm"');
     expect(config).toContain('AGENT_AVAILABLE_RUNTIMES = "local-vm"');
-    expect(config).toContain('AGENT_DEFAULT = "claude-code"');
+    // The default agent is the one the VM gateway starts, so the stored route
+    // names what actually answered rather than a stale default.
+    expect(config).toMatch(/^AGENT_DEFAULT = "grok-build"$/m);
   });
 });

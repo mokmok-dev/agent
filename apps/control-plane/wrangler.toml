@@ -76,6 +76,10 @@ PI_DEFAULT_MODEL = "ollama-cloud:deepseek-v4.1-flash"
 # Where a turn runs. The local VM hosts the agent's own process, so a turn is
 # handed to the gateway that serves it rather than run inside the Worker. A
 # deployment that wants the sandbox states `cloudflare-sandbox` instead.
-AGENT_DEFAULT = "claude-code"
+#
+# The agent is the one the VM gateway actually starts. Naming it here rather than
+# leaving `claude-code` makes the stored route truthful: the session record and
+# the process that answered say the same thing.
+AGENT_DEFAULT = "grok-build"
 AGENT_RUNTIMES = "local-vm"
 AGENT_AVAILABLE_RUNTIMES = "local-vm"
