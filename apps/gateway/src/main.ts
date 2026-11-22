@@ -8,6 +8,8 @@ const agentArgs = (process.env.AGENT_ARGS ?? "apps/gateway/src/agent/stdio-agent
   .split(" ")
   .filter(Boolean);
 const cwd = process.env.AGENT_CWD ?? process.cwd();
+/** The session this gateway serves, so the control plane knows whose turn to send. */
+const sessionId = process.env.AGENT_SESSION_ID;
 
 /**
  * Where this gateway hosts its agent. A gateway runs on the VM, so it always
@@ -68,6 +70,11 @@ function connect(): void {
   const opened = new WebSocket(edgeUrl);
   opened.addEventListener("open", () => {
     socket = opened;
+    // Announce which session this gateway serves, so the control plane sends
+    // that session's queued turn rather than waiting to be asked.
+    if (sessionId !== undefined) {
+      opened.send(JSON.stringify({ type: "hello", sessionId }));
+    }
     flush();
   });
   opened.addEventListener("message", (message) => {

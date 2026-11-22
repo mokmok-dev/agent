@@ -1,3 +1,4 @@
+import { GRAPHQL_URL } from "./linear-oauth.ts";
 /**
  * Linear's agent activity, which is how an agent tells a person what it is
  * doing inside a session. Linear validates the shape of each type on its side,
@@ -98,6 +99,9 @@ export function readActivityResult(body: unknown): ActivityResult {
   return sent(typeof activity.id === "string" ? activity.id : null);
 }
 
+/// The GraphQL endpoint a reply goes to when the caller does not override it.
+const DEFAULT_ENDPOINT = GRAPHQL_URL;
+
 /** A GraphQL call carrying a bearer token. */
 export type ActivityRequest = (
   url: string,
@@ -107,15 +111,19 @@ export type ActivityRequest = (
 /**
  * Send one activity. A refusal is returned, not thrown, so a failed reply can be
  * reported without losing the turn that produced it.
+ *
+ * `endpoint` exists so a local run can observe the request without contacting
+ * Linear: it is the caller's, and defaults to Linear's own URL.
  */
 export async function sendActivity(
   accessToken: string,
   input: AgentActivityInput,
   request: ActivityRequest,
+  endpoint: string = DEFAULT_ENDPOINT,
 ): Promise<ActivityResult> {
   let body: unknown;
   try {
-    body = await request("https://api.linear.app/graphql", {
+    body = await request(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${accessToken}` },
       body: JSON.stringify({

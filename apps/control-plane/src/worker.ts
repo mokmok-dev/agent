@@ -19,13 +19,14 @@ import {
   type LinearOAuthPort,
 } from "./linear-oauth-port.ts";
 import { linearReplies, type LinearReplyPort, type ReplyOutcome } from "./linear-reply.ts";
+import type { RoutingEnv } from "./routing.ts";
 
 export interface Namespace {
   getByName(name: string): unknown;
 }
 
 /** The bindings the Worker needs. Names match `wrangler.toml`. */
-export interface Env extends ProviderEnv, LinearOAuthEnv, ModelEnv {
+export interface Env extends ProviderEnv, LinearOAuthEnv, ModelEnv, RoutingEnv {
   SESSIONS: Namespace;
   THREAD_INDEX: Namespace;
   LINEAR_OAUTH: Namespace;
@@ -100,12 +101,18 @@ export async function fetch(request: Request, env: Env, now = Date.now()): Promi
     if (route.kind === "linear-oauth-status") return loginStatus(port, now);
     return finishLogin(port, callbackOf(url.searchParams), now);
   }
+
+  if (route.kind === "gateway") {
+    // A Worker reaches this only when the request is not an upgrade; the
+    // dev server handles the socket itself.
+    return Response.json({ error: "expected a WebSocket upgrade" }, { status: 426 });
+  }
   if (route.kind === "providers-status") {
     return providersStatus(env);
   }
   try {
     const result = await handleWebhook(
-      route.kind,
+      route.kind as "slack" | "discord" | "linear",
       await rawRequestOf(request),
       providerConfigOf(env),
       Math.floor(now / 1000),
@@ -166,7 +173,7 @@ export async function accept(
  * a silence looks like a hung agent; a turn that never ran returns `undefined`
  * so a deployment with no runner does not send an empty answer.
  */
-async function replyFor(
+export async function replyFor(
   port: LinearReplyPort,
   sessionId: string,
   run: { kind: string; text?: string; error?: string } | undefined,

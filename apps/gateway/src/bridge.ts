@@ -13,12 +13,13 @@ export interface AgentChannel {
 export type GatewayEvent =
   | { type: "turn.started"; turnId: string; sessionId: string }
   | { type: "turn.update"; turnId: string; sessionId: string; update: SessionUpdate }
-  | { type: "turn.completed"; turnId: string; sessionId: string; stopReason: string }
+  | { type: "turn.completed"; turnId: string; sessionId: string; stopReason: string; text: string }
   | { type: "turn.failed"; turnId: string; sessionId: string; error: string }
   | { type: "permission.asked"; turnId: string; toolCallId: string; options: string[] }
   | { type: "session.bound"; sessionId: string; acpSessionId: string };
 
-type ActiveTurn = { turnId: string; sessionId: string };
+/** The text a turn's message chunks have produced so far. */
+type ActiveTurn = { turnId: string; sessionId: string; text: string };
 
 export class AcpBridge {
   readonly #client: AcpClient;
@@ -63,11 +64,17 @@ export class AcpBridge {
   }
 
   async run(sessionId: string, acpSessionId: string, turnId: string, text: string): Promise<void> {
-    this.#turn = { turnId, sessionId };
+    this.#turn = { turnId, sessionId, text: "" };
     this.#emit({ type: "turn.started", turnId, sessionId });
     try {
       const result = await this.#client.prompt(acpSessionId, [{ type: "text", text }]);
-      this.#emit({ type: "turn.completed", turnId, sessionId, stopReason: result.stopReason });
+      this.#emit({
+        type: "turn.completed",
+        turnId,
+        sessionId,
+        stopReason: result.stopReason,
+        text: this.#turn.text,
+      });
     } catch (error) {
       this.#emit({ type: "turn.failed", turnId, sessionId, error: errorMessage(error) });
     } finally {
@@ -102,6 +109,11 @@ export class AcpBridge {
   #update(update: SessionUpdate): void {
     const turn = this.#turn;
     if (turn === undefined) return;
+    // The agent's words are what a Linear reply carries, so the chunks are
+    // collected as they arrive and the text travels with the completed event.
+    if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+      turn.text += update.content.text;
+    }
     this.#emit({ type: "turn.update", turnId: turn.turnId, sessionId: turn.sessionId, update });
   }
 }

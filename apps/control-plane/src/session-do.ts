@@ -7,9 +7,10 @@ import type { TurnRunner } from "./turn-runner.ts";
  * so a test drives the real object and the platform entry only adapts the
  * platform to it.
  *
- * A runner is optional because the two runtimes differ: the Worker supplies a
- * pi runner over this object's own storage, and a deployment with no agent
- * configured leaves it out so a delivery is recorded and nothing claims to run.
+ * Whether a turn runs here or waits for a gateway follows from the route the
+ * session chose, not from what the host happens to have: a `durable` protocol
+ * runs pi in this process, and a `stdio` protocol records the turn and leaves
+ * it queued for the gateway that hosts that agent.
  */
 export class SessionObject {
   readonly #service: SessionService;
@@ -29,9 +30,9 @@ export class SessionObject {
   }
 
   /**
-   * Record a delivery and run the turn it created, so the caller can answer
-   * with the agent's words. A refused delivery runs nothing, and a deployment
-   * with no runner records the turn and reports that it did not run.
+   * Record a delivery and run its turn when this object hosts that turn's
+   * agent. A `stdio` session is left queued for its gateway, which is what
+   * makes a VM-routed delivery reach the VM rather than a local pi loop.
    */
   async accept(
     sessionId: string,
@@ -41,12 +42,19 @@ export class SessionObject {
     now: number,
   ): Promise<unknown> {
     const outcome = await this.#service.deliver(sessionId, thread, prompt, idempotencyKey, now);
-    // A refused delivery has no queued turn, so nothing runs and the refusal is
-    // returned as it is; every other delivery runs the turn it created.
     if (outcome.kind === "refused") return outcome;
+    if (!this.#hostsTurn(outcome.selection)) return outcome;
     if (this.#runner === undefined) return outcome;
     const run = await this.#service.runNext(sessionId, this.#runner, now);
     return { ...outcome, run };
+  }
+
+  /**
+   * Whether this object runs the turn, which only a `durable` route does. A
+   * `stdio` route is a process the gateway supervises, so the turn waits there.
+   */
+  #hostsTurn(selection: { protocol: string }): boolean {
+    return selection.protocol === "durable";
   }
 
   session(...args: Parameters<SessionService["session"]>) {

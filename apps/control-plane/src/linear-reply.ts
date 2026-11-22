@@ -32,6 +32,7 @@ export type ReplyOutcome =
 export function linearReplies(
   oauth: LinearOAuthPort,
   request: ActivityRequest = postActivity,
+  endpoint?: string,
 ): LinearReplyPort {
   const send = async (
     sessionId: string,
@@ -45,6 +46,7 @@ export function linearReplies(
       access.token,
       { agentSessionId: sessionId, content },
       request,
+      endpoint,
     );
     return result.kind === "sent"
       ? { kind: "sent", activityId: result.activityId }
