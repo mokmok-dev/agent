@@ -44,6 +44,16 @@ function emit(event: Parameters<EventLog["append"]>[0]): void {
   // printed whether or not a control plane is listening.
   if (event.type === "turn.completed") {
     console.error(`gateway: turn ${event.turnId} completed (${event.stopReason})`);
+    // The session this gateway served is done. A gateway asked for the next one
+    // by name, so it must go back to asking, or it stays bound to a finished
+    // thread and every later delegation waits for a gateway that will never
+    // come. The agent is closed too: the next session is a different
+    // conversation, and its ACP session id belongs to it.
+    if (autoSession) {
+      serving = undefined;
+      acpSessionId = undefined;
+      setTimeout(reconnect, 200);
+    }
   } else if (event.type === "turn.failed") {
     console.error(`gateway: turn ${event.turnId} failed: ${event.error}`);
   }
@@ -110,6 +120,10 @@ startAgent();
 let acpSessionId: string | undefined;
 /** The session this connection serves, once the control plane has named it. */
 let serving: string | undefined = sessionId;
+/** Whether this gateway asked the control plane for its session. */
+const autoSession = sessionId === undefined;
+/** Reconnects, so a finished session can give way to the next one. */
+let reconnect: () => void = () => undefined;
 
 /**
  * The control plane's answer to a hello. A gateway that asked for `auto` did not
@@ -231,6 +245,12 @@ const connect = (): void => {
     // no ACP session and start two agents.
     queue = queue.then(() => handleCommand(String(message.data)));
   });
+  reconnect = () => {
+    // A finished turn leaves an idle-but-open socket; closing it is what makes
+    // the next connection ask for work again.
+    if (opened.readyState === WebSocket.OPEN) opened.close();
+    else socket = undefined;
+  };
   opened.addEventListener("close", () => {
     socket = undefined;
     // A gateway that asked for `auto` and never got a session was told there is

@@ -51,6 +51,8 @@ interface SessionRpc {
   active(sessionId: string): Promise<Turn | undefined>;
   /** The oldest queued turn, which is what a gateway waiting for work serves. */
   next(sessionId: string): Promise<Turn | undefined>;
+  /** Fail the turns that no gateway claimed or that an abandoned run left. */
+  expire(sessionId: string, now: number): Promise<unknown>;
   /**
    * A delivery either reaches a turn, which carries the run it produced, or is
    * refused, which carries no run.
@@ -201,6 +203,12 @@ export async function resolveGatewaySession(
     const sessions = env.SESSIONS.getByName(sessionId) as SessionRpc;
     const queued = await sessions.next(sessionId);
     if (queued !== undefined) return sessionId;
+    // A session with nothing queued may still be holding an abandoned turn.
+    // Nothing else would ever sweep it: the sweep runs on a gateway message,
+    // and this poll is the one event that keeps arriving. Sweeping here stops
+    // the turn from hiding its thread for ever; a turn it fails is reported to
+    // the thread by the sweep itself, so there is nothing more to hand out.
+    await sessions.expire(sessionId, Date.now());
   }
   return undefined;
 }

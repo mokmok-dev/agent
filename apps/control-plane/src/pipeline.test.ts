@@ -9,6 +9,7 @@ import { SessionObject } from "./session-do.ts";
 import { ThreadIndexObject } from "./thread-index-do.ts";
 import { DiskHost } from "./disk-host.ts";
 import { routingPolicyOf } from "./routing.ts";
+import { ABANDONED_TURN_REASON, TURN_ABANDONED_DEADLINE_MS } from "@agent/store";
 import {
   fetch as controlPlane,
   resolveGatewaySession,
@@ -1012,6 +1013,38 @@ describe("the gateway route and the executor choice", () => {
       expect(probe.seen).toBe(SESSION);
       expect(probe.received?.headers.get("x-client")).toBe("kept");
       expect(probe.received?.headers.get("upgrade")).toBe("websocket");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a poll releases a session whose abandoned turn no sweep would reach", async () => {
+    // The sweep runs on a gateway message, and a gateway with nothing queued
+    // never sends one, so an abandoned turn would hide its thread for ever.
+    // The poll is the one event that keeps arriving, so it sweeps.
+    const { dir, env } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("for the gateway")), env);
+      // Claim the turn, then age it past the abandonment grace by writing the
+      // running turn with an old timestamp, which is what a crashed gateway
+      // leaves behind.
+      const objects = env.SESSIONS as unknown as {
+        getByName(id: string): {
+          transition(id: string, turnId: string, update: unknown, now: number): Promise<unknown>;
+          turns(id: string): Promise<Array<{ status: string; error: string | null }>>;
+        };
+      };
+      const session = objects.getByName(SESSION);
+      await session.transition(SESSION, "t1", { status: "dispatched" }, 1_000);
+      const longAgo = Date.now() - TURN_ABANDONED_DEADLINE_MS - 1_000;
+      await session.transition(SESSION, "t1", { status: "queued" }, 1_000);
+      await session.transition(SESSION, "t1", { status: "dispatched" }, longAgo);
+      await session.transition(SESSION, "t1", { status: "running" }, longAgo);
+      // Nothing is queued, so the poll sweeps; the abandoned turn is failed
+      // and the session reports it rather than staying invisible.
+      expect(await resolveGatewaySession(env, "auto")).toBeUndefined();
+      const [turn] = await session.turns(SESSION);
+      expect(turn).toMatchObject({ status: "failed", error: ABANDONED_TURN_REASON });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
