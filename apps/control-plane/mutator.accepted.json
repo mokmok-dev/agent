@@ -1,4 +1,8 @@
 {
+  "13l9javw0b2": {
+    "reason": "equivalent: Bun's atob and the Worker runtime both accept an unpadded base64url segment, and every length these tests use decodes either way; the branch only names whether padding is added.",
+    "where": "src/access.ts:223:15 padded.length % 4 === 0 -> true"
+  },
   "14rpc7jlt98": {
     "reason": "equivalent: an id that is not a string is already absent from the catalog, a capability entry that is not a string never equals a name, and a context length that is not a positive number reads as unknown either way.",
     "where": "src/ollama-cloud.ts:80:7 typeof id !== \"string\" -> false"
@@ -31,9 +35,17 @@
     "reason": "equivalent: a session that reads as present still yields no queued turn, because its turn list is empty either way.",
     "where": "src/gateway-connection.ts:49:7 session === undefined -> false"
   },
+  "1c8xm3ywxx": {
+    "reason": "equivalent: ext only affects whether the key can be re-exported, and a verify-only import of a public key cannot be exported either way, so the flag changes nothing observable.",
+    "where": "src/access.ts:204:60 true -> false"
+  },
   "1c9zoa3d49k": {
     "reason": "equivalent: an unparseable frame has no session id, so it is not a report and the same 'nothing to send' step is returned through the next guard.",
     "where": "src/gateway-connection.ts:69:7 parsed === undefined -> false"
+  },
+  "1edt7aq19ra": {
+    "reason": "equivalent: importKey rejects an unusable public key whatever the exportable flag, so both settings produce the same refusal.",
+    "where": "src/access.ts:206:7 false -> true"
   },
   "1eqm5gbnrzy": {
     "reason": "equivalent: open() needs a Durable Object's SQLite, which workerd cannot provide on this host; the conversation wiring it builds is exercised by the pi turn runner test over the same ConversationBase.",
@@ -79,6 +91,10 @@
     "reason": "Equivalent: an omitted encoding still parses as JSON in Bun, and an emptied catch body falls through to the same undefined return.",
     "where": "src/disk-host.ts:19:11 { return undefined; } -> {}"
   },
+  "1opkanv50i4": {
+    "reason": "equivalent: reading one byte past a typed array yields undefined, which Uint8Array assignment discards, so the extra iteration adds no element.",
+    "where": "src/access.ts:226:19 i < binary.length -> i <= binary.length"
+  },
   "1qwe8wspo1m": {
     "reason": "equivalent: the sweep always writes the missing-gateway reason, so the fallback string is unreachable while the sweep is its only producer.",
     "where": "src/session-do.ts:85:48 \"no gateway claimed this turn\" -> \"\""
@@ -111,6 +127,10 @@
     "reason": "equivalent: an empty credential list and a provider absent from the list both render credential: null, so the fallback array changes no response a caller sees.",
     "where": "src/worker.ts:194:9 [] -> [\"Stryker was here!\"]"
   },
+  "23sfjmu4i86": {
+    "reason": "equivalent: an empty catch falls off the function and returns undefined, exactly as the explicit return does.",
+    "where": "src/access.ts:215:11 { return false; } -> {}"
+  },
   "28ae8xhmcwf": {
     "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
     "where": "src/ollama-cloud.ts:174:26 \"application/json\" -> \"\""
@@ -139,6 +159,10 @@
     "reason": "equivalent: the two conditions are exclusive in practice (a reply exists only for an existing session), so the || and && forms agree.",
     "where": "src/session-do.ts:107:11 reply === undefined || session === undefined -> (reply === undefined && session === undefined)"
   },
+  "6vlhi6ylrx": {
+    "reason": "equivalent: an empty pad string is what the no-padding branch produces anyway, so replacing the pad character only changes a string that is never long enough to matter.",
+    "where": "src/access.ts:223:46 \"=\" -> \"\""
+  },
   "7iv5ui4aoq": {
     "reason": "equivalent: a missing text field and an undefined one behave the same at the reply, and an array carries no type field so it is refused by the next check.",
     "where": "src/gateway-plane.ts:176:12 typeof params === \"object\" -> true"
@@ -162,6 +186,10 @@
   "cs1jt5mgxq": {
     "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
     "where": "src/ollama-cloud.ts:181:11 { // A refresh is best effort: pi keeps the previous list o… -> {}"
+  },
+  "cxgxxima8k": {
+    "reason": "equivalent: a string cannot carry a key id, so the object check and the id check agree for every primitive; an array with an id is rejected by the explicit Array.isArray guard, which a test covers.",
+    "where": "src/access.ts:183:7 typeof candidate === \"object\" -> true"
   },
   "e76qr3n2yy": {
     "reason": "equivalent: the transport's content type and ok check are covered by the request and refusal tests; the remaining bodies are the best-effort catch, whose failure mode is the same 'keep the current list' outcome.",
@@ -222,6 +250,10 @@
   "vjqvy4t7fb": {
     "reason": "equivalent: the mutated code is inside open(), which needs a Durable Object's SQLite and cloudflare:workers; Bun cannot construct either, so no local test can reach it. The integration is proven by the deployment, not here.",
     "where": "src/pi-runtime.ts:24:29 open(state, env) -> undefined"
+  },
+  "xfog2howbs": {
+    "reason": "equivalent: an empty catch falls off the function and returns undefined, exactly as the explicit return does.",
+    "where": "src/access.ts:235:11 { return undefined; } -> {}"
   },
   "znxbknwwin": {
     "reason": "equivalent: these guards return the current catalog, so removing one changes nothing while 'current' already equals the published list; the offline and refusal tests pin the observable result.",

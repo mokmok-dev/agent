@@ -20,13 +20,14 @@ import {
 } from "./linear-oauth-port.ts";
 import { linearReplies, type LinearReplyPort, type ReplyOutcome } from "./linear-reply.ts";
 import type { RoutingEnv } from "./routing.ts";
+import { accessConfigOf, verifyAccess, type AccessEnv, type AccessRefused } from "./access.ts";
 
 export interface Namespace {
   getByName(name: string): unknown;
 }
 
 /** The bindings the Worker needs. Names match `wrangler.toml`. */
-export interface Env extends ProviderEnv, LinearOAuthEnv, ModelEnv, RoutingEnv {
+export interface Env extends ProviderEnv, LinearOAuthEnv, ModelEnv, RoutingEnv, AccessEnv {
   SESSIONS: Namespace;
   THREAD_INDEX: Namespace;
   LINEAR_OAUTH: Namespace;
@@ -124,6 +125,21 @@ export async function fetch(request: Request, env: Env, now = Date.now()): Promi
         { status: 400 },
       );
     }
+    // A gateway is a machine acting on a thread, so this is the one route Access
+    // must cover. Access itself cannot do it: it protects the whole hostname,
+    // and Linear's webhooks and the OAuth callback have to stay open. A
+    // deployment that states no Access settings trusts the network instead.
+    const access = accessConfigOf(env);
+    let gatewayId = "";
+    if (access !== undefined) {
+      const verified = await verifyAccess(request, access, now);
+      if (verified.kind === "refused") {
+        return accessRefusal(verified.refusal);
+      }
+      // The service token's name is what makes a log line say which machine
+      // connected, so it is carried to the object that records the binding.
+      gatewayId = verified.value.subject;
+    }
     // `auto` is a gateway that connected before the delegation it serves: a
     // Linear agent session does not exist until someone delegates, so there is
     // no id to name yet. The newest session with a queued turn is the one
@@ -139,12 +155,14 @@ export async function fetch(request: Request, env: Env, now = Date.now()): Promi
       fetch(request: Request): Promise<Response>;
     };
     // The object is named by its id, but a gateway that asked for `auto` needs
-    // to be told which one it reached. The header carries that across the
-    // handoff, because the upgrade request itself is the only channel.
-    const forwarded = new Request(request, {
-      headers: new Headers([...request.headers, ["x-agent-session", sessionId]]),
-    });
-    return object.fetch(forwarded);
+    // to be told which one it reached. `set` replaces rather than appends: a
+    // client that sends this header would otherwise have its value joined to
+    // the real one, and the gateway would serve a session id that does not
+    // exist.
+    const headers = new Headers(request.headers);
+    headers.set("x-agent-session", sessionId);
+    headers.set("x-agent-gateway", gatewayId);
+    return object.fetch(new Request(request, { headers }));
   }
   if (route.kind === "providers-status") {
     return providersStatus(env);
@@ -229,6 +247,34 @@ export async function resolveGatewaySession(
  */
 async function waitingSessionFor(env: Env): Promise<string | undefined> {
   return resolveGatewaySession(env, "auto");
+}
+
+/**
+ * The answer to a gateway Access refused.
+ *
+ * `401` rather than `403`: the caller can fix this by presenting a credential,
+ * and Access itself answers `401` with a `WWW-Authenticate` header for the same
+ * reason. The reason is named so an operator does not have to guess which of
+ * the checks failed.
+ */
+export function accessRefusal(refusal: AccessRefused): Response {
+  const message =
+    refusal.kind === "keys-unavailable"
+      ? `the Access team domain answered ${refusal.status}`
+      : refusal.kind === "unknown-key"
+        ? `the Access token names key ${refusal.kid}, which the team does not publish`
+        : refusal.kind === "wrong-issuer"
+          ? `the token was issued by ${refusal.issuer}, not this team`
+          : refusal.kind === "malformed"
+            ? `the Access token is malformed: ${refusal.reason}`
+            : refusal.kind === "no-token"
+              ? "this route needs a Cloudflare Access token"
+              : refusal.kind === "expired"
+                ? "the Access token has expired"
+                : refusal.kind === "wrong-audience"
+                  ? "the Access token is for another application"
+                  : "the Access token signature does not verify";
+  return Response.json({ error: message, refusal: refusal.kind }, { status: 401 });
 }
 
 /**

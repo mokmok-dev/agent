@@ -226,8 +226,35 @@ async function handleCommand(text: string): Promise<void> {
   }
 }
 
+/** The Access service token this gateway presents, when the deployment uses Access. */
+const accessHeaders = (): Record<string, string> => {
+  const id = process.env.CF_ACCESS_CLIENT_ID;
+  const secret = process.env.CF_ACCESS_CLIENT_SECRET;
+  // Both halves are needed; one alone is a configuration mistake Access refuses
+  // with the same answer as no token at all, so the gateway says so here
+  // instead of looking like the control plane rejected it.
+  if (id === undefined || secret === undefined || id === "" || secret === "") return {};
+  return { "CF-Access-Client-Id": id, "CF-Access-Client-Secret": secret };
+};
+
+/**
+ * The options Bun's `WebSocket` takes, which its typings do not describe.
+ *
+ * A header is the only way to present a service token on an upgrade, and Bun
+ * sends it (verified against a local server). The cast is narrow because the
+ * standard typings have no room for it, and passing `undefined` keeps the
+ * call unchanged for a deployment that does not use Access.
+ */
+function socketOptions(headers: Record<string, string>): never | undefined {
+  if (Object.keys(headers).length === 0) return undefined;
+  return { headers } as never;
+}
+
 const connect = (): void => {
-  const opened = new WebSocket(edgeUrl);
+  const headers = accessHeaders();
+  // A gateway is a machine, so it authenticates as one: Access exchanges these
+  // for a JWT before the request reaches the Worker, which verifies that JWT.
+  const opened = new WebSocket(edgeUrl, socketOptions(headers));
   /** One connection's frames, handled in order. */
   let queue: Promise<void> = Promise.resolve();
   opened.addEventListener("open", () => {

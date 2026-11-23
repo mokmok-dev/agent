@@ -912,6 +912,200 @@ describe("the gateway route and the executor choice", () => {
     }
   });
 
+  test("an upgrade without an Access token is refused when the deployment uses Access", async () => {
+    // Access could not cover this itself: protecting the whole hostname also
+    // closes Linear's webhooks and the OAuth callback, which a browser
+    // redirect cannot authenticate. The route checks the one path a machine
+    // acts on.
+    const { dir, env } = await deployment();
+    try {
+      const guarded = {
+        ...env,
+        ACCESS_TEAM_DOMAIN: "mokmok.cloudflareaccess.com",
+        ACCESS_AUD: "aud-tag",
+      } as Env;
+      const response = await controlPlane(
+        new Request("https://x/gateway?session=s1", { headers: { upgrade: "websocket" } }),
+        guarded,
+      );
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({
+        error: "this route needs a Cloudflare Access token",
+        refusal: "no-token",
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the client's session header is replaced, not appended, and the gateway id is carried", async () => {
+    // Two things the handoff must get right: an appended header names a session
+    // that does not exist, and the gateway id is what makes a log line say
+    // which machine connected.
+    const { dir, env } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("for the gateway")), env);
+      const seen: { session?: string | null; gateway?: string | null } = {};
+      const probe = {
+        ...env,
+        SESSIONS: {
+          getByName: (id: string) => {
+            const real = env.SESSIONS.getByName(id) as {
+              next(sessionId: string): Promise<unknown>;
+            };
+            return {
+              next: (sessionId: string) => real.next(sessionId),
+              fetch: async (request: Request) => {
+                seen.session = request.headers.get("x-agent-session");
+                seen.gateway = request.headers.get("x-agent-gateway");
+                return new Response(null, { status: 101 });
+              },
+            };
+          },
+        },
+      } as Env;
+      const response = await controlPlane(
+        new Request("https://x/gateway?session=auto", {
+          headers: { upgrade: "websocket", "x-agent-session": "client-junk" },
+        }),
+        probe,
+      );
+      expect(response.status).toBe(101);
+      // The client's value is replaced, not joined to the real one.
+      expect(seen.session).toBe(SESSION);
+      // A deployment without Access trusts its network, so it names no machine.
+      expect(seen.gateway).toBe("");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a gateway with a valid Access token reaches its session", async () => {
+    // The other half of the gate: a refusal is useless if a good token is also
+    // refused. This mints a token the deployment's stated team signs and drives
+    // the route with the real verifier.
+    const { dir, env } = await deployment();
+    try {
+      await controlPlane(signedSession(sessionEvent("through access")), env);
+      const team = "mokmok.cloudflareaccess.com";
+      const audience = "aud-tag";
+      const pair = (await crypto.subtle.generateKey(
+        {
+          name: "RSASSA-PKCS1-v1_5",
+          modulusLength: 2048,
+          publicExponent: new Uint8Array([1, 0, 1]),
+          hash: "SHA-256",
+        },
+        true,
+        ["sign", "verify"],
+      )) as CryptoKeyPair;
+      const jwk = (await crypto.subtle.exportKey("jwk", pair.publicKey)) as JsonWebKey;
+      const b64 = (bytes: Uint8Array) =>
+        btoa(String.fromCharCode(...bytes))
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_")
+          .replace(/=+$/, "");
+      const encoder = new TextEncoder();
+      const head = b64(encoder.encode(JSON.stringify({ alg: "RS256", kid: "k1" })));
+      const body = b64(
+        encoder.encode(
+          JSON.stringify({
+            iss: `https://${team}`,
+            aud: [audience],
+            exp: Math.floor(Date.now() / 1000) + 600,
+            common_name: "gateway-machine",
+          }),
+        ),
+      );
+      const signature = await crypto.subtle.sign(
+        "RSASSA-PKCS1-v1_5",
+        pair.privateKey,
+        encoder.encode(`${head}.${body}`),
+      );
+      const jwt = `${head}.${body}.${b64(new Uint8Array(signature))}`;
+
+      const realFetch = globalThis.fetch;
+      let seen: { session?: string | null; gateway?: string | null } = {};
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        // The certs document is the only fetch the verifier makes.
+        if (url.includes("/cdn-cgi/access/certs")) {
+          return Response.json({ keys: [{ ...jwk, kid: "k1", alg: "RS256" }] });
+        }
+        return Response.json({ error: "unexpected" }, { status: 500 });
+      }) as unknown as typeof fetch;
+      try {
+        const guarded = {
+          ...env,
+          ACCESS_TEAM_DOMAIN: team,
+          ACCESS_AUD: audience,
+          SESSIONS: {
+            getByName: (id: string) => {
+              const inner = env.SESSIONS.getByName(id) as {
+                next(sessionId: string): Promise<unknown>;
+              };
+              return {
+                next: (sessionId: string) => inner.next(sessionId),
+                fetch: async (request: Request) => {
+                  seen = {
+                    session: request.headers.get("x-agent-session"),
+                    gateway: request.headers.get("x-agent-gateway"),
+                  };
+                  return new Response(null, { status: 101 });
+                },
+              };
+            },
+          },
+        } as Env;
+        const response = await controlPlane(
+          new Request("https://x/gateway?session=auto", {
+            headers: { upgrade: "websocket", "cf-access-jwt-assertion": jwt },
+          }),
+          guarded,
+        );
+        expect(response.status).toBe(101);
+        expect(seen.session).toBe(SESSION);
+        // The service token's name reaches the object, so the binding says which
+        // machine served the session.
+        expect(seen.gateway).toBe("gateway-machine");
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the webhook and OAuth routes stay open when Access guards the gateway", async () => {
+    // These three are the reason the whole-hostname toggle had to go: a
+    // webhook cannot present an Access token, and an OAuth callback is a
+    // browser redirect.
+    const { dir, env } = await deployment();
+    try {
+      const guarded = {
+        ...env,
+        ACCESS_TEAM_DOMAIN: "mokmok.cloudflareaccess.com",
+        ACCESS_AUD: "aud-tag",
+      } as Env;
+      const health = await controlPlane(new Request("https://x/health"), guarded);
+      expect(health.status).toBe(200);
+      // An unsigned Linear delivery reaches the signature check, which answers
+      // 401 for its own reason rather than Access's.
+      const webhook = await controlPlane(
+        new Request("https://x/webhooks/linear", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ type: "AgentSessionEvent", action: "created" }),
+        }),
+        guarded,
+      );
+      expect(webhook.status).toBe(401);
+      expect(JSON.stringify(await webhook.json())).not.toContain("Access token");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("an upgrade naming a session is handed to that session's object", async () => {
     const { dir } = await deployment();
     try {
@@ -1398,9 +1592,12 @@ describe("the deployed entry exposes the gateway socket", () => {
     // the names may wrap, so the check is on the identifiers a handoff needs.
     expect(source).toContain("env.SESSIONS.getByName(sessionId)");
     // The handoff is a `fetch` on that object, carrying the id it resolved so a
-    // gateway that asked for `auto` learns which session it reached.
-    expect(source).toContain("object.fetch(forwarded)");
-    expect(source).toContain('new Headers([...request.headers, ["x-agent-session", sessionId]])');
+    // gateway that asked for `auto` learns which session it reached. The header
+    // is set, not appended: a client-supplied value would otherwise be joined to
+    // the real one and name a session that does not exist.
+    expect(source).toContain("object.fetch(new Request(request, { headers }))");
+    expect(source).toContain('headers.set("x-agent-session", sessionId)');
+    expect(source).not.toContain('new Headers([...request.headers, ["x-agent-session"');
     expect(source).toContain("?session=<id>");
   });
 
