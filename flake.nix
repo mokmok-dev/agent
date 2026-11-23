@@ -125,6 +125,7 @@
               deadnix.enable = true;
               statix.enable = true;
             };
+            package = pkgs.prek;
           };
 
           treefmt = {
