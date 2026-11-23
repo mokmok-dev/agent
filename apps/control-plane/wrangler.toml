@@ -83,3 +83,22 @@ PI_DEFAULT_MODEL = "ollama-cloud:deepseek-v4.1-flash"
 AGENT_DEFAULT = "grok-build"
 AGENT_RUNTIMES = "local-vm"
 AGENT_AVAILABLE_RUNTIMES = "local-vm"
+
+# Cloudflare Access on `/gateway`, off until both are stated.
+#
+# Access in front of the whole hostname cannot be used here: Linear's webhooks
+# and the OAuth callback have to stay open, and neither can present an Access
+# token. The Worker therefore verifies Access itself, on `/gateway` only. With
+# these unstated the route trusts its caller, which is what the deployment does
+# while the gateway runs from a trusted machine; the network is the boundary.
+#
+# To turn it on:
+#   wrangler secret put ACCESS_TEAM_DOMAIN   # e.g. team.cloudflareaccess.com
+#   wrangler secret put ACCESS_AUD           # the application's audience tag
+#   # and give the gateway its service token:
+#   CF_ACCESS_CLIENT_ID=... CF_ACCESS_CLIENT_SECRET=... bun apps/gateway/src/main.ts
+#
+# Order matters: set the two secrets after the service token exists, or the
+# gateway cannot reach the deployment it serves.
+# ACCESS_TEAM_DOMAIN = ""
+# ACCESS_AUD = ""
